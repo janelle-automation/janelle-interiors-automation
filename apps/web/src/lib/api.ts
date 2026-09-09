@@ -1,6 +1,17 @@
 import { supabase } from './supabase';
 
-const BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? 'http://localhost:4000';
+/**
+ * Where the API lives.
+ *
+ * In a deployed build the API is served from the same origin (Vercel routes
+ * /api/* to the serverless function), so an empty base gives same-origin
+ * requests and no CORS. Set VITE_API_BASE_URL to override — for example when
+ * the API is hosted separately.
+ */
+const BASE = (
+  (import.meta.env.VITE_API_BASE_URL as string | undefined) ??
+  (import.meta.env.PROD ? '' : 'http://localhost:4055')
+).replace(/\/+$/, '');
 
 /**
  * Thin fetch wrapper that attaches the current Supabase access token
