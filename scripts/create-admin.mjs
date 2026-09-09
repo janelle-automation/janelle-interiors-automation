@@ -24,7 +24,7 @@ if (!url || !serviceKey) {
   process.exit(1);
 }
 
-const EMAIL = process.argv[2] || 'admin@janelle.test';
+const EMAIL = process.argv[2] || 'systems@janelleinteriors.com';
 const PASSWORD = process.argv[3] || 'JanelleAdmin!2026';
 const FULL_NAME = 'Janelle (Admin)';
 
