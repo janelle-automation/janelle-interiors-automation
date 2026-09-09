@@ -1,0 +1,119 @@
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
+import type { Session } from '@supabase/supabase-js';
+import { supabase, supabaseConfigured } from '../lib/supabase';
+import { api } from '../lib/api';
+import type { UserRole } from '@janelle/shared';
+
+interface Profile {
+  id: string;
+  org_id: string | null;
+  full_name: string | null;
+  email: string | null;
+  role: UserRole;
+}
+
+interface SessionUser {
+  id: string;
+  email: string | null;
+  name: string;
+  role: UserRole;
+}
+
+interface AuthCtx {
+  /** Supabase env present — auth is possible. */
+  configured: boolean;
+  /** Initial session + profile resolution in progress. */
+  loading: boolean;
+  session: Session | null;
+  profile: Profile | null;
+  user: SessionUser | null;
+  /** Set when the profile could not be loaded (e.g. API unreachable). */
+  profileError: string | null;
+  refresh: () => Promise<void>;
+  signOut: () => Promise<void>;
+}
+
+const Ctx = createContext<AuthCtx | null>(null);
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [loading, setLoading] = useState(true);
+  const [session, setSession] = useState<Session | null>(null);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
+
+  /** Load the profile for the current session, bootstrapping if needed. */
+  const loadProfile = useCallback(async () => {
+    setProfileError(null);
+    try {
+      const me = await api<{ profile: Profile | null }>('/me');
+      if (me.profile?.org_id) {
+        setProfile(me.profile);
+        return;
+      }
+      // No profile yet — provision org + profile on first sign-in.
+      const created = await api<Profile>('/auth/bootstrap', { method: 'POST', body: '{}' });
+      setProfile(created);
+    } catch (err) {
+      setProfile(null);
+      setProfileError((err as Error).message || 'Could not reach the server.');
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!supabaseConfigured || !supabase) {
+      setLoading(false);
+      return;
+    }
+
+    let active = true;
+
+    supabase.auth.getSession().then(async ({ data }) => {
+      if (!active) return;
+      setSession(data.session);
+      if (data.session) await loadProfile();
+      setLoading(false);
+    });
+
+    const { data: sub } = supabase.auth.onAuthStateChange(async (_e, next) => {
+      setSession(next);
+      if (next) await loadProfile();
+      else setProfile(null);
+    });
+
+    return () => {
+      active = false;
+      sub.subscription.unsubscribe();
+    };
+  }, [loadProfile]);
+
+  const signOut = async () => {
+    if (supabase) await supabase.auth.signOut();
+    setSession(null);
+    setProfile(null);
+    setProfileError(null);
+  };
+
+  const user: SessionUser | null =
+    session && profile
+      ? {
+          id: session.user.id,
+          email: session.user.email ?? profile.email,
+          name: profile.full_name ?? session.user.email ?? 'Team member',
+          role: profile.role,
+        }
+      : null;
+
+  return (
+    <Ctx.Provider
+      value={{ configured: supabaseConfigured, loading, session, profile, user, profileError, refresh: loadProfile, signOut }}
+    >
+      {children}
+    </Ctx.Provider>
+  );
+}
+
+export function useAuth() {
+  const c = useContext(Ctx);
+  if (!c) throw new Error('useAuth must be used within AuthProvider');
+  return c;
+}

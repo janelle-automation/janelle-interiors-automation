@@ -1,0 +1,223 @@
+<title>Janelle Workflow Status</title>
+<meta name="description" content="A plain-language status update on the Janelle Interiors AI workflow system — what it does for the studio and what is live now." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,400;1,9..144,500&family=Instrument+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+<style>
+  :root{
+    --paper:#F4F0E8; --surface:#FBF8F2; --sunk:#EAE3D6;
+    --ink:#24201A; --ink-soft:#5B5346; --ink-faint:#8A7F6E;
+    --line:#D8CFBF; --line-soft:#E4DCCD;
+    --brass:#A17C3A; --brass-deep:#856330; --olive:#54603B; --good:#5C7A4C;
+    --shadow:0 1px 2px rgba(36,32,26,.05), 0 12px 30px -18px rgba(36,32,26,.30);
+    color-scheme:light;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --paper:#17140F; --surface:#211D16; --sunk:#100E0A;
+      --ink:#ECE5D8; --ink-soft:#B1A794; --ink-faint:#867B6A;
+      --line:#332D23; --line-soft:#2A251C;
+      --brass:#CBA463; --brass-deep:#B58D4C; --olive:#93A06F; --good:#8AA773;
+      --shadow:0 1px 2px rgba(0,0,0,.30), 0 18px 40px -20px rgba(0,0,0,.65);
+      color-scheme:dark;
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#17140F; --surface:#211D16; --sunk:#100E0A;
+    --ink:#ECE5D8; --ink-soft:#B1A794; --ink-faint:#867B6A;
+    --line:#332D23; --line-soft:#2A251C;
+    --brass:#CBA463; --brass-deep:#B58D4C; --olive:#93A06F; --good:#8AA773;
+    --shadow:0 1px 2px rgba(0,0,0,.30), 0 18px 40px -20px rgba(0,0,0,.65);
+    color-scheme:dark;
+  }
+
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:"Instrument Sans",system-ui,sans-serif;font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:940px;margin:0 auto;padding:clamp(20px,4vw,56px) clamp(18px,4vw,44px) 80px}
+  h1,h2,h3{margin:0;font-family:"Fraunces",Georgia,serif;font-weight:600;line-height:1.12;text-wrap:balance;letter-spacing:-.01em}
+  p{margin:0 0 1em}
+  .eyebrow{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--brass);font-weight:500}
+  .mono{font-family:"IBM Plex Mono",ui-monospace,monospace}
+
+  .toggle{position:fixed;top:14px;right:14px;z-index:20;display:inline-flex;align-items:center;gap:7px;font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-soft);background:var(--surface);border:1px solid var(--line);padding:7px 11px;border-radius:999px;cursor:pointer;box-shadow:var(--shadow)}
+  .toggle:hover{color:var(--ink);border-color:var(--brass)}
+  .toggle:focus-visible{outline:2px solid var(--brass);outline-offset:2px}
+
+  .masthead{border-top:2px solid var(--ink);padding-top:18px}
+  .mast-row{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap}
+  .live{display:inline-flex;align-items:center;gap:8px;font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--good);background:color-mix(in srgb,var(--good) 12%,transparent);border:1px solid color-mix(in srgb,var(--good) 40%,transparent);padding:5px 11px;border-radius:999px}
+  .live .dot{width:7px;height:7px;border-radius:50%;background:var(--good);box-shadow:0 0 0 0 color-mix(in srgb,var(--good) 60%,transparent);animation:pulse 2.4s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--good) 55%,transparent)}70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
+  h1{font-size:clamp(2rem,5vw,3.4rem);margin:.3em 0 .2em;max-width:15ch}
+  .sub{font-family:"Fraunces",Georgia,serif;font-style:italic;font-weight:400;font-size:clamp(1.05rem,2.1vw,1.3rem);color:var(--ink-soft);max-width:62ch}
+  .lede{margin-top:26px;font-size:clamp(1.05rem,2vw,1.18rem);line-height:1.55;color:var(--ink-soft);max-width:64ch}
+  .lede b{color:var(--ink);font-weight:600}
+
+  section{margin-top:clamp(40px,6vw,60px)}
+  .sec-head{display:flex;align-items:baseline;gap:12px;border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:24px}
+  .sec-head h2{font-size:clamp(1.4rem,3vw,1.9rem)}
+  .sec-head .n{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--brass)}
+
+  .cards{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+  @media(max-width:680px){.cards{grid-template-columns:1fr}}
+  .card{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:20px 20px 22px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:8px}
+  .card .top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .card .ico{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;background:color-mix(in srgb,var(--brass) 14%,transparent);color:var(--brass-deep)}
+  .card .tag{font-family:"IBM Plex Mono",monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--good);background:color-mix(in srgb,var(--good) 12%,transparent);padding:3px 8px;border-radius:5px}
+  .card h3{font-size:1.14rem;margin-top:4px}
+  .card p{margin:0;font-size:14.5px;line-height:1.5;color:var(--ink-soft)}
+  .card p b{color:var(--ink);font-weight:600}
+
+  .promise{margin-top:30px;border-left:3px solid var(--brass);background:linear-gradient(90deg,color-mix(in srgb,var(--brass) 8%,transparent),transparent 72%);border-radius:0 12px 12px 0;padding:22px 24px}
+  .promise h3{font-family:"Fraunces",Georgia,serif;font-style:italic;font-weight:500;font-size:clamp(1.15rem,2.4vw,1.5rem);color:var(--ink);margin-bottom:14px}
+  .promise ul{margin:0;padding:0;list-style:none;display:grid;gap:10px}
+  .promise li{position:relative;padding-left:26px;font-size:15px;color:var(--ink-soft)}
+  .promise li b{color:var(--ink);font-weight:600}
+  .promise li::before{content:"✓";position:absolute;left:0;top:0;color:var(--good);font-weight:700}
+
+  .status{margin-top:30px;display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  @media(max-width:680px){.status{grid-template-columns:1fr}}
+  .stat{border:1px solid var(--line);background:var(--surface);border-radius:12px;padding:18px 20px}
+  .stat .k{font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint)}
+  .stat .v{margin-top:8px;font-family:"Fraunces",Georgia,serif;font-size:1.05rem;font-weight:500;color:var(--ink);line-height:1.3}
+
+  .next{margin-top:26px;border:1px dashed var(--line);border-radius:12px;padding:18px 20px;background:var(--sunk)}
+  .next .k{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--brass);margin-bottom:8px}
+  .next p{margin:0;font-size:14.5px;color:var(--ink-soft)}
+  .next b{color:var(--ink)}
+
+  footer{margin-top:56px;padding-top:20px;border-top:2px solid var(--ink);display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;font-family:"IBM Plex Mono",monospace;font-size:11.5px;letter-spacing:.05em;color:var(--ink-faint)}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<button class="toggle" id="tg" aria-label="Toggle light or dark theme"><span id="tglabel">Theme</span></button>
+
+<div class="wrap">
+  <header class="masthead">
+    <div class="mast-row">
+      <span class="eyebrow">Status update · September 2026</span>
+      <span class="live"><span class="dot"></span> Live on your account</span>
+    </div>
+    <h1>Your studio's new assistant</h1>
+    <p class="sub">It reads your email and Drive, keeps every project organized, and drafts the chasing — so less slips through the cracks, and you spend less time on admin.</p>
+
+    <p class="lede">Here's the simple version: the assistant works quietly in the background on top of the tools you already use. <b>You keep working in Houzz Pro and Gmail.</b> It reads what comes in, files it against the right project, prepares the replies and reminders, and shows you everything in one calm place. <b>Nothing is ever sent without you.</b></p>
+  </header>
+
+  <section>
+    <div class="sec-head"><span class="n">01</span><h2>What it does for you</h2></div>
+    <div class="cards">
+
+      <div class="card">
+        <div class="top">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18v14H3z"/><path d="m3 6 9 7 9-7"/></svg></span>
+          <span class="tag">Live</span>
+        </div>
+        <h3>Reads and sorts your inbox</h3>
+        <p>Every project email is read and understood — it tells a <b>vendor quote</b> from an <b>order confirmation</b> from a <b>client approval</b>, and files each against the right project and vendor.</p>
+      </div>
+
+      <div class="card">
+        <div class="top">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6v18h12V7l-4-4Z"/><path d="M14 3v4h4"/><path d="M9 13h6M9 17h4"/></svg></span>
+          <span class="tag">Live</span>
+        </div>
+        <h3>Turns quotes into tracked records</h3>
+        <p>When a quote or confirmation arrives as a PDF, it pulls out the vendor, the items and the total, and <b>creates the purchase order, vendor and project for you</b> — no re-typing.</p>
+      </div>
+
+      <div class="card">
+        <div class="top">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3Z"/></svg></span>
+          <span class="tag">Live</span>
+        </div>
+        <h3>Writes your replies</h3>
+        <p>For each quote, confirmation or approval, it drafts a warm, professional reply — <b>addressed to the right person, with the right people copied.</b> You read it, tweak it, and send.</p>
+      </div>
+
+      <div class="card">
+        <div class="top">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6Z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg></span>
+          <span class="tag">Live</span>
+        </div>
+        <h3>Chases what's gone quiet</h3>
+        <p>It watches for <b>vendors who've gone silent</b>, <b>client approvals that are overdue</b>, and <b>delivery dates that are slipping</b> — and prepares a gentle nudge for each, ready for you to send.</p>
+      </div>
+
+      <div class="card">
+        <div class="top">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2 6 4-14 2 8h6"/></svg></span>
+          <span class="tag">Live</span>
+        </div>
+        <h3>Keeps each project's status current</h3>
+        <p>As email comes in, a project <b>moves itself along</b> — spec, approval, production, shipping — so your board always reflects where things really are, without you updating it.</p>
+      </div>
+
+      <div class="card">
+        <div class="top">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="M3 13l9 5 9-5"/></svg></span>
+          <span class="tag">Live</span>
+        </div>
+        <h3>A timeline for every project</h3>
+        <p>Open any project to see <b>everything that's happened, in order</b> — the emails, the documents, the orders — so you can catch up on a project in seconds.</p>
+      </div>
+
+      <div class="card">
+        <div class="top">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V4"/><path d="M4 20h16"/><rect x="7" y="12" width="3" height="5"/><rect x="12" y="8" width="3" height="9"/><rect x="17" y="14" width="3" height="3"/></svg></span>
+          <span class="tag">Live</span>
+        </div>
+        <h3>Your Monday-morning summary</h3>
+        <p>A weekly report of the whole studio in one read: <b>what moved, what's on order, what's overdue, and what needs a decision from you.</b></p>
+      </div>
+
+      <div class="card">
+        <div class="top">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6v18h12V7l-4-4Z"/><path d="M14 3v4h4"/></svg></span>
+          <span class="tag">Live</span>
+        </div>
+        <h3>Every draft in one place</h3>
+        <p>All the replies and reminders it writes wait for you <b>inside the app</b> — review, edit and send on your terms. Nothing is auto-sent, and nothing clutters your Gmail.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <div class="promise">
+    <h3>The three promises this system keeps</h3>
+    <ul>
+      <li><b>Nothing is ever sent without you.</b> Every message is a draft you approve.</li>
+      <li><b>Your tools don't change.</b> Keep working in Houzz Pro and Gmail exactly as you do today.</li>
+      <li><b>The access is yours.</b> It's connected to your Google account and you can revoke that at any moment.</li>
+    </ul>
+  </div>
+
+  <section>
+    <div class="sec-head"><span class="n">02</span><h2>Where it stands today</h2></div>
+    <div class="status">
+      <div class="stat"><div class="k">Connected</div><div class="v">Live on your real Gmail &amp; Drive</div></div>
+      <div class="stat"><div class="k">Working</div><div class="v">Reading new email every few seconds</div></div>
+      <div class="stat"><div class="k">Already doing</div><div class="v">Sorting mail, parsing quotes, drafting replies</div></div>
+    </div>
+    <div class="next">
+      <div class="k">A couple of things still to add</div>
+      <p>A <b>Houzz Pro project import</b> so existing projects arrive with their client, budget and install dates already filled in, and a few finishing touches to the studio dashboard. Everything above is running now.</p>
+    </div>
+  </section>
+
+  <footer>
+    <span>Janelle Interiors · AI Workflow System</span>
+    <span>Status update · September 2026</span>
+  </footer>
+</div>
+
+<script>
+  (function(){
+    var btn=document.getElementById('tg'),label=document.getElementById('tglabel'),root=document.documentElement;
+    function cur(){var t=root.getAttribute('data-theme');return t?t:(window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');}
+    function sync(){label.textContent=cur()==='dark'?'Light':'Dark';}
+    btn.addEventListener('click',function(){root.setAttribute('data-theme',cur()==='dark'?'light':'dark');sync();});
+    sync();
+  })();
+</script>

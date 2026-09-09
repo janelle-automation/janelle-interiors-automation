@@ -1,0 +1,78 @@
+import { useState, type FormEvent } from 'react';
+import { supabase } from '../lib/supabase';
+
+export default function Login() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!supabase) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const google = async () => {
+    if (!supabase) return;
+    setError(null);
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: window.location.origin },
+    });
+    if (error) setError(error.message);
+  };
+
+  return (
+    <div className="grid min-h-screen place-items-center px-6">
+      <div className="w-full max-w-sm">
+        <div className="mb-8 flex items-center gap-3">
+          <div className="grid h-11 w-11 place-items-center rounded-xl bg-brass text-xl font-bold text-white">J</div>
+          <div>
+            <div className="text-[16px] font-semibold text-ink">Janelle Interiors</div>
+            <div className="text-[12px] text-ink-faint">Workflow System</div>
+          </div>
+        </div>
+
+        <div className="card p-7">
+          <h1 className="text-[20px] font-bold text-ink">Sign in</h1>
+          <p className="mb-5 mt-1 text-[13px] text-ink-soft">Use your studio email and password.</p>
+
+          <form onSubmit={submit} className="space-y-3">
+            <input className="input" type="email" required placeholder="you@studio.com" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
+            <input className="input" type="password" required minLength={6} placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+
+            {error && <p className="rounded-lg bg-crit/10 px-3 py-2 text-[12.5px] text-crit">{error}</p>}
+
+            <button type="submit" disabled={busy} className="btn-primary w-full">
+              {busy ? 'Please wait…' : 'Sign in'}
+            </button>
+          </form>
+
+          <div className="my-4 flex items-center gap-3 text-ink-faint">
+            <span className="h-px flex-1 bg-line" />
+            <span className="text-[12px]">or</span>
+            <span className="h-px flex-1 bg-line" />
+          </div>
+
+          <button onClick={google} className="btn-secondary w-full">
+            Continue with Google
+          </button>
+
+          <p className="mt-4 text-[12px] leading-relaxed text-ink-faint">
+            The system reads Gmail and Drive and creates drafts — it never sends on your behalf. Access is scoped and revocable.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}

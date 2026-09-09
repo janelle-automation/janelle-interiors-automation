@@ -1,0 +1,481 @@
+import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { NavLink, Link, useLocation } from 'react-router-dom';
+import { useTheme } from '../context/ThemeContext';
+import { useAuth } from '../context/AuthContext';
+import { useFollowUps, useDrafts, ageFrom } from '../lib/queries';
+import { ROLE_LABELS } from '@janelle/shared';
+import {
+  IconDashboard, IconProjects, IconVendors, IconInbox, IconDoc,
+  IconPrompt, IconBell, IconReport, IconActivity, IconSettings, IconSun, IconMoon,
+  IconLogout, IconArrow,
+} from './icons';
+
+type NavItem = { to: string; label: string; Icon: typeof IconDashboard; end?: boolean };
+
+const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
+  {
+    title: 'Studio',
+    items: [
+      { to: '/', label: 'Dashboard', Icon: IconDashboard, end: true },
+      { to: '/projects', label: 'Projects', Icon: IconProjects },
+      { to: '/vendors', label: 'Vendors & POs', Icon: IconVendors },
+    ],
+  },
+  {
+    title: 'Intelligence',
+    items: [
+      { to: '/inbox', label: 'Inbox', Icon: IconInbox },
+      { to: '/documents', label: 'Documents', Icon: IconDoc },
+      { to: '/prompts', label: 'Prompt Studio', Icon: IconPrompt },
+    ],
+  },
+  {
+    title: 'Automation',
+    items: [
+      { to: '/follow-ups', label: 'Follow-ups', Icon: IconBell },
+      { to: '/drafts', label: 'Drafts', Icon: IconDoc },
+      { to: '/reports', label: 'Reports', Icon: IconReport },
+      { to: '/activity', label: 'Audit Log', Icon: IconActivity },
+    ],
+  },
+];
+
+const SETTINGS_ITEM: NavItem = { to: '/settings', label: 'Settings', Icon: IconSettings };
+
+const PAGE_TITLES: Record<string, string> = {
+  '/': 'Dashboard',
+  '/projects': 'Projects',
+  '/vendors': 'Vendors & POs',
+  '/inbox': 'Inbox',
+  '/documents': 'Documents',
+  '/prompts': 'Prompt Studio',
+  '/follow-ups': 'Follow-ups',
+  '/drafts': 'Drafts',
+  '/reports': 'Reports',
+  '/activity': 'Audit Log',
+  '/settings': 'Settings',
+};
+
+const COLLAPSE_KEY = 'janelle.sidebar.collapsed';
+
+function readCollapsed(): boolean {
+  try {
+    return localStorage.getItem(COLLAPSE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function Brand({ collapsed }: { collapsed: boolean }) {
+  return (
+    <Link to="/" className={`focusable flex items-center gap-3 rounded-lg ${collapsed ? 'justify-center px-0' : 'px-2'} py-1`}>
+      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brass text-[17px] font-bold text-white">J</div>
+      {!collapsed && (
+        <div className="min-w-0 leading-tight">
+          <div className="truncate text-[15px] font-semibold text-nav-text">Janelle Interiors</div>
+          <div className="text-[11px] font-medium text-nav-muted">Workflow System</div>
+        </div>
+      )}
+    </Link>
+  );
+}
+
+function NavItemLink({ item, collapsed, onNavigate }: { item: NavItem; collapsed: boolean; onNavigate?: () => void }) {
+  const { to, label, Icon, end } = item;
+  return (
+    <NavLink
+      to={to}
+      end={end}
+      onClick={onNavigate}
+      title={collapsed ? label : undefined}
+      className={({ isActive }) =>
+        `focusable group relative flex items-center gap-3 rounded-lg text-[14px] transition-colors ${
+          collapsed ? 'justify-center px-0 py-2.5' : 'px-3 py-[9px]'
+        } ${
+          isActive
+            ? 'bg-nav-hover font-semibold text-nav-text'
+            : 'font-medium text-nav-muted hover:bg-nav-hover hover:text-nav-text'
+        }`
+      }
+    >
+      {({ isActive }) => (
+        <>
+          {isActive && (
+            <span className="absolute -left-3 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r bg-brass" aria-hidden="true" />
+          )}
+          <Icon className={`shrink-0 ${isActive ? 'text-brass' : 'text-nav-muted group-hover:text-nav-text'}`} />
+          {!collapsed && <span className="truncate">{label}</span>}
+        </>
+      )}
+    </NavLink>
+  );
+}
+
+function DoubleChevron({ flipped }: { flipped: boolean }) {
+  return (
+    <svg
+      width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+      className={`transition-transform duration-300 ease-out ${flipped ? 'rotate-180' : ''}`}
+      aria-hidden="true"
+    >
+      <path d="M11 17l-5-5 5-5" />
+      <path d="M18 17l-5-5 5-5" />
+    </svg>
+  );
+}
+
+function Sidebar({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: () => void }) {
+  return (
+    <div className="flex h-full flex-col bg-nav">
+      <div className={`flex items-center border-b border-white/10 px-3 py-3 ${collapsed ? 'justify-center' : ''}`}>
+        <Brand collapsed={collapsed} />
+      </div>
+
+      <nav className={`flex-1 space-y-5 overflow-y-auto px-3 pt-4 ${collapsed ? 'space-y-3' : ''}`}>
+        {NAV_GROUPS.map((g) => (
+          <div key={g.title}>
+            {collapsed ? (
+              <div className="mx-auto mb-2 h-px w-6 bg-white/10" aria-hidden="true" />
+            ) : (
+              <div className="mb-1.5 px-3 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-nav-muted/70">{g.title}</div>
+            )}
+            <div className="space-y-0.5">
+              {g.items.map((item) => (
+                <NavItemLink key={item.to} item={item} collapsed={collapsed} onNavigate={onNavigate} />
+              ))}
+            </div>
+          </div>
+        ))}
+      </nav>
+
+      <div className="border-t border-white/10 px-3 py-3">
+        <NavItemLink item={SETTINGS_ITEM} collapsed={collapsed} onNavigate={onNavigate} />
+      </div>
+    </div>
+  );
+}
+
+function ThemeButton() {
+  const { resolved, toggle } = useTheme();
+  return (
+    <button
+      onClick={toggle}
+      aria-label="Toggle light or dark theme"
+      title={resolved === 'dark' ? 'Switch to light' : 'Switch to dark'}
+      className="focusable grid h-9 w-9 place-items-center rounded-lg text-ink-soft transition-colors hover:bg-sunk hover:text-ink"
+    >
+      {resolved === 'dark' ? <IconSun /> : <IconMoon />}
+    </button>
+  );
+}
+
+const FOLLOW_LABEL: Record<string, string> = {
+  vendor_silence: 'Vendor silent',
+  client_approval_overdue: 'Approval overdue',
+  date_slipping: 'Date slipping',
+  spec_gap: 'Spec gap',
+};
+const FOLLOW_TONE: Record<string, string> = {
+  vendor_silence: 'bg-warn',
+  client_approval_overdue: 'bg-crit',
+  date_slipping: 'bg-crit',
+  spec_gap: 'bg-brass',
+};
+
+/** Closes a popover on outside click or Escape. */
+function useDismiss(open: boolean, close: () => void, ref: RefObject<HTMLElement>) {
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) close();
+    };
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && close();
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open, close, ref]);
+}
+
+function CheckIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 6L9 17l-5-5" />
+    </svg>
+  );
+}
+
+function EmptyRow({ title, body }: { title: string; body: string }) {
+  return (
+    <li className="flex flex-col items-center px-6 py-8 text-center">
+      <span className="grid h-9 w-9 place-items-center rounded-full bg-good/10 text-good"><CheckIcon /></span>
+      <span className="mt-2.5 text-[13.5px] font-semibold text-ink">{title}</span>
+      <span className="mt-0.5 text-[12.5px] text-ink-soft">{body}</span>
+    </li>
+  );
+}
+
+function NotificationsMenu() {
+  const { data: followUps } = useFollowUps();
+  const { data: drafts } = useDrafts();
+  const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<'followups' | 'drafts'>('followups');
+  const ref = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => setOpen(false), []);
+  useDismiss(open, close, ref);
+
+  const count = followUps.length + drafts.length;
+  const badge = count > 9 ? '9+' : String(count);
+  const summary = count === 0 ? 'All caught up' : count === 1 ? '1 needs a person' : `${count} need a person`;
+
+  const tabs = [
+    { key: 'followups' as const, label: 'Follow-ups', n: followUps.length },
+    { key: 'drafts' as const, label: 'Drafts', n: drafts.length },
+  ];
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={count > 0 ? `${count} notifications` : 'Notifications'}
+        title="Notifications"
+        className={`focusable relative grid h-9 w-9 place-items-center rounded-lg transition-colors hover:bg-sunk hover:text-ink ${open ? 'bg-sunk text-ink' : 'text-ink-soft'}`}
+      >
+        <IconBell className={count > 0 && !open ? 'bell-ring' : ''} />
+        {count > 0 && (
+          <span className="absolute right-1 top-1 grid h-4 min-w-4 place-items-center rounded-full bg-crit px-1 text-[10px] font-bold leading-none text-white ring-2 ring-surface">
+            {badge}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div
+          role="dialog"
+          aria-label="Notifications"
+          className="popover absolute right-0 top-full z-50 mt-1.5 w-[380px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-line bg-surface shadow-pop"
+        >
+          <div className="flex items-center justify-between border-b border-line-soft px-4 py-3">
+            <div className="text-[14px] font-semibold text-ink">Notifications</div>
+            <span className="text-[12px] text-ink-faint">{summary}</span>
+          </div>
+
+          <div className="flex gap-1 border-b border-line-soft px-2 pt-2">
+            {tabs.map((t) => (
+              <button
+                key={t.key}
+                onClick={() => setTab(t.key)}
+                className={`focusable -mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-[13px] font-medium transition-colors ${
+                  tab === t.key ? 'border-brass text-ink' : 'border-transparent text-ink-soft hover:text-ink'
+                }`}
+              >
+                {t.label}
+                <span className={`rounded-full px-1.5 text-[11px] font-semibold ${t.n > 0 ? 'bg-brass/10 text-brass-deep' : 'bg-sunk text-ink-faint'}`}>{t.n}</span>
+              </button>
+            ))}
+          </div>
+
+          <ul className="max-h-[360px] divide-y divide-line-soft overflow-y-auto">
+            {tab === 'followups' && followUps.length === 0 && (
+              <EmptyRow title="No open follow-ups" body="Nothing is waiting on a vendor or a client right now." />
+            )}
+            {tab === 'followups' &&
+              followUps.slice(0, 8).map((f) => (
+                <li key={f.id}>
+                  <Link to="/follow-ups" onClick={close} className="focusable flex gap-3 px-4 py-3 transition-colors hover:bg-sunk/60">
+                    <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${FOLLOW_TONE[f.type] ?? 'bg-ink-faint'}`} aria-hidden="true" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13.5px] font-semibold text-ink">{f.who}</span>
+                      <span className="block truncate text-[12.5px] text-ink-soft">
+                        {FOLLOW_LABEL[f.type] ?? f.type}
+                        {f.reason ? ` · ${f.reason}` : ''}
+                      </span>
+                      <span className="mt-0.5 block text-[11.5px] text-ink-faint">{f.project} · {f.age}</span>
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            {tab === 'drafts' && drafts.length === 0 && (
+              <EmptyRow title="No drafts waiting" body="Reply drafts appear here after Gmail is read." />
+            )}
+            {tab === 'drafts' &&
+              drafts.slice(0, 8).map((d) => (
+                <li key={d.id}>
+                  <Link to="/drafts" onClick={close} className="focusable flex gap-3 px-4 py-3 transition-colors hover:bg-sunk/60">
+                    <span className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-md bg-brass/10 text-brass-deep">
+                      <IconDoc width={15} height={15} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13.5px] font-semibold text-ink">{d.subject ?? 'Untitled draft'}</span>
+                      {d.body_preview && <span className="block truncate text-[12.5px] text-ink-soft">{d.body_preview}</span>}
+                      <span className="mt-0.5 block text-[11.5px] text-ink-faint">Waiting in Gmail · {ageFrom(d.created_at)}</span>
+                    </span>
+                  </Link>
+                </li>
+              ))}
+          </ul>
+
+          <div className="border-t border-line-soft bg-sunk/40 px-4 py-2.5">
+            <Link
+              to={tab === 'followups' ? '/follow-ups' : '/drafts'}
+              onClick={close}
+              className="focusable inline-flex items-center gap-1 text-[13px] font-semibold text-brass-deep hover:underline"
+            >
+              {tab === 'followups' ? 'Open follow-up inbox' : 'Open all drafts'} <IconArrow width={14} height={14} />
+            </Link>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UserMenu() {
+  const { user, signOut } = useAuth();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  const close = useCallback(() => setOpen(false), []);
+  useDismiss(open, close, ref);
+
+  const initial = (user?.name ?? '?').slice(0, 1).toUpperCase();
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="focusable flex items-center gap-2.5 rounded-lg py-1 pl-1 pr-2 transition-colors hover:bg-sunk"
+      >
+        <span className="grid h-8 w-8 place-items-center rounded-full bg-brass text-[13px] font-bold text-white">{initial}</span>
+        <span className="hidden text-left leading-tight md:block">
+          <span className="block max-w-[160px] truncate text-[13px] font-semibold text-ink">{user?.name}</span>
+          <span className="block text-[11px] text-ink-faint">{user ? ROLE_LABELS[user.role] : ''}</span>
+        </span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`hidden text-ink-faint transition-transform md:block ${open ? 'rotate-180' : ''}`}>
+          <path d="M6 9l6 6 6-6" />
+        </svg>
+      </button>
+
+      {open && (
+        <div role="menu" className="popover absolute right-0 top-full z-50 mt-1.5 w-60 overflow-hidden rounded-xl border border-line bg-surface shadow-pop">
+          <div className="border-b border-line-soft px-4 py-3">
+            <div className="truncate text-[13.5px] font-semibold text-ink">{user?.name}</div>
+            <div className="truncate text-[12px] text-ink-faint">{user?.email}</div>
+          </div>
+          <div className="p-1.5">
+            <Link
+              to="/settings"
+              role="menuitem"
+              onClick={() => setOpen(false)}
+              className="focusable flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13.5px] text-ink-soft transition-colors hover:bg-sunk hover:text-ink"
+            >
+              <IconSettings width={16} height={16} /> Settings
+            </Link>
+            <button
+              role="menuitem"
+              onClick={() => signOut()}
+              className="focusable flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13.5px] text-ink-soft transition-colors hover:bg-sunk hover:text-ink"
+            >
+              <IconLogout width={16} height={16} /> Sign out
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MenuIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+      <path d="M4 6h16M4 12h16M4 18h16" />
+    </svg>
+  );
+}
+
+export function AppShell({ children }: { children: ReactNode }) {
+  const [drawer, setDrawer] = useState(false);
+  const [collapsed, setCollapsed] = useState<boolean>(readCollapsed);
+  const location = useLocation();
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+  }, [collapsed]);
+
+  const base = '/' + location.pathname.split('/')[1];
+  const pageTitle = PAGE_TITLES[base] ?? PAGE_TITLES['/'];
+
+  return (
+    <div className="flex min-h-screen">
+      {/* Sidebar — desktop */}
+      <aside
+        className={`relative z-40 hidden shrink-0 bg-nav transition-[width] duration-200 ease-out lg:block ${collapsed ? 'w-[68px]' : 'w-60'}`}
+      >
+        <div className="sticky top-0 h-screen">
+          <Sidebar collapsed={collapsed} />
+        <button
+          onClick={() => setCollapsed((v) => !v)}
+          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          className="focusable sidebar-toggle absolute -right-3 top-[22px] grid h-6 w-6 place-items-center rounded-full border border-line bg-surface text-ink-soft shadow-card hover:border-brass hover:text-brass-deep"
+        >
+          <DoubleChevron flipped={collapsed} />
+        </button>
+        </div>
+      </aside>
+
+      {/* Sidebar — mobile drawer */}
+      {drawer && (
+        <div className="fixed inset-0 z-40 lg:hidden">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setDrawer(false)} />
+          <aside className="absolute left-0 top-0 h-full w-60 shadow-pop">
+            <Sidebar collapsed={false} onNavigate={() => setDrawer(false)} />
+          </aside>
+        </div>
+      )}
+
+      {/* Main column */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="sticky top-0 z-30 flex h-16 items-center gap-3 border-b border-line bg-surface px-4 md:px-6">
+          {/* Mobile: open drawer. Desktop: collapse/expand sidebar. */}
+          <button
+            className="focusable grid h-9 w-9 place-items-center rounded-lg text-ink-soft transition-colors hover:bg-sunk hover:text-ink lg:hidden"
+            onClick={() => setDrawer(true)}
+            aria-label="Open navigation"
+          >
+            <MenuIcon />
+          </button>
+          <button
+            className="focusable hidden h-9 w-9 place-items-center rounded-lg text-ink-soft transition-colors hover:bg-sunk hover:text-ink lg:grid"
+            onClick={() => setCollapsed((v) => !v)}
+            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            <MenuIcon />
+          </button>
+
+          <h1 className="hidden shrink-0 text-[15px] font-semibold text-ink sm:block">{pageTitle}</h1>
+
+          <div className="ml-auto flex items-center gap-1">
+            <NotificationsMenu />
+            <ThemeButton />
+            <span className="mx-2 hidden h-6 w-px bg-line sm:block" aria-hidden="true" />
+            <UserMenu />
+          </div>
+        </header>
+
+        <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 md:px-8 md:py-8">{children}</main>
+      </div>
+    </div>
+  );
+}

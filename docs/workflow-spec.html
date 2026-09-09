@@ -1,0 +1,573 @@
+<title>Janelle Workflow System</title>
+<meta name="description" content="Functional specification for the Janelle Interiors AI Workflow System — React, Node.js and Supabase.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,400;1,9..144,500&family=Instrument+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<style>
+  :root{
+    --paper:#F4F0E8;
+    --surface:#FBF8F2;
+    --sunk:#EAE3D6;
+    --ink:#24201A;
+    --ink-soft:#5B5346;
+    --ink-faint:#8A7F6E;
+    --line:#D8CFBF;
+    --line-soft:#E4DCCD;
+    --brass:#A17C3A;
+    --brass-deep:#856330;
+    --olive:#54603B;
+    --good:#5C7A4C;
+    --warn:#B07E33;
+    --crit:#A0483A;
+    --shadow:0 1px 2px rgba(36,32,26,.05), 0 12px 30px -18px rgba(36,32,26,.30);
+    --maxw:1000px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --paper:#17140F;
+      --surface:#211D16;
+      --sunk:#100E0A;
+      --ink:#ECE5D8;
+      --ink-soft:#B1A794;
+      --ink-faint:#867B6A;
+      --line:#332D23;
+      --line-soft:#2A251C;
+      --brass:#CBA463;
+      --brass-deep:#B58D4C;
+      --olive:#93A06F;
+      --good:#8AA773;
+      --warn:#CDA055;
+      --crit:#CB6E5D;
+      --shadow:0 1px 2px rgba(0,0,0,.30), 0 18px 40px -20px rgba(0,0,0,.65);
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#17140F;
+    --surface:#211D16;
+    --sunk:#100E0A;
+    --ink:#ECE5D8;
+    --ink-soft:#B1A794;
+    --ink-faint:#867B6A;
+    --line:#332D23;
+    --line-soft:#2A251C;
+    --brass:#CBA463;
+    --brass-deep:#B58D4C;
+    --olive:#93A06F;
+    --good:#8AA773;
+    --warn:#CDA055;
+    --crit:#CB6E5D;
+    --shadow:0 1px 2px rgba(0,0,0,.30), 0 18px 40px -20px rgba(0,0,0,.65);
+  }
+
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:"Instrument Sans", system-ui, -apple-system, Segoe UI, sans-serif;
+    font-size:16px;
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:clamp(20px,4vw,56px) clamp(18px,4vw,48px) 88px}
+
+  /* ---- type ---- */
+  h1,h2,h3{margin:0;font-family:"Fraunces", Georgia, "Times New Roman", serif;font-weight:600;line-height:1.12;text-wrap:balance;letter-spacing:-.01em}
+  .mono{font-family:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace}
+  .eyebrow{font-family:"IBM Plex Mono", ui-monospace, monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--brass);font-weight:500}
+  p{margin:0 0 1em}
+  a{color:var(--brass-deep)}
+  strong{font-weight:600;color:var(--ink)}
+
+  /* ---- theme toggle ---- */
+  .toggle{
+    position:fixed;top:16px;right:16px;z-index:20;
+    display:inline-flex;align-items:center;gap:7px;
+    font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--ink-soft);background:var(--surface);border:1px solid var(--line);
+    padding:7px 11px;border-radius:999px;cursor:pointer;box-shadow:var(--shadow)
+  }
+  .toggle:hover{color:var(--ink);border-color:var(--brass)}
+  .toggle:focus-visible{outline:2px solid var(--brass);outline-offset:2px}
+
+  /* ---- title block ---- */
+  .masthead{border-top:2px solid var(--ink);padding-top:18px}
+  .mast-row{display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap}
+  h1{font-size:clamp(2.1rem,5.4vw,3.7rem);margin:.28em 0 .18em;max-width:16ch}
+  .mast-sub{font-size:clamp(1.02rem,2vw,1.2rem);color:var(--ink-soft);max-width:60ch;font-family:"Fraunces",Georgia,serif;font-style:italic;font-weight:400}
+  .titleblock{
+    margin-top:26px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--surface);
+    display:grid;grid-template-columns:repeat(4,1fr)
+  }
+  .tb-cell{padding:13px 16px;border-right:1px solid var(--line-soft);border-bottom:1px solid var(--line-soft)}
+  .tb-cell:nth-child(4n){border-right:none}
+  .tb-cell:nth-child(n+5){border-bottom:none}
+  .tb-k{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint)}
+  .tb-v{margin-top:3px;font-weight:600;font-size:14.5px}
+  .tb-v.brass{color:var(--brass-deep)}
+  @media(max-width:640px){.titleblock{grid-template-columns:repeat(2,1fr)}.tb-cell:nth-child(2n){border-right:none}.tb-cell:nth-child(4n){border-right:1px solid var(--line-soft)}.tb-cell:nth-child(n+5){border-bottom:1px solid var(--line-soft)}.tb-cell:nth-last-child(-n+2){border-bottom:none}}
+
+  /* ---- section scaffolding ---- */
+  section{margin-top:clamp(44px,6vw,68px)}
+  .sec-head{display:flex;align-items:baseline;gap:14px;border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:26px}
+  .sheet-no{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--brass);letter-spacing:.06em;padding-top:4px;white-space:nowrap}
+  .sec-head h2{font-size:clamp(1.5rem,3.2vw,2.05rem)}
+  .sec-lede{color:var(--ink-soft);max-width:66ch;margin:-8px 0 26px}
+
+  .lede{font-size:clamp(1.08rem,2vw,1.22rem);line-height:1.55;color:var(--ink-soft);max-width:64ch;margin-top:26px}
+  .lede b{color:var(--ink);font-weight:600}
+
+  /* ---- flow (sources / intelligence / command) ---- */
+  .flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:0 14px;align-items:stretch}
+  .flow-card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 18px 20px;box-shadow:var(--shadow);display:flex;flex-direction:column}
+  .flow-card .cap{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint)}
+  .flow-card h3{font-size:1.18rem;margin:6px 0 12px}
+  .flow-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+  .flow-list li{position:relative;padding-left:16px;font-size:14px;color:var(--ink-soft);line-height:1.45}
+  .flow-list li::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;border-radius:1px;background:var(--brass)}
+  .arrow{align-self:center;color:var(--brass);font-size:22px;line-height:1}
+  @media(max-width:760px){
+    .flow{grid-template-columns:1fr;gap:12px}
+    .arrow{transform:rotate(90deg);margin:2px 0}
+  }
+  .flow-note{margin-top:16px;font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink-faint);text-align:center;letter-spacing:.02em}
+
+  /* ---- pull quote ---- */
+  .promise{margin-top:30px;border-left:3px solid var(--brass);background:linear-gradient(90deg,color-mix(in srgb,var(--brass) 8%,transparent),transparent 70%);padding:18px 22px;border-radius:0 10px 10px 0}
+  .promise p{font-family:"Fraunces",Georgia,serif;font-size:clamp(1.15rem,2.4vw,1.45rem);font-style:italic;color:var(--ink);margin:0;line-height:1.4}
+  .promise .who{font-family:"IBM Plex Mono",monospace;font-style:normal;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);margin-top:10px}
+
+  /* ---- phase swatches ---- */
+  .phases{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  @media(max-width:820px){.phases{grid-template-columns:1fr}}
+  .phase{background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:var(--shadow);display:flex;flex-direction:column}
+  .swatch{height:74px;position:relative}
+  .swatch.one{background:linear-gradient(135deg,#B89152,#8A6A31)}
+  .swatch.two{background:linear-gradient(135deg,#6E7A4D,#464F2E)}
+  .swatch.three{background:linear-gradient(135deg,#9C6F53,#6E4B37)}
+  .swatch .no{position:absolute;left:16px;bottom:10px;font-family:"IBM Plex Mono",monospace;color:rgba(255,255,255,.92);font-size:12px;letter-spacing:.16em}
+  .phase-body{padding:16px 18px 20px;display:flex;flex-direction:column;gap:9px}
+  .phase-body h3{font-size:1.16rem}
+  .phase-tag{align-self:flex-start;font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--brass-deep);background:color-mix(in srgb,var(--brass) 14%,transparent);padding:3px 8px;border-radius:5px}
+  .phase-body p{font-size:14px;color:var(--ink-soft);margin:0}
+
+  /* ---- module grid ---- */
+  .modules{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  @media(max-width:820px){.modules{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:520px){.modules{grid-template-columns:1fr}}
+  .mod{background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:15px 16px 17px;display:flex;flex-direction:column;gap:6px;transition:border-color .18s,transform .18s}
+  .mod:hover{border-color:var(--brass);transform:translateY(-2px)}
+  .mod .ix{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--brass);letter-spacing:.08em}
+  .mod h3{font-size:1.02rem;line-height:1.2}
+  .mod p{font-size:13.5px;color:var(--ink-soft);margin:0;line-height:1.42}
+
+  /* ---- pipeline track ---- */
+  .track{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:20px;background:var(--sunk);border-radius:12px}
+  .stage{font-family:"IBM Plex Mono",monospace;font-size:12.5px;font-weight:500;color:var(--ink);background:var(--surface);border:1px solid var(--line);padding:8px 13px;border-radius:7px;white-space:nowrap}
+  .track .sep{color:var(--brass);font-size:14px}
+
+  /* ---- pipelines (data flow) ---- */
+  .pipes{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  @media(max-width:820px){.pipes{grid-template-columns:1fr}}
+  .pipe{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px;box-shadow:var(--shadow)}
+  .pipe h3{font-size:1.06rem;margin-bottom:4px}
+  .pipe .when{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--brass);margin-bottom:14px}
+  .steps{list-style:none;margin:0;padding:0;counter-reset:s}
+  .steps li{counter-increment:s;position:relative;padding:0 0 14px 30px;font-size:13.5px;color:var(--ink-soft);line-height:1.42}
+  .steps li::before{content:counter(s);position:absolute;left:0;top:-1px;width:20px;height:20px;border-radius:50%;background:var(--sunk);border:1px solid var(--line);color:var(--brass-deep);font-family:"IBM Plex Mono",monospace;font-size:11px;display:grid;place-items:center}
+  .steps li::after{content:"";position:absolute;left:9.5px;top:20px;bottom:2px;width:1px;background:var(--line)}
+  .steps li:last-child{padding-bottom:0}
+  .steps li:last-child::after{display:none}
+  .steps li b{color:var(--ink)}
+
+  /* ---- generic tables / schedules ---- */
+  .schedule{width:100%;border-collapse:collapse;font-size:14px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .tablewrap{overflow-x:auto;border-radius:10px}
+  .schedule th{text-align:left;font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);font-weight:500;padding:11px 14px;background:var(--sunk);border-bottom:1px solid var(--line)}
+  .schedule td{padding:12px 14px;border-bottom:1px solid var(--line-soft);color:var(--ink-soft);vertical-align:top}
+  .schedule tr:last-child td{border-bottom:none}
+  .schedule td b{color:var(--ink)}
+  .schedule tbody tr:hover td{background:color-mix(in srgb,var(--brass) 5%,transparent)}
+
+  /* ---- two-col lists (report / scope) ---- */
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:14px 34px}
+  @media(max-width:680px){.cols{grid-template-columns:1fr}}
+  .rlist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:11px}
+  .rlist li{position:relative;padding-left:24px;font-size:14.5px;color:var(--ink-soft);line-height:1.45}
+  .rlist li b{color:var(--ink)}
+  .rlist li::before{content:"";position:absolute;left:0;top:7px;width:9px;height:9px;border-radius:2px;background:var(--brass);transform:rotate(45deg)}
+
+  .scope{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:680px){.scope{grid-template-columns:1fr}}
+  .scope-card{border:1px solid var(--line);border-radius:12px;padding:18px 20px;background:var(--surface)}
+  .scope-card h3{font-size:1.05rem;margin-bottom:14px;display:flex;align-items:center;gap:9px}
+  .dot{width:9px;height:9px;border-radius:50%}
+  .dot.in{background:var(--good)}
+  .dot.out{background:var(--ink-faint)}
+  .checks{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+  .checks li{position:relative;padding-left:24px;font-size:14px;color:var(--ink-soft);line-height:1.4}
+  .checks li .m{position:absolute;left:0;top:0;font-family:"IBM Plex Mono",monospace;font-weight:600}
+  .checks.yes li .m{color:var(--good)}
+  .checks.no li .m{color:var(--ink-faint)}
+
+  /* ---- chips (data model) ---- */
+  .chips{display:flex;flex-wrap:wrap;gap:9px}
+  .chip{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink);background:var(--surface);border:1px solid var(--line);padding:6px 11px;border-radius:7px}
+  .chip .c{color:var(--brass)}
+
+  /* ---- milestones ---- */
+  .miles{display:flex;flex-direction:column;gap:0}
+  .mile{display:grid;grid-template-columns:88px 1fr;gap:18px;padding:16px 0;border-bottom:1px solid var(--line-soft);align-items:start}
+  .mile:last-child{border-bottom:none}
+  .mile .tag{font-family:"IBM Plex Mono",monospace;font-size:13px;color:var(--brass-deep);font-weight:500;padding-top:2px}
+  .mile h3{font-size:1.02rem;margin-bottom:3px;display:inline-flex;align-items:center;gap:9px;flex-wrap:wrap}
+  .done{font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--good);background:color-mix(in srgb,var(--good) 14%,transparent);padding:2px 7px;border-radius:5px;font-weight:500}
+  .doing{font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--brass-deep);background:color-mix(in srgb,var(--brass) 16%,transparent);padding:2px 7px;border-radius:5px;font-weight:500}
+  .mile p{margin:0;font-size:14px;color:var(--ink-soft)}
+
+  /* ---- open questions ---- */
+  .qs{list-style:none;margin:0;padding:0;counter-reset:q;display:flex;flex-direction:column;gap:14px}
+  .qs li{counter-increment:q;position:relative;padding-left:44px;font-size:14.5px;color:var(--ink-soft);line-height:1.5}
+  .qs li b{color:var(--ink)}
+  .qs li::before{content:"Q" counter(q);position:absolute;left:0;top:0;font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--brass);border:1px solid var(--line);border-radius:6px;padding:3px 7px;background:var(--surface)}
+
+  footer{margin-top:64px;padding-top:22px;border-top:2px solid var(--ink);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-family:"IBM Plex Mono",monospace;font-size:11.5px;letter-spacing:.06em;color:var(--ink-faint)}
+
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<button class="toggle" id="tg" aria-label="Toggle light or dark theme">
+  <span id="tglabel">Theme</span>
+</button>
+
+<div class="wrap">
+
+  <!-- TITLE BLOCK -->
+  <header class="masthead">
+    <div class="mast-row">
+      <span class="eyebrow">Functional Specification</span>
+      <span class="eyebrow" style="color:var(--ink-faint)">Sheet 00 · v1.0</span>
+    </div>
+    <h1>Janelle Interiors AI Workflow System</h1>
+    <p class="mast-sub">An intelligence layer over the studio's Gmail and Drive — it reads the work, keeps one live source of truth, and drafts the chasing. Nothing is auto-sent.</p>
+
+    <div class="titleblock">
+      <div class="tb-cell"><div class="tb-k">Frontend</div><div class="tb-v">React + TypeScript</div></div>
+      <div class="tb-cell"><div class="tb-k">Backend</div><div class="tb-v">Node.js + Workers</div></div>
+      <div class="tb-cell"><div class="tb-k">Data / Auth</div><div class="tb-v">Supabase</div></div>
+      <div class="tb-cell"><div class="tb-k">Intelligence</div><div class="tb-v brass">Claude API</div></div>
+      <div class="tb-cell"><div class="tb-k">Studio system</div><div class="tb-v">Houzz Pro — read only</div></div>
+      <div class="tb-cell"><div class="tb-k">Sources</div><div class="tb-v">Gmail · Google Drive</div></div>
+      <div class="tb-cell"><div class="tb-k">Prepared for</div><div class="tb-v">Janelle Interiors</div></div>
+      <div class="tb-cell"><div class="tb-k">Status</div><div class="tb-v brass">Design approved</div></div>
+    </div>
+
+    <p class="lede">Janelle Interiors runs its studio in <b>Houzz Pro</b>, and that does not change. This system adds a purpose-built web application — a calm command center — that reads project activity from Gmail and Drive, understands it, and keeps every project, vendor, purchase order, and deadline continuously current. Then it drafts the follow-ups and writes the Monday report.</p>
+  </header>
+
+  <!-- 01 HOW IT WORKS -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">01</span><h2>How the system works</h2></div>
+    <p class="sec-lede">Data flows one way in and one way out. Google is read; the app records; a person approves every message that leaves.</p>
+
+    <div class="flow">
+      <div class="flow-card">
+        <span class="cap">Sources · Google</span>
+        <h3>Read</h3>
+        <ul class="flow-list">
+          <li>Project email in Gmail</li>
+          <li>Drive folders &amp; documents</li>
+          <li>PDF quotes &amp; order confirmations</li>
+          <li>Houzz Pro notification emails</li>
+        </ul>
+      </div>
+      <div class="arrow" aria-hidden="true">→</div>
+      <div class="flow-card">
+        <span class="cap">Intelligence · Node + AI</span>
+        <h3>Sort &amp; record</h3>
+        <ul class="flow-list">
+          <li>Classify each message</li>
+          <li>Extract project, vendor, item, PO#, dates</li>
+          <li>Link to the right project</li>
+          <li>Draft nudges &amp; the weekly report</li>
+        </ul>
+      </div>
+      <div class="arrow" aria-hidden="true">→</div>
+      <div class="flow-card">
+        <span class="cap">Command Center · App</span>
+        <h3>Track &amp; act</h3>
+        <ul class="flow-list">
+          <li>Live tracking board</li>
+          <li>Vendor &amp; PO tracker</li>
+          <li>Follow-up inbox of drafts</li>
+          <li>Weekly report</li>
+        </ul>
+      </div>
+    </div>
+    <p class="flow-note">In: Gmail + Drive → parsed → Supabase → live dashboard.  ·  Out: Gmail drafts a human reviews and sends.</p>
+
+    <div class="promise">
+      <p>“The team keeps working in Houzz Pro and Gmail. The system reads, sorts, records, and drafts — nothing is auto-sent. Every outbound message is a draft a person approves.”</p>
+      <div class="who">Core principle · Human in the loop</div>
+    </div>
+  </section>
+
+  <!-- 02 THREE PHASES -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">02</span><h2>The build in three phases</h2></div>
+    <div class="phases">
+      <div class="phase">
+        <div class="swatch one"><span class="no">PHASE 01</span></div>
+        <div class="phase-body">
+          <span class="phase-tag">Prompt system</span>
+          <h3>Prompt Studio</h3>
+          <p>Up to 20 curated prompts across design, procurement / FF&amp;E, client communication and admin — built from the studio's own spec sheets and proposals. They run <b>inside the app</b> on real project context. No copy-paste into an outside chatbot.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="swatch two"><span class="no">PHASE 02</span></div>
+        <div class="phase-body">
+          <span class="phase-tag">Tracking layer</span>
+          <h3>The live source of truth</h3>
+          <p>The system reads email and Drive — including PDF quotes and confirmations — pulls out project, vendor, item and PO number, and keeps a live board current: active projects, vendor / PO tracker, awaiting-client, and spec gaps.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="swatch three"><span class="no">PHASE 03</span></div>
+        <div class="phase-body">
+          <span class="phase-tag">Follow-up + reporting</span>
+          <h3>Nudges &amp; the Monday report</h3>
+          <p>A nightly check for vendor silence, overdue approvals and slipping dates. Each becomes a <b>Gmail draft</b> for you to send — never auto-sent — plus a weekly Monday report summarizing the whole studio.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 03 MODULES -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">03</span><h2>Core modules</h2></div>
+    <p class="sec-lede">The application, module by module. Each is a working surface in the command center.</p>
+    <div class="modules">
+      <div class="mod"><span class="ix">M.01</span><h3>Command Center</h3><p>The studio at a glance: what needs a person today, pipeline health, live activity feed.</p></div>
+      <div class="mod"><span class="ix">M.02</span><h3>Projects &amp; Pipeline</h3><p>Kanban board and live table. Every email, doc and PO on a project timeline.</p></div>
+      <div class="mod"><span class="ix">M.03</span><h3>Vendor &amp; PO Tracker</h3><p>Purchase orders with line items, amounts, ETAs and status — auto-filled from parsed quotes.</p></div>
+      <div class="mod"><span class="ix">M.04</span><h3>Inbox Intelligence</h3><p>Reads project mail, classifies it, and links each message to the right project and vendor.</p></div>
+      <div class="mod"><span class="ix">M.05</span><h3>Document Intelligence</h3><p>Parses PDF quotes and order confirmations from Drive into structured records.</p></div>
+      <div class="mod"><span class="ix">M.06</span><h3>Prompt Studio</h3><p>The 20-prompt library, run in-app on real project context, saved to a project or a draft.</p></div>
+      <div class="mod"><span class="ix">M.07</span><h3>Follow-up Engine</h3><p>Nightly rules find what's gone quiet or overdue and draft the nudge automatically.</p></div>
+      <div class="mod"><span class="ix">M.08</span><h3>Follow-up Inbox</h3><p>The review queue of AI-drafted messages — the human gate before anything is sent.</p></div>
+      <div class="mod"><span class="ix">M.09</span><h3>Awaiting &amp; Spec Gaps</h3><p>What's blocked on a client decision, and items missing information before they can be ordered.</p></div>
+      <div class="mod"><span class="ix">M.10</span><h3>Reports</h3><p>The Monday weekly report, in-app with an optional emailed copy, plus on-demand runs.</p></div>
+      <div class="mod"><span class="ix">M.11</span><h3>Settings &amp; Integrations</h3><p>Connect or revoke Google per user, tune thresholds and stages, import the Houzz CSV.</p></div>
+      <div class="mod"><span class="ix">M.12</span><h3>Audit Log</h3><p>A full record of everything the system read, extracted and drafted — trust by transparency.</p></div>
+    </div>
+  </section>
+
+  <!-- 04 PIPELINE STAGES -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">04</span><h2>Project pipeline</h2></div>
+    <p class="sec-lede">The stages the studio thinks in. Projects move across the board; the final list is confirmed with the studio.</p>
+    <div class="track">
+      <span class="stage">Lead</span><span class="sep">→</span>
+      <span class="stage">Concept</span><span class="sep">→</span>
+      <span class="stage">Spec</span><span class="sep">→</span>
+      <span class="stage">Approval</span><span class="sep">→</span>
+      <span class="stage">PO</span><span class="sep">→</span>
+      <span class="stage">Production</span><span class="sep">→</span>
+      <span class="stage">Shipping</span><span class="sep">→</span>
+      <span class="stage">Install</span><span class="sep">→</span>
+      <span class="stage">Complete</span>
+    </div>
+  </section>
+
+  <!-- 05 DATA FLOW -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">05</span><h2>How data moves</h2></div>
+    <div class="pipes">
+      <div class="pipe">
+        <h3>Ingestion</h3>
+        <div class="when">Continuous</div>
+        <ol class="steps">
+          <li><b>Fetch</b> new email and Drive files; download PDFs.</li>
+          <li><b>Classify</b> — relevant? which type?</li>
+          <li><b>Extract</b> structured data with Claude.</li>
+          <li><b>Resolve</b> to the right project, vendor, PO.</li>
+          <li><b>Write</b> to Supabase; push live to the board.</li>
+        </ol>
+      </div>
+      <div class="pipe">
+        <h3>Follow-up</h3>
+        <div class="when">Nightly</div>
+        <ol class="steps">
+          <li><b>Scan</b> rules: silence, overdue approvals, slipping dates, spec gaps.</li>
+          <li><b>Draft</b> each message with project context.</li>
+          <li><b>Create</b> a Gmail draft — never sent.</li>
+          <li><b>Queue</b> a card in the follow-up inbox.</li>
+          <li><b>Log</b> it so no nudge repeats.</li>
+        </ol>
+      </div>
+      <div class="pipe">
+        <h3>Weekly report</h3>
+        <div class="when">Monday</div>
+        <ol class="steps">
+          <li><b>Aggregate</b> the week's activity.</li>
+          <li><b>Summarize</b> as a narrative with Claude.</li>
+          <li><b>Publish</b> in-app with an optional draft copy.</li>
+          <li><b>Notify</b> the team it's ready.</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- 06 WEEKLY REPORT -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">06</span><h2>What the weekly report covers</h2></div>
+    <p class="sec-lede">Generated every Monday, and on demand — the whole studio in one read.</p>
+    <ul class="rlist cols">
+      <li><b>Pipeline movement</b> — projects that changed stage, and the count now in each.</li>
+      <li><b>Procurement</b> — POs placed, confirmed, shipped and received; committed spend.</li>
+      <li><b>Overdue vendor follow-ups</b> — who is silent, and for how long.</li>
+      <li><b>Awaiting client</b> — approvals outstanding and their age.</li>
+      <li><b>At-risk dates</b> — slipping deliveries and installs; installs coming up next week.</li>
+      <li><b>Spec gaps</b> — items still missing information before they can be ordered.</li>
+      <li><b>Drafts pending review</b> — follow-ups waiting to be sent.</li>
+      <li><b>Budget snapshot</b> — committed vs. remaining, where budget data exists.</li>
+    </ul>
+  </section>
+
+  <!-- 07 ROLES -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">07</span><h2>Roles &amp; access</h2></div>
+    <p class="sec-lede">Four to five people, each seeing only what their role and project assignment permit — enforced in the database.</p>
+    <div class="tablewrap">
+      <table class="schedule">
+        <thead><tr><th>Role</th><th>Person</th><th>Can see &amp; do</th></tr></thead>
+        <tbody>
+          <tr><td><b>Principal / Owner</b></td><td>Janelle</td><td>Everything — all projects, reports, settings, integrations, team.</td></tr>
+          <tr><td><b>Designer</b></td><td>Designers</td><td>Assigned projects, specs, documents, design &amp; client prompts.</td></tr>
+          <tr><td><b>Procurement / FF&amp;E</b></td><td>Buyer</td><td>Vendors, POs, order tracking, spec gaps, procurement prompts.</td></tr>
+          <tr><td><b>Coordinator / Admin</b></td><td>Coordinator</td><td>All tracking, follow-up inbox, drafts and reports — no billing.</td></tr>
+          <tr><td><b>Assistant / Junior</b></td><td>Support</td><td>Read access with limited task actions on assigned projects.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 08 DATA MODEL -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">08</span><h2>Data model</h2></div>
+    <p class="sec-lede">The single source of truth in Supabase Postgres. Every table carries an organization key and is protected by row-level security.</p>
+    <div class="chips">
+      <span class="chip"><span class="c">▪</span> projects</span>
+      <span class="chip"><span class="c">▪</span> vendors</span>
+      <span class="chip"><span class="c">▪</span> purchase_orders</span>
+      <span class="chip"><span class="c">▪</span> line_items</span>
+      <span class="chip"><span class="c">▪</span> documents</span>
+      <span class="chip"><span class="c">▪</span> emails</span>
+      <span class="chip"><span class="c">▪</span> follow_ups</span>
+      <span class="chip"><span class="c">▪</span> drafts</span>
+      <span class="chip"><span class="c">▪</span> spec_gaps</span>
+      <span class="chip"><span class="c">▪</span> reports</span>
+      <span class="chip"><span class="c">▪</span> prompts</span>
+      <span class="chip"><span class="c">▪</span> prompt_runs</span>
+      <span class="chip"><span class="c">▪</span> users / profiles</span>
+      <span class="chip"><span class="c">▪</span> integrations</span>
+      <span class="chip"><span class="c">▪</span> activity_log</span>
+    </div>
+  </section>
+
+  <!-- 09 SECURITY -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">09</span><h2>Security &amp; trust</h2></div>
+    <ul class="rlist cols">
+      <li><b>Least-privilege OAuth</b> — only the Gmail and Drive scopes needed; drafts, never send.</li>
+      <li><b>Revocable access</b> — disconnect Google per user instantly; tokens encrypted at rest.</li>
+      <li><b>No write-back to Houzz Pro</b> — the studio's system stays authoritative and untouched.</li>
+      <li><b>Human in the loop</b> — every outbound message is a draft; the system never sends.</li>
+      <li><b>Row-level security</b> — access enforced at the database, not just the interface.</li>
+      <li><b>Audit log</b> — a record of everything read, extracted and drafted.</li>
+    </ul>
+  </section>
+
+  <!-- 10 SCOPE -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">10</span><h2>Scope</h2></div>
+    <div class="scope">
+      <div class="scope-card">
+        <h3><span class="dot in"></span> Included</h3>
+        <ul class="checks yes">
+          <li><span class="m">+</span> Up to 20 prompts plus a playbook</li>
+          <li><span class="m">+</span> Gmail / Drive tracking layer &amp; live board</li>
+          <li><span class="m">+</span> Vendor / PO tracker, awaiting-client, spec gaps</li>
+          <li><span class="m">+</span> Follow-up nudges as Gmail drafts</li>
+          <li><span class="m">+</span> Monday weekly report</li>
+          <li><span class="m">+</span> One revision round per phase</li>
+          <li><span class="m">+</span> Handover docs and a walkthrough</li>
+        </ul>
+      </div>
+      <div class="scope-card">
+        <h3><span class="dot out"></span> Not included</h3>
+        <ul class="checks no">
+          <li><span class="m">–</span> Changes or write-back to Houzz Pro</li>
+          <li><span class="m">–</span> Integrations beyond Google Workspace</li>
+          <li><span class="m">–</span> Custom web or mobile app beyond this</li>
+          <li><span class="m">–</span> Ongoing support after handover</li>
+          <li><span class="m">–</span> AI subscription / usage costs</li>
+        </ul>
+        <p style="margin:16px 0 0;font-size:13px;color:var(--ink-faint)">Anything outside this can be added by change order.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 11 DELIVERY -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">11</span><h2>Delivery plan</h2></div>
+    <div class="miles">
+      <div class="mile"><span class="tag">M0</span><div><h3>Foundation <span class="done">✓ Built</span></h3><p>Repo, React shell, Node API, Supabase schema, Google OAuth, auth and roles.</p></div></div>
+      <div class="mile"><span class="tag">M1</span><div><h3>Tracking layer — Phase 2 <span class="done">✓ Built</span></h3><p>Ingestion pipeline, extraction, live board, vendor / PO tracker, projects pipeline.</p></div></div>
+      <div class="mile"><span class="tag">M2</span><div><h3>Prompt Studio — Phase 1 <span class="done">✓ Built</span></h3><p>Prompt library, in-app runner, save-to-project and draft output.</p></div></div>
+      <div class="mile"><span class="tag">M3</span><div><h3>Follow-up &amp; reports — Phase 3 <span class="done">✓ Built</span></h3><p>Nightly engine, Gmail drafts, follow-up inbox, Monday report.</p></div></div>
+      <div class="mile"><span class="tag">M4</span><div><h3>Polish &amp; handover <span class="done">✓ Built</span></h3><p>UI refinement, audit log, documentation and a walkthrough.</p></div></div>
+    </div>
+  </section>
+
+  <!-- 12 OPEN QUESTIONS -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">12</span><h2>Open questions for the studio</h2></div>
+    <p class="sec-lede">Five answers shape the build. They carry over from the original brief.</p>
+    <ol class="qs">
+      <li><b>Email setup.</b> Do vendor and client emails go to a shared inbox (projects@, info@), or does each member send from their own address?</li>
+      <li><b>Houzz Pro export.</b> Can the project list be exported as CSV? One sample of each notification email — new lead, client comment, invoice paid — would help tune extraction.</li>
+      <li><b>Pipeline stages.</b> Confirm the exact list of stages the studio thinks in.</li>
+      <li><b>“Stuck” thresholds.</b> How many days of vendor silence before a nudge? And for client approvals?</li>
+      <li><b>Team &amp; roles.</b> The four to five people, and the access each role should have.</li>
+    </ol>
+  </section>
+
+  <footer>
+    <span>Janelle Interiors · AI Workflow System</span>
+    <span>Functional Spec v1.0 · React · Node.js · Supabase</span>
+  </footer>
+
+</div>
+
+<script>
+  (function(){
+    var btn = document.getElementById('tg');
+    var label = document.getElementById('tglabel');
+    var root = document.documentElement;
+    function current(){
+      var t = root.getAttribute('data-theme');
+      if(t) return t;
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    function sync(){ label.textContent = current() === 'dark' ? 'Light' : 'Dark'; }
+    btn.addEventListener('click', function(){
+      root.setAttribute('data-theme', current() === 'dark' ? 'light' : 'dark');
+      sync();
+    });
+    sync();
+  })();
+</script>

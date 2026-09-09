@@ -1,0 +1,256 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Design tokens · Houzz Pro-style: white surfaces, cool greys, signature green ── */
+:root {
+  --paper: 244 245 247;
+  --surface: 255 255 255;
+  --sunk: 238 240 242;
+  --ink: 31 35 39;
+  --ink-soft: 90 97 105;
+  --ink-faint: 141 148 156;
+  --line: 223 226 230;
+  --line-soft: 236 238 241;
+  --brass: 77 188 21;        /* Houzz green — primary actions & active states */
+  --brass-deep: 58 154 12;   /* darker green for text on white */
+  --olive: 38 112 201;        /* secondary / informational blue */
+  --good: 46 158 58;
+  --warn: 217 138 31;
+  --crit: 214 58 47;
+  --nav: 30 34 38;
+  --nav-hover: 42 47 52;
+  --nav-text: 242 244 246;
+  --nav-muted: 163 170 178;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    --paper: 19 21 23;
+    --surface: 27 30 33;
+    --sunk: 36 40 44;
+    --ink: 240 242 244;
+    --ink-soft: 179 185 192;
+    --ink-faint: 127 134 142;
+    --line: 45 50 54;
+    --line-soft: 36 40 44;
+    --brass: 92 204 37;
+    --brass-deep: 125 220 74;
+    --olive: 91 156 240;
+    --good: 92 196 106;
+    --warn: 230 163 74;
+    --crit: 238 106 95;
+    --nav: 15 17 19;
+    --nav-hover: 27 30 33;
+    --nav-text: 242 244 246;
+    --nav-muted: 143 151 159;
+    color-scheme: dark;
+  }
+}
+
+:root.dark {
+  --paper: 19 21 23;
+  --surface: 27 30 33;
+  --sunk: 36 40 44;
+  --ink: 240 242 244;
+  --ink-soft: 179 185 192;
+  --ink-faint: 127 134 142;
+  --line: 45 50 54;
+  --line-soft: 36 40 44;
+  --brass: 92 204 37;
+  --brass-deep: 125 220 74;
+  --olive: 91 156 240;
+  --good: 92 196 106;
+  --warn: 230 163 74;
+  --crit: 238 106 95;
+  --nav: 15 17 19;
+  --nav-hover: 27 30 33;
+  --nav-text: 242 244 246;
+  --nav-muted: 143 151 159;
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: rgb(var(--paper));
+  color: rgb(var(--ink));
+  font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'cv11', 'ss01';
+}
+
+/* Numbers line up in tables everywhere */
+table,
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Utility layer additions */
+@layer components {
+  .eyebrow {
+    @apply text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-faint;
+  }
+  .card {
+    @apply rounded-xl border border-line bg-surface shadow-card;
+  }
+  .focusable:focus-visible {
+    outline: 2px solid rgb(var(--brass));
+    outline-offset: 2px;
+  }
+
+  /* Buttons — Houzz Pro: solid green primary, white outlined secondary, 6px radius */
+  .btn {
+    @apply focusable inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-4 py-2 text-[13.5px] font-semibold leading-5 transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn border border-transparent bg-brass text-white hover:bg-brass-deep;
+  }
+  .btn-secondary {
+    @apply btn border border-line bg-surface text-ink hover:border-ink-faint hover:bg-sunk;
+  }
+  .btn-ghost {
+    @apply btn border border-transparent bg-transparent text-ink-soft hover:bg-sunk hover:text-ink;
+  }
+  .btn-sm {
+    @apply px-3 py-1.5 text-[12.5px];
+  }
+
+  .input {
+    @apply focusable w-full rounded-lg border border-line bg-surface px-3.5 py-2.5 text-[14px] text-ink placeholder:text-ink-faint transition-colors hover:border-ink-faint focus:border-brass;
+  }
+}
+
+/* Floating sidebar collapse toggle: nudges on hover, springs on click */
+.sidebar-toggle {
+  transition: transform 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+}
+.sidebar-toggle:hover {
+  transform: scale(1.15);
+  box-shadow: 0 2px 8px rgb(var(--ink) / 0.18);
+}
+.sidebar-toggle:hover svg {
+  animation: nudge 0.8s ease-in-out infinite;
+}
+.sidebar-toggle:active {
+  transform: scale(0.92);
+}
+@keyframes nudge {
+  0%, 100% { translate: 0 0; }
+  50% { translate: -2px 0; }
+}
+.sidebar-toggle svg.rotate-180 {
+  animation-name: nudge-flipped;
+}
+@keyframes nudge-flipped {
+  0%, 100% { translate: 0 0; }
+  50% { translate: 2px 0; }
+}
+
+/* Popovers drop in from the trigger */
+.popover {
+  transform-origin: top right;
+  animation: pop-in 0.16s ease-out;
+}
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* Bell swings once when something is waiting */
+.bell-ring {
+  transform-origin: top center;
+  animation: bell 1.6s ease-in-out 1;
+}
+@keyframes bell {
+  0%, 100% { transform: rotate(0); }
+  15% { transform: rotate(14deg); }
+  30% { transform: rotate(-12deg); }
+  45% { transform: rotate(8deg); }
+  60% { transform: rotate(-6deg); }
+  75% { transform: rotate(3deg); }
+}
+
+/* CKEditor 5 — match the app's tokens */
+.rte {
+  --ck-border-radius: 8px;
+  --ck-color-base-background: rgb(var(--surface));
+  --ck-color-base-border: rgb(var(--line));
+  --ck-color-base-text: rgb(var(--ink));
+  --ck-color-toolbar-background: rgb(var(--sunk));
+  --ck-color-toolbar-border: rgb(var(--line));
+  --ck-color-button-default-hover-background: rgb(var(--line-soft));
+  --ck-color-button-on-background: rgb(var(--brass) / 0.15);
+  --ck-color-button-on-hover-background: rgb(var(--brass) / 0.25);
+  --ck-color-button-on-color: rgb(var(--brass-deep));
+  --ck-color-focus-border: rgb(var(--brass));
+  --ck-focus-ring: 1px solid rgb(var(--brass));
+  --ck-color-text: rgb(var(--ink));
+  --ck-color-dropdown-panel-background: rgb(var(--surface));
+  --ck-color-dropdown-panel-border: rgb(var(--line));
+  --ck-color-list-background: rgb(var(--surface));
+  --ck-color-list-button-hover-background: rgb(var(--sunk));
+  --ck-color-panel-background: rgb(var(--surface));
+  --ck-color-panel-border: rgb(var(--line));
+  --ck-color-input-background: rgb(var(--surface));
+  --ck-color-input-border: rgb(var(--line));
+  --ck-color-input-text: rgb(var(--ink));
+  --ck-color-labeled-field-label-background: rgb(var(--surface));
+  --ck-color-tooltip-background: rgb(var(--ink));
+  --ck-color-tooltip-text: rgb(var(--paper));
+  --ck-font-face: 'Inter', 'Helvetica Neue', Arial, sans-serif;
+  --ck-font-size-base: 14px;
+}
+.rte .ck.ck-editor__editable_inline {
+  min-height: 220px;
+  padding: 0 16px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: rgb(var(--ink));
+}
+.rte .ck.ck-editor__editable_inline.ck-focused {
+  box-shadow: none;
+}
+.rte .ck.ck-toolbar .ck-button {
+  color: rgb(var(--ink-soft));
+}
+.rte .ck.ck-toolbar .ck-button:hover,
+.rte .ck.ck-toolbar .ck-button.ck-on {
+  color: rgb(var(--ink));
+}
+
+/* Rendered HTML drafts share the editor's spacing */
+.rte-content p { margin: 0 0 0.9em; }
+.rte-content p:last-child { margin-bottom: 0; }
+.rte-content ul, .rte-content ol { margin: 0 0 0.9em 1.25em; }
+.rte-content ul { list-style: disc; }
+.rte-content ol { list-style: decimal; }
+.rte-content h2 { font-size: 17px; font-weight: 600; margin: 0.6em 0 0.4em; }
+.rte-content h3 { font-size: 15px; font-weight: 600; margin: 0.6em 0 0.3em; }
+.rte-content blockquote { margin: 0 0 0.9em; padding-left: 12px; border-left: 3px solid rgb(var(--line)); color: rgb(var(--ink-soft)); }
+.rte-content a { color: rgb(var(--brass-deep)); text-decoration: underline; }
+.rte-content table { border-collapse: collapse; margin: 0 0 0.9em; }
+.rte-content td, .rte-content th { border: 1px solid rgb(var(--line)); padding: 4px 8px; min-width: 2em; }
+.rte-content img { max-width: 100%; height: auto; }
+.rte-content hr { border: 0; border-top: 1px solid rgb(var(--line)); margin: 1em 0; }
+.rte-content pre { background: rgb(var(--sunk)); border-radius: 6px; padding: 10px 12px; font-size: 13px; overflow-x: auto; }
+.rte-content code { background: rgb(var(--sunk)); border-radius: 4px; padding: 1px 4px; font-size: 13px; }
+.rte-content .todo-list { list-style: none; margin-left: 0; }
+.rte .ck.ck-toolbar { flex-wrap: wrap; }
+.ck.ck-editor__editable.ck-editor__editable_inline.ck-fullscreen { min-height: 60vh; }
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}

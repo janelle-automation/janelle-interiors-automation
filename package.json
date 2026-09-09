@@ -1,0 +1,30 @@
+{
+  "name": "janelle-automation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Janelle Interiors AI Workflow System — an intelligence layer over Gmail and Drive, built on React, Node.js and Supabase.",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c yellow,cyan \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:web": "npm run dev --workspace apps/web",
+    "dev:api": "npm run dev --workspace apps/api",
+    "build": "npm run build --workspace packages/shared && npm run build --workspace apps/api && npm run build --workspace apps/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "db:apply": "node scripts/db-apply.mjs",
+    "db:apply:seed": "node scripts/db-apply.mjs --seed",
+    "create-admin": "node scripts/create-admin.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1",
+    "dotenv": "^16.4.5",
+    "pg": "^8.13.0"
+  },
+  "license": "UNLICENSED"
+}
