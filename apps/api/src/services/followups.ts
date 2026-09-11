@@ -1,4 +1,4 @@
-import type { FollowUpType } from '@janelle/shared';
+import { DEFAULT_SLA, type FollowUpType, type SlaSettings } from '@janelle/shared';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { anthropic, generate } from './anthropic.js';
 
@@ -25,12 +25,14 @@ const todayIso = () => new Date().toISOString().slice(0, 10);
 
 /** Compose a nudge body via Claude, with a plain-text fallback. */
 async function draftBody(t: Trigger): Promise<{ subject: string; body: string }> {
-  const subject =
-    t.type === 'client_approval_overdue'
-      ? 'Quick follow-up on your approval'
-      : t.type === 'vendor_silence'
-        ? 'Following up on our order'
-        : 'Checking in on timing';
+  const SUBJECTS: Partial<Record<FollowUpType, string>> = {
+    client_approval_overdue: 'Quick follow-up on your approval',
+    vendor_silence: 'Following up on our order',
+    // Proactive, not apologetic: the client should hear from us first.
+    quote_overdue: 'An update on your quote',
+    client_waiting: 'An update on your request',
+  };
+  const subject = SUBJECTS[t.type] ?? 'Checking in on timing';
 
   if (!anthropic) {
     return {
@@ -97,11 +99,55 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
     .select('settings')
     .eq('id', orgId)
     .maybeSingle();
-  const settings = (org?.settings ?? {}) as { vendor_silence_days?: number; client_approval_days?: number };
-  const vendorDays = settings.vendor_silence_days ?? 3;
-  const clientDays = settings.client_approval_days ?? 5;
+  const settings = (org?.settings ?? {}) as Partial<SlaSettings>;
+  const sla: SlaSettings = { ...DEFAULT_SLA, ...settings };
+  const vendorDays = sla.vendor_silence_days;
+  const clientDays = sla.client_approval_days;
 
   const triggers: Trigger[] = [];
+
+  // 0. Quote SLA — the studio's sharpest pain point: a quote request that
+  //    sits too long, where the client is left guessing. The rule is to tell
+  //    the client something before they have to ask.
+  const { data: staleQuotes } = await supabaseAdmin
+    .from('tasks')
+    .select('id, title, project_id, vendor_id, created_at, projects(name, client_name)')
+    .eq('org_id', orgId)
+    .eq('kind', 'quote_request')
+    .in('status', ['open', 'in_progress', 'blocked'])
+    .lt('created_at', daysAgoIso(sla.quote_response_days));
+  for (const t of staleQuotes ?? []) {
+    const proj = (t as { projects?: { name?: string; client_name?: string } }).projects;
+    triggers.push({
+      type: 'quote_overdue',
+      projectId: (t as { project_id: string | null }).project_id,
+      vendorId: (t as { vendor_id: string | null }).vendor_id,
+      target: null,
+      reason: `A quote request has been open more than ${sla.quote_response_days} days; the client should be told where it stands.`,
+      context: `${(t as { title: string }).title}${proj?.client_name ? ` — ${proj.client_name}` : ''}`,
+    });
+  }
+
+  // 0b. Client waiting — someone owes the client a reply. Internal nudge only.
+  const waitingCutoff = new Date(Date.now() - sla.client_waiting_hours * 3600_000).toISOString();
+  const { data: waiting } = await supabaseAdmin
+    .from('tasks')
+    .select('id, title, project_id, created_at, projects(name, client_name)')
+    .eq('org_id', orgId)
+    .eq('kind', 'client_approval')
+    .in('status', ['open', 'in_progress', 'blocked'])
+    .lt('created_at', waitingCutoff);
+  for (const t of waiting ?? []) {
+    const proj = (t as { projects?: { name?: string; client_name?: string } }).projects;
+    triggers.push({
+      type: 'client_waiting',
+      projectId: (t as { project_id: string | null }).project_id,
+      vendorId: null,
+      target: null,
+      reason: `The client has been waiting over ${sla.client_waiting_hours} hours for a response.`,
+      context: `${(t as { title: string }).title}${proj?.client_name ? ` — ${proj.client_name}` : ''}`,
+    });
+  }
 
   // 1. Vendor silence — POs placed but not confirmed past the threshold.
   const { data: silentPos } = await supabaseAdmin

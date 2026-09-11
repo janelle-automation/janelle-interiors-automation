@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { generate, anthropic } from '../services/anthropic.js';
 import type { PromptVariable } from '@janelle/shared';
@@ -23,6 +23,7 @@ promptsRouter.get(
 // Run a prompt against Claude, filling {{variables}} from the request.
 promptsRouter.post(
   '/:id/run',
+  requirePermission('prompts', 'update'),
   asyncHandler(async (req, res) => {
     if (!anthropic) {
       return res.status(503).json({ error: 'Claude API not configured (set ANTHROPIC_API_KEY).' });

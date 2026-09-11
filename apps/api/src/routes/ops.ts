@@ -5,6 +5,7 @@ import { runIngest } from '../services/ingest.js';
 import { promoteAll } from '../services/promote.js';
 import { runFollowUps } from '../services/followups.js';
 import { runReport } from '../services/report.js';
+import { runDigest } from '../services/digest.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 
 export const opsRouter = Router();
@@ -49,6 +50,7 @@ async function forEachOrg<T>(fn: (orgId: string) => Promise<T>) {
 cronRouter.all('/ingest', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => runIngest(id)) })));
 cronRouter.all('/follow-ups', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => runFollowUps(id)) })));
 cronRouter.all('/report', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => runReport(id)) })));
+cronRouter.all('/digest', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => runDigest(id)) })));
 
 opsRouter.use('/cron', cronRouter);
 

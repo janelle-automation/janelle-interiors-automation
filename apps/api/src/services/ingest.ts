@@ -6,6 +6,7 @@ import { classifyEmail } from './extract.js';
 import { extractPdf } from './extract.js';
 import { draftReply, REPLYABLE } from './reply.js';
 import { promoteDocument, promoteEmail } from './promote.js';
+import { createTaskFromEmail } from './tasks.js';
 import { anthropic } from './anthropic.js';
 
 export interface IngestResult {
@@ -14,6 +15,7 @@ export interface IngestResult {
   emails: number;
   documents: number;
   replies: number;
+  tasks: number;
 }
 
 /** Case-insensitive best-effort match of a name hint to an existing row. */
@@ -53,12 +55,12 @@ export async function runIngest(
   orgId: string,
   opts: { emailQuery?: string; folderId?: string } = {},
 ): Promise<IngestResult> {
-  if (!supabaseAdmin) return { ok: false, reason: 'supabase_not_configured', emails: 0, documents: 0, replies: 0 };
-  if (!anthropic) return { ok: false, reason: 'anthropic_not_configured', emails: 0, documents: 0, replies: 0 };
-  if (ingestInFlight) return { ok: false, reason: 'busy', emails: 0, documents: 0, replies: 0 };
+  if (!supabaseAdmin) return { ok: false, reason: 'supabase_not_configured', emails: 0, documents: 0, replies: 0, tasks: 0 };
+  if (!anthropic) return { ok: false, reason: 'anthropic_not_configured', emails: 0, documents: 0, replies: 0, tasks: 0 };
+  if (ingestInFlight) return { ok: false, reason: 'busy', emails: 0, documents: 0, replies: 0, tasks: 0 };
 
   const userId = await orgSourceUserId(orgId);
-  if (!userId) return { ok: false, reason: 'no_source_user', emails: 0, documents: 0, replies: 0 };
+  if (!userId) return { ok: false, reason: 'no_source_user', emails: 0, documents: 0, replies: 0, tasks: 0 };
 
   ingestInFlight = true;
   try {
@@ -73,11 +75,12 @@ async function ingestInternal(
   userId: string,
   opts: { emailQuery?: string; folderId?: string },
 ): Promise<IngestResult> {
-  if (!supabaseAdmin || !anthropic) return { ok: false, reason: 'not_configured', emails: 0, documents: 0, replies: 0 };
+  if (!supabaseAdmin || !anthropic) return { ok: false, reason: 'not_configured', emails: 0, documents: 0, replies: 0, tasks: 0 };
 
   let emailCount = 0;
   let docCount = 0;
   let replyCount = 0;
+  let taskCount = 0;
 
   // ── Emails ────────────────────────────────────────────────
   const gmail = await gmailFor(userId);
@@ -129,6 +132,22 @@ async function ingestInternal(
             project_id: projectId,
             extracted_json: extracted ?? null,
           });
+        }
+
+        // Raise an internal task when the email implies work, assigned by
+        // role. Isolated so an extraction failure never loses the email.
+        if (emailRow) {
+          try {
+            const made = await createTaskFromEmail(
+              orgId,
+              emailRow.id,
+              extracted?.class ?? 'unclassified',
+              email,
+            );
+            if (made) taskCount++;
+          } catch (err) {
+            console.error('[ingest] task creation failed:', (err as Error).message);
+          }
         }
 
         // Auto-draft a reply tailored to the email's type and content,
@@ -272,8 +291,8 @@ async function ingestInternal(
     org_id: orgId,
     action: 'ingest.run',
     entity: 'ingest',
-    meta: { emails: emailCount, documents: docCount, replies: replyCount },
+    meta: { emails: emailCount, documents: docCount, replies: replyCount, tasks: taskCount },
   });
 
-  return { ok: true, emails: emailCount, documents: docCount, replies: replyCount };
+  return { ok: true, emails: emailCount, documents: docCount, replies: replyCount, tasks: taskCount };
 }

@@ -1,7 +1,7 @@
 export default function ConfigNeeded() {
   const steps = [
     ['Create the .env', 'Copy .env.example to .env at the repo root.'],
-    ['Add Supabase keys', 'Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY (Supabase → Settings → API).'],
+    ['Add Supabase keys', 'Set SUPABASE_URL and SUPABASE_ANON_KEY in the repo-root .env (Supabase → Settings → API).'],
     ['Apply the schema', 'Run npm run db:apply:seed, or paste supabase/schema.sql into the SQL editor.'],
     ['Restart the dev server', 'The app will pick up the new environment on reload.'],
   ];

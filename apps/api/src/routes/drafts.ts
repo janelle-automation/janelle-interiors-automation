@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 
 export const draftsRouter = Router();
@@ -79,6 +79,7 @@ draftsRouter.patch(
 // Delete a draft (after sending it manually or dismissing it).
 draftsRouter.delete(
   '/:id',
+  requirePermission('drafts', 'delete'),
   asyncHandler(async (req, res) => {
     const { error } = await req.auth!.db.from('drafts').delete().eq('id', req.params.id);
     if (error) throw new Error(error.message);

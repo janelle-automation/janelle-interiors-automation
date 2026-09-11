@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import type { EmailClass, DocumentType } from '@janelle/shared';
+import type { EmailClass, DocumentType, TaskKind } from '@janelle/shared';
 import { extractJson } from './anthropic.js';
 import type { ParsedEmail } from './gmail.js';
 
@@ -58,6 +58,60 @@ export async function classifyEmail(email: ParsedEmail): Promise<EmailExtraction
     email.body || email.snippet,
   ].join('\n');
   return extractJson<EmailExtraction>(EMAIL_SYSTEM, user);
+}
+
+export interface TaskExtraction {
+  /** False for anything that is merely informational — the important gate. */
+  needs_task: boolean;
+  /** Imperative, ≤80 chars, names the counterparty. */
+  title: string;
+  detail: string | null;
+  kind: TaskKind;
+  /** ISO date, only when the email states or clearly implies a deadline. */
+  due_date: string | null;
+}
+
+const TASK_SYSTEM = `You decide whether an email for an interior design studio requires
+someone on the team to DO something, and if so you write that work item.
+
+Be conservative. MOST email needs no task. Return "needs_task": false for anything that is
+merely informational: newsletters, marketing, automated notifications, receipts, delivery
+confirmations that need no chasing, "thanks!" replies, calendar noise, and anything already
+fully resolved in the thread. A task is warranted only when a specific person must take a
+specific action that is not yet done.
+
+Return JSON with exactly these keys:
+- "needs_task": true or false
+- "title": an imperative instruction naming the counterparty, at most 80 characters
+  (e.g. "Chase Ferrell for the sofa quote", "Get client sign-off on the lighting spec").
+  Use "" when needs_task is false.
+- "detail": one or two sentences of context a colleague would need to act, or null
+- "kind": one of "quote_request" (a quote must be requested or chased),
+  "order_followup" (an existing order/PO needs chasing or confirming),
+  "client_approval" (the client must approve or decide something),
+  "spec_review" (a specification, drawing or selection needs design review),
+  "scheduling" (a delivery, install or meeting must be booked or moved),
+  "admin" (anything else genuinely actionable)
+- "due_date": ISO date (YYYY-MM-DD) if the email states or clearly implies a deadline, else null.
+  Resolve relative wording ("Friday the 19th", "next week", "end of month") against the
+  current date given below, and never return a date in the past.`;
+
+/**
+ * Decide whether an email implies internal work. Returns null when Claude
+ * gives back unusable JSON, which the caller treats as "no task".
+ */
+export async function extractTask(email: ParsedEmail): Promise<TaskExtraction | null> {
+  const user = [
+    // Claude has no clock; without this, "Friday the 19th" lands in the wrong year.
+    `Today's date: ${new Date().toISOString().slice(0, 10)}`,
+    '',
+    `From: ${email.from}`,
+    `To: ${email.to}`,
+    `Subject: ${email.subject}`,
+    '',
+    email.body || email.snippet,
+  ].join('\n');
+  return extractJson<TaskExtraction>(TASK_SYSTEM, user);
 }
 
 export interface DocumentExtraction {

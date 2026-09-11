@@ -11,10 +11,23 @@
     }
   },
   "rewrites": [
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
   ],
   "crons": [
-    { "path": "/api/ops/cron/follow-ups", "schedule": "0 2 * * *" },
-    { "path": "/api/ops/cron/report", "schedule": "0 7 * * 1" }
+    {
+      "path": "/api/ops/cron/follow-ups",
+      "schedule": "0 2 * * *"
+    },
+    {
+      "path": "/api/ops/cron/report",
+      "schedule": "0 7 * * 1"
+    },
+    {
+      "path": "/api/ops/cron/digest",
+      "schedule": "5 7 * * *"
+    }
   ]
 }

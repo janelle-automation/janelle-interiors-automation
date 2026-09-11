@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { PROJECT_STAGES } from '@janelle/shared';
 
@@ -10,6 +10,7 @@ projectsRouter.use(requireAuth);
 // Update editable fields of a project (client, budget, dates, stage…).
 projectsRouter.patch(
   '/:id',
+  requirePermission('projects', 'update'),
   asyncHandler(async (req, res) => {
     const b = req.body ?? {};
     const patch: Record<string, unknown> = {};

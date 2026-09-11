@@ -16,6 +16,10 @@ import { documentsRouter } from './routes/documents.js';
 import { activityRouter } from './routes/activity.js';
 import { draftsRouter } from './routes/drafts.js';
 import { opsRouter } from './routes/ops.js';
+import { tasksRouter } from './routes/tasks.js';
+import { teamRouter } from './routes/team.js';
+import { digestsRouter } from './routes/digests.js';
+import { assistantRouter } from './routes/assistant.js';
 import { errorHandler, notFound } from './middleware/error.js';
 
 /**
@@ -52,6 +56,10 @@ app.use('/api/documents', documentsRouter);
 app.use('/api/activity', activityRouter);
 app.use('/api/drafts', draftsRouter);
 app.use('/api/ops', opsRouter);
+app.use('/api/tasks', tasksRouter);
+app.use('/api/team', teamRouter);
+app.use('/api/digests', digestsRouter);
+app.use('/api/assistant', assistantRouter);
 
 // Fallbacks
 app.use(notFound);

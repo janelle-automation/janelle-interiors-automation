@@ -6,7 +6,7 @@ import { useFollowUps, useDrafts, ageFrom } from '../lib/queries';
 import { ROLE_LABELS } from '@janelle/shared';
 import {
   IconDashboard, IconProjects, IconVendors, IconInbox, IconDoc,
-  IconPrompt, IconBell, IconReport, IconActivity, IconSettings, IconSun, IconMoon,
+  IconPrompt, IconBell, IconTask, IconAssistant, IconReport, IconActivity, IconSettings, IconSun, IconMoon,
   IconLogout, IconArrow,
 } from './icons';
 
@@ -32,6 +32,8 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: 'Automation',
     items: [
+      { to: '/assistant', label: 'Assistant', Icon: IconAssistant },
+      { to: '/tasks', label: 'Tasks', Icon: IconTask },
       { to: '/follow-ups', label: 'Follow-ups', Icon: IconBell },
       { to: '/drafts', label: 'Drafts', Icon: IconDoc },
       { to: '/reports', label: 'Reports', Icon: IconReport },
@@ -49,6 +51,8 @@ const PAGE_TITLES: Record<string, string> = {
   '/inbox': 'Inbox',
   '/documents': 'Documents',
   '/prompts': 'Prompt Studio',
+  '/assistant': 'Assistant',
+  '/tasks': 'Tasks',
   '/follow-ups': 'Follow-ups',
   '/drafts': 'Drafts',
   '/reports': 'Reports',

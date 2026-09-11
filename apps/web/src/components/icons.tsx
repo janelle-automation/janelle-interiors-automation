@@ -34,6 +34,12 @@ export const IconPrompt = (p: P) => (
 export const IconBell = (p: P) => (
   <svg {...base} {...p}><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6Z" /><path d="M10 20a2 2 0 0 0 4 0" /></svg>
 );
+export const IconAssistant = (p: P) => (
+  <svg {...base} {...p}><path d="M12 3a4 4 0 0 1 4 4v3a4 4 0 0 1-8 0V7a4 4 0 0 1 4-4Z" /><path d="M5 11a7 7 0 0 0 14 0" /><path d="M12 18v3" /></svg>
+);
+export const IconTask = (p: P) => (
+  <svg {...base} {...p}><rect x="5" y="4" width="14" height="17" rx="2" /><path d="M9 4h6v3H9z" /><path d="m9 13 2 2 4-4" /></svg>
+);
 export const IconReport = (p: P) => (
   <svg {...base} {...p}><path d="M4 20V4" /><path d="M4 20h16" /><rect x="7" y="12" width="3" height="5" /><rect x="12" y="8" width="3" height="9" /><rect x="17" y="14" width="3" height="3" /></svg>
 );

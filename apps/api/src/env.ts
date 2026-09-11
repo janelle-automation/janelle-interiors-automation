@@ -25,8 +25,11 @@ function optional(name: string, fallback = ''): string {
 }
 
 export const env = {
-  port: Number(optional('API_PORT', '4000')),
-  host: optional('API_HOST', 'localhost'),
+  // Managed hosts (Railway, Render, Fly) inject PORT and route to it; they
+  // also require binding every interface, not just loopback. API_PORT and
+  // API_HOST remain the local-development overrides.
+  port: Number(process.env.PORT || optional('API_PORT', '4000')),
+  host: process.env.PORT ? '0.0.0.0' : optional('API_HOST', 'localhost'),
   corsOrigins: optional('CORS_ORIGINS', 'http://localhost:5173')
     .split(',')
     .map((s) => s.trim())

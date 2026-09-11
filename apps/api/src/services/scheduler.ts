@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../lib/supabase.js';
 import { runFollowUps } from './followups.js';
 import { runReport } from './report.js';
 import { runIngest } from './ingest.js';
+import { runDigest } from './digest.js';
 
 async function forEachOrg(fn: (orgId: string) => Promise<unknown>, label: string) {
   if (!supabaseAdmin) return;
@@ -48,9 +49,17 @@ export function startScheduler(): void {
     void forEachOrg((id) => runFollowUps(id), 'followups');
   });
 
+  // Morning digest, every day — the push that means nobody has to log in.
+  // Offset past the weekly report so Monday does not run both at once.
+  cron.schedule('5 7 * * *', () => {
+    void forEachOrg((id) => runDigest(id), 'digest');
+  });
+
   cron.schedule('0 7 * * 1', () => {
     void forEachOrg((id) => runReport(id), 'report');
   });
 
-  console.log(`  ▸ Scheduler started (ingest ${INGEST_CRON} · follow-ups 02:00 · report Mon 07:00)`);
+  console.log(
+    `  ▸ Scheduler started (ingest ${INGEST_CRON} · follow-ups 02:00 · digest 07:05 · report Mon 07:00)`,
+  );
 }

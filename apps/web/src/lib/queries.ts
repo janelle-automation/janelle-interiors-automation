@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from './api';
-import type { Prompt, ProjectStage, PoStatus } from '@janelle/shared';
+import type { Prompt, ProjectStage, PoStatus, TaskKind, TaskStatus, UserRole } from '@janelle/shared';
 
 // ── View models (what the UI renders) ───────────────────────
 export interface ProjectView {
@@ -69,11 +69,13 @@ export interface Summary {
   activeProjects: number; openPOs: number; awaitingClient: number;
   specGaps: number; installsSoon: number; openFollowUps: number;
   emailsRead: number; documentsParsed: number; draftsPending: number;
+  openTasks: number; unassignedTasks: number;
   byStage: Record<string, number>;
 }
 const ZERO_SUMMARY: Summary = {
   activeProjects: 0, openPOs: 0, awaitingClient: 0, specGaps: 0,
-  installsSoon: 0, openFollowUps: 0, emailsRead: 0, documentsParsed: 0, draftsPending: 0, byStage: {},
+  installsSoon: 0, openFollowUps: 0, emailsRead: 0, documentsParsed: 0, draftsPending: 0,
+  openTasks: 0, unassignedTasks: 0, byStage: {},
 };
 export function useDashboard() {
   const q = useQuery({ queryKey: ['dashboard'], queryFn: () => api<Summary>('/dashboard/summary') });
@@ -167,6 +169,111 @@ export function useFollowUps() {
     },
   });
   return { ...q, data: q.data ?? [] };
+}
+
+// ── Tasks ───────────────────────────────────────────────────
+export interface TaskView {
+  id: string; title: string; detail: string; kind: TaskKind; status: TaskStatus;
+  assignedTo: string | null; assignee: string; project: string; due: string | null;
+  age: string;
+}
+interface TaskRow {
+  id: string; title: string; detail: string | null; kind: TaskKind; status: TaskStatus;
+  assigned_to: string | null; due_date: string | null; created_at: string;
+  projects: { name: string } | null; vendors: { name: string } | null;
+  profiles: { full_name: string | null } | null;
+}
+export function useTasks() {
+  const q = useQuery({
+    queryKey: ['tasks'],
+    queryFn: async (): Promise<TaskView[]> => {
+      const rows = await api<TaskRow[]>('/tasks');
+      return rows.map((r) => ({
+        id: r.id, title: r.title, detail: r.detail ?? '', kind: r.kind, status: r.status,
+        assignedTo: r.assigned_to,
+        assignee: r.profiles?.full_name ?? (r.assigned_to ? 'Assigned' : 'Unassigned'),
+        project: r.projects?.name ?? r.vendors?.name ?? '—',
+        due: r.due_date, age: ageFrom(r.created_at),
+      }));
+    },
+  });
+  return { ...q, data: q.data ?? [] };
+}
+
+export interface TeamMember { id: string; full_name: string | null; email: string | null; role: UserRole }
+export function useTeam() {
+  const q = useQuery({
+    queryKey: ['team'],
+    queryFn: () => api<TeamMember[]>('/team'),
+  });
+  return { ...q, data: q.data ?? [] };
+}
+
+// ── Morning digest ──────────────────────────────────────────
+export interface DigestRow {
+  id: string; title: string; kind: TaskKind; status: string;
+  owner: string; project: string; age_days: number; due_date: string | null;
+}
+export interface Digest {
+  id: string;
+  digest_date: string;
+  narrative: string | null;
+  escalations: DigestRow[];
+  figures: {
+    open_tasks: number;
+    overdue: DigestRow[];
+    unassigned: DigestRow[];
+    quote_breaches: DigestRow[];
+    client_waiting: DigestRow[];
+    by_owner: Record<string, number>;
+  } | null;
+}
+export function useLatestDigest() {
+  return useQuery({ queryKey: ['digest'], queryFn: () => api<Digest | null>('/digests/latest') });
+}
+
+export function useRunDigest() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api('/digests/run', { method: 'POST' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['digest'] }),
+  });
+}
+
+// ── Assistant ───────────────────────────────────────────────
+export interface ProposedAction {
+  tool: string;
+  summary: string;
+  input: Record<string, unknown>;
+}
+export interface AssistantReply {
+  reply: string;
+  proposed: ProposedAction[];
+  used: string[];
+}
+export interface AssistantTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export function useAsk() {
+  return useMutation({
+    mutationFn: (v: { message: string; history: AssistantTurn[] }) =>
+      api<AssistantReply>('/assistant/ask', { method: 'POST', body: JSON.stringify(v) }),
+  });
+}
+
+/** Commit a proposal the person confirmed. Separate from asking, on purpose. */
+export function useConfirmAction() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { input: Record<string, unknown> }) =>
+      api<{ id: string }>('/assistant/confirm', { method: 'POST', body: JSON.stringify(v) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['tasks'] });
+      qc.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
 }
 
 // ── Inbox / documents / activity ────────────────────────────
@@ -299,6 +406,21 @@ export function useFollowUpStatus() {
       api(`/follow-ups/${v.id}`, { method: 'PATCH', body: JSON.stringify({ status: v.status }) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['follow-ups'] });
+      qc.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+}
+
+/** Change a task's status, or hand it to someone else. */
+export function useUpdateTask() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { id: string; status?: TaskStatus; assigned_to?: string | null }) => {
+      const { id, ...patch } = v;
+      return api(`/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['tasks'] });
       qc.invalidateQueries({ queryKey: ['dashboard'] });
     },
   });
