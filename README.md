@@ -25,7 +25,7 @@ apps/
 packages/
   shared/     TypeScript types shared by web and api
 supabase/
-  schema.sql  Full database schema + row-level security
+  migrations/ Ordered schema migrations (0001_baseline.sql …)
   seed.sql    Demo org, prompt library, sample rows
 docs/         Functional spec + designed one-pager
 ```
@@ -52,7 +52,7 @@ configuration. To go live, fill in `.env`:
 ### 3. Database
 In the Supabase SQL editor (or `supabase db push`), run:
 ```
-supabase/schema.sql     # tables, enums, triggers, RLS
+supabase/migrations/    # ordered migrations; add the next number to change the schema
 supabase/seed.sql       # optional demo data
 ```
 
