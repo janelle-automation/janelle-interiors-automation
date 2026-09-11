@@ -11,7 +11,7 @@ dashboardRouter.get(
   asyncHandler(async (req, res) => {
     const { db } = req.auth!;
 
-    const [projects, pos, followUps, gaps, emails, documents, drafts] = await Promise.all([
+    const [projects, pos, followUps, gaps, emails, documents, drafts, tasks] = await Promise.all([
       db.from('projects').select('id, stage, status'),
       db.from('purchase_orders').select('id, status'),
       db.from('follow_ups').select('id, type, status').in('status', ['open', 'drafted']),
@@ -19,6 +19,7 @@ dashboardRouter.get(
       db.from('emails').select('*', { count: 'exact', head: true }),
       db.from('documents').select('*', { count: 'exact', head: true }),
       db.from('drafts').select('*', { count: 'exact', head: true }),
+      db.from('tasks').select('id, status, assigned_to').in('status', ['open', 'in_progress', 'blocked']),
     ]);
 
     const projectRows = projects.data ?? [];
@@ -46,6 +47,10 @@ dashboardRouter.get(
         emailsRead: emails.count ?? 0,
         documentsParsed: documents.count ?? 0,
         draftsPending: drafts.count ?? 0,
+        openTasks: (tasks.data ?? []).length,
+        unassignedTasks: (tasks.data ?? []).filter(
+          (t) => !(t as { assigned_to: string | null }).assigned_to,
+        ).length,
         byStage,
       },
     });

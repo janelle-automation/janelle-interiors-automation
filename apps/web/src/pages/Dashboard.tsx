@@ -2,7 +2,10 @@ import { useState, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { PageHeading, StatTile, Card, Pill, money, shortDate } from '../components/ui';
 import { IconArrow } from '../components/icons';
-import { useDashboard, useFollowUps, usePurchaseOrders, useOps } from '../lib/queries';
+import {
+  useDashboard, useFollowUps, usePurchaseOrders, useOps,
+  useLatestDigest, useRunDigest,
+} from '../lib/queries';
 import { PROJECT_STAGES, STAGE_LABELS } from '@janelle/shared';
 
 const followTone: Record<string, 'crit' | 'warn' | 'brass'> = {
@@ -10,12 +13,16 @@ const followTone: Record<string, 'crit' | 'warn' | 'brass'> = {
   client_approval_overdue: 'crit',
   date_slipping: 'crit',
   spec_gap: 'brass',
+  quote_overdue: 'crit',
+  client_waiting: 'crit',
 };
 const followLabel: Record<string, string> = {
   vendor_silence: 'Vendor silent',
   client_approval_overdue: 'Approval overdue',
   date_slipping: 'Date slipping',
   spec_gap: 'Spec gap',
+  quote_overdue: 'Quote overdue',
+  client_waiting: 'Client waiting',
 };
 
 function OpsBar() {
@@ -99,6 +106,97 @@ function SectionTitle({ children }: { children: ReactNode }) {
   return <h2 className="mb-3 text-[15px] font-semibold text-ink">{children}</h2>;
 }
 
+/**
+ * The morning briefing. Sits at the top of the dashboard because the
+ * founder's stated need is to know what is wrong without going looking.
+ */
+function MorningDigest() {
+  const { data: digest, isLoading } = useLatestDigest();
+  const run = useRunDigest();
+
+  const f = digest?.figures;
+  const escalations = digest?.escalations ?? [];
+  const stale = digest ? digest.digest_date !== new Date().toISOString().slice(0, 10) : false;
+
+  return (
+    <section>
+      <div className="mb-3 flex items-center justify-between">
+        <SectionTitle>This morning</SectionTitle>
+        <button onClick={() => run.mutate()} disabled={run.isPending} className="btn-secondary btn-sm">
+          {run.isPending ? 'Building…' : 'Rebuild'}
+        </button>
+      </div>
+
+      <Card>
+        {isLoading && (
+          <div className="px-5 py-8 text-center text-[13px] text-ink-faint">Loading…</div>
+        )}
+
+        {!isLoading && !digest && (
+          <div className="px-5 py-8 text-center text-[13px] text-ink-faint">
+            No digest yet. It runs every morning at 7:05 — or build one now.
+          </div>
+        )}
+
+        {!isLoading && digest && (
+          <>
+            <div className="border-b border-line-soft px-5 py-4">
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-faint">
+                {shortDate(digest.digest_date)}
+                {stale && ' · from an earlier day'}
+              </div>
+              <p className="whitespace-pre-line text-[14px] leading-relaxed text-ink">
+                {digest.narrative ?? 'No summary available.'}
+              </p>
+            </div>
+
+            {escalations.length > 0 && (
+              <div className="border-b border-line-soft bg-crit/5 px-5 py-4">
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-crit">
+                  Needs you
+                </div>
+                <ul className="space-y-1.5">
+                  {escalations.map((r) => (
+                    <li key={r.id} className="text-[13px] text-ink-soft">
+                      <span className="font-medium text-ink">{r.title}</span>
+                      {' · '}{r.owner}{' · '}{r.project}
+                      {r.status === 'blocked' && ' · blocked'}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {f && (
+              <div className="grid grid-cols-2 gap-px bg-line-soft sm:grid-cols-4">
+                {[
+                  { label: 'Overdue', value: f.overdue.length, bad: f.overdue.length > 0 },
+                  { label: 'Quote SLA missed', value: f.quote_breaches.length, bad: f.quote_breaches.length > 0 },
+                  { label: 'Client waiting', value: f.client_waiting.length, bad: f.client_waiting.length > 0 },
+                  { label: 'Unassigned', value: f.unassigned.length, bad: f.unassigned.length > 0 },
+                ].map((s) => (
+                  <div key={s.label} className="bg-surface px-5 py-3">
+                    <div className={`text-[20px] font-bold tabular-nums ${s.bad ? 'text-crit' : 'text-ink'}`}>
+                      {s.value}
+                    </div>
+                    <div className="text-[11.5px] text-ink-faint">{s.label}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {run.isError && (
+          <div className="border-t border-line-soft px-5 py-3 text-[12.5px] text-crit">
+            {(run.error as Error).message}
+          </div>
+        )}
+      </Card>
+    </section>
+  );
+}
+
 function CardHeader({ title, to, linkText }: { title: string; to?: string; linkText?: string }) {
   return (
     <div className="flex items-center justify-between border-b border-line-soft px-5 py-3.5">
@@ -136,6 +234,8 @@ export default function Dashboard() {
         action={<OpsBar />}
       />
 
+      <MorningDigest />
+
       <section>
         <SectionTitle>Studio at a glance</SectionTitle>
         <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-5">
@@ -144,6 +244,12 @@ export default function Dashboard() {
           <StatTile label="Awaiting client" value={summary.awaitingClient} tone={summary.awaitingClient > 0 ? 'crit' : 'neutral'} hint="approvals overdue" />
           <StatTile label="Spec gaps" value={summary.specGaps} tone={summary.specGaps > 0 ? 'warn' : 'neutral'} hint="blocking an order" />
           <StatTile label="Installs soon" value={summary.installsSoon} tone="olive" hint="shipping or installing" />
+          <StatTile
+            label="Open tasks"
+            value={summary.openTasks}
+            tone={summary.unassignedTasks > 0 ? 'warn' : 'neutral'}
+            hint={summary.unassignedTasks > 0 ? `${summary.unassignedTasks} unassigned` : 'all assigned'}
+          />
         </div>
       </section>
 

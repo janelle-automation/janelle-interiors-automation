@@ -7,12 +7,16 @@ const tone: Record<string, 'crit' | 'warn' | 'brass'> = {
   client_approval_overdue: 'crit',
   date_slipping: 'crit',
   spec_gap: 'brass',
+  quote_overdue: 'crit',
+  client_waiting: 'crit',
 };
 const label: Record<string, string> = {
   vendor_silence: 'Vendor silent',
   client_approval_overdue: 'Approval overdue',
   date_slipping: 'Date slipping',
   spec_gap: 'Spec gap',
+  quote_overdue: 'Quote overdue',
+  client_waiting: 'Client waiting',
 };
 
 export default function FollowUps() {
