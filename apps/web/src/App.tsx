@@ -7,6 +7,8 @@ import ProjectDetail from './pages/ProjectDetail';
 import Vendors from './pages/Vendors';
 import Prompts from './pages/Prompts';
 import FollowUps from './pages/FollowUps';
+import Tasks from './pages/Tasks';
+import Assistant from './pages/Assistant';
 import Drafts from './pages/Drafts';
 import Reports from './pages/Reports';
 import Activity from './pages/Activity';
@@ -65,6 +67,8 @@ export default function App() {
         <Route path="/inbox" element={<Inbox />} />
         <Route path="/documents" element={<Documents />} />
         <Route path="/prompts" element={<Prompts />} />
+        <Route path="/assistant" element={<Assistant />} />
+        <Route path="/tasks" element={<Tasks />} />
         <Route path="/follow-ups" element={<FollowUps />} />
         <Route path="/drafts" element={<Drafts />} />
         <Route path="/reports" element={<Reports />} />
