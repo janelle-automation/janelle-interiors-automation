@@ -9,7 +9,7 @@ import {
 } from '@janelle/shared';
 import { PageHeading, Card, Pill, shortDate } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
-import { useTasks, useTeam, useUpdateTask } from '../lib/queries';
+import { useBackfillTasks, useTasks, useTeam, useUpdateTask } from '../lib/queries';
 
 const tone: Record<TaskKind, 'crit' | 'warn' | 'brass' | 'neutral'> = {
   quote_request: 'brass',
@@ -27,6 +27,7 @@ export default function Tasks() {
   const { data: tasks, isLoading } = useTasks();
   const { data: team } = useTeam();
   const update = useUpdateTask();
+  const backfill = useBackfillTasks();
   const { user } = useAuth();
   const [showDone, setShowDone] = useState(false);
 
@@ -44,9 +45,21 @@ export default function Tasks() {
         title="Tasks"
         sub="Raised automatically from email and assigned by role. Reassign or close anything here — nothing is sent to anyone."
         action={
-          <button onClick={() => setShowDone((v) => !v)} className="btn-secondary btn-sm">
-            {showDone ? 'Hide closed' : 'Show closed'}
-          </button>
+          <div className="flex items-center gap-2">
+            {supervisor && (
+              <button
+                onClick={() => backfill.mutate()}
+                disabled={backfill.isPending}
+                className="btn-secondary btn-sm"
+                title="Raise tasks from email already in the system"
+              >
+                {backfill.isPending ? 'Reading email…' : 'Scan existing email'}
+              </button>
+            )}
+            <button onClick={() => setShowDone((v) => !v)} className="btn-secondary btn-sm">
+              {showDone ? 'Hide closed' : 'Show closed'}
+            </button>
+          </div>
         }
       />
       <Card>
@@ -132,6 +145,18 @@ export default function Tasks() {
             </li>
           ))}
         </ul>
+        {backfill.isSuccess && (
+          <div className="border-t border-line-soft px-5 py-3 text-[12.5px] text-ink-soft">
+            {backfill.data.created > 0
+              ? `Raised ${backfill.data.created} task(s) from ${backfill.data.scanned} email(s).`
+              : `Read ${backfill.data.scanned} email(s); none needed a task.`}
+          </div>
+        )}
+        {backfill.isError && (
+          <div className="border-t border-line-soft px-5 py-3 text-[12.5px] text-crit">
+            {(backfill.error as Error).message}
+          </div>
+        )}
         {update.isError && (
           <div className="border-t border-line-soft px-5 py-3 text-[12.5px] text-crit">
             {(update.error as Error).message}

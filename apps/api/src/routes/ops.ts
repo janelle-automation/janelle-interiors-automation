@@ -6,6 +6,7 @@ import { promoteAll } from '../services/promote.js';
 import { runFollowUps } from '../services/followups.js';
 import { runReport } from '../services/report.js';
 import { runDigest } from '../services/digest.js';
+import { backfillTasks } from '../services/tasks.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 
 export const opsRouter = Router();
@@ -53,6 +54,16 @@ cronRouter.all('/report', asyncHandler(async (_req, res) => res.json({ data: awa
 cronRouter.all('/digest', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => runDigest(id)) })));
 
 opsRouter.use('/cron', cronRouter);
+
+// Raise tasks from email that was ingested before the tasks table existed.
+opsRouter.post(
+  '/backfill-tasks',
+  requireRole('principal', 'coordinator'),
+  asyncHandler(async (req, res) => {
+    if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await backfillTasks(req.auth!.orgId) });
+  }),
+);
 
 // ── Signed-in operations ────────────────────────────────────
 opsRouter.use(requireAuth);

@@ -51,6 +51,75 @@ async function resolveAssignee(
 }
 
 /**
+ * Raise tasks from email already stored in the system.
+ *
+ * Ingestion skips messages it has seen before, so mail that arrived before
+ * the tasks table existed would never produce work. This walks the stored
+ * emails that have no task yet and runs the same extraction over them,
+ * using the snippet and the summary Claude wrote at ingest time in place
+ * of the original body.
+ *
+ * Safe to run repeatedly: emails that already have a task are skipped, and
+ * the unique index is the backstop.
+ */
+export async function backfillTasks(
+  orgId: string,
+  limit = 50,
+): Promise<{ ok: boolean; reason?: string; scanned: number; created: number }> {
+  if (!supabaseAdmin) return { ok: false, reason: 'supabase_not_configured', scanned: 0, created: 0 };
+
+  const { data: existing, error: exErr } = await supabaseAdmin
+    .from('tasks')
+    .select('source_email_id')
+    .eq('org_id', orgId)
+    .not('source_email_id', 'is', null);
+  if (exErr) return { ok: false, reason: exErr.message, scanned: 0, created: 0 };
+  const done = new Set((existing ?? []).map((r) => (r as { source_email_id: string }).source_email_id));
+
+  const { data: emails, error } = await supabaseAdmin
+    .from('emails')
+    .select('id, class, subject, from_addr, to_addr, snippet, extracted_json')
+    .eq('org_id', orgId)
+    .not('class', 'in', `(${IGNORED_CLASSES.map((c) => `"${c}"`).join(',')})`)
+    .order('received_at', { ascending: false, nullsFirst: false })
+    .limit(limit);
+  if (error) return { ok: false, reason: error.message, scanned: 0, created: 0 };
+
+  let scanned = 0;
+  let created = 0;
+  for (const row of emails ?? []) {
+    const e = row as {
+      id: string; class: string; subject: string | null;
+      from_addr: string | null; to_addr: string | null; snippet: string | null;
+      extracted_json: { summary?: string } | null;
+    };
+    if (done.has(e.id)) continue;
+    scanned++;
+    try {
+      // The original body is not stored; the ingest-time summary is usually
+      // a better signal than the raw snippet anyway, so use both.
+      const body = [e.extracted_json?.summary, e.snippet].filter(Boolean).join('\n\n');
+      const made = await createTaskFromEmail(orgId, e.id, e.class, {
+        gmailId: '',
+        threadId: '',
+        from: e.from_addr ?? '',
+        to: e.to_addr ?? '',
+        replyTo: '',
+        subject: e.subject ?? '',
+        snippet: e.snippet ?? '',
+        body,
+        receivedAt: null,
+        attachments: [],
+      } as unknown as ParsedEmail);
+      if (made) created++;
+    } catch (err) {
+      console.error('[backfill] task from email failed:', (err as Error).message);
+    }
+  }
+  return { ok: true, scanned, created };
+}
+
+/**
  * Read one classified email, decide whether it implies work, and if so
  * create a task assigned by role. Idempotent: the unique index on
  * (org_id, source_email_id) means a re-promoted email is a no-op.
