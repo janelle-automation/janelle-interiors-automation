@@ -412,6 +412,22 @@ export function useFollowUpStatus() {
 }
 
 /** Change a task's status, or hand it to someone else. */
+/** Raise tasks from email ingested before the tasks table existed. */
+export function useBackfillTasks() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      api<{ ok: boolean; reason?: string; scanned: number; created: number }>(
+        '/ops/backfill-tasks',
+        { method: 'POST' },
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['tasks'] });
+      qc.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+}
+
 export function useUpdateTask() {
   const qc = useQueryClient();
   return useMutation({
