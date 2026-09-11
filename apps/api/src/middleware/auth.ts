@@ -1,7 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { supabaseAdmin, supabaseForToken } from '../lib/supabase.js';
-import type { UserRole } from '@janelle/shared';
+import { can, type Action, type Resource, type UserRole } from '@janelle/shared';
 
 /** Data attached to an authenticated request. */
 export interface AuthContext {
@@ -64,6 +64,23 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   };
 
   next();
+}
+
+/**
+ * Restrict a route by the shared permission matrix. Use after requireAuth.
+ * Prefer this over requireRole: it keeps the API and the UI in step, since
+ * both read the same table in @janelle/shared.
+ */
+export function requirePermission(resource: Resource, action: Action) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!can(req.auth?.role ?? null, resource, action)) {
+      return res.status(403).json({
+        error: 'Insufficient permissions',
+        detail: `Your role (${req.auth?.role ?? 'none'}) cannot ${action} ${resource}.`,
+      });
+    }
+    next();
+  };
 }
 
 /** Restrict a route to specific roles. Use after requireAuth. */

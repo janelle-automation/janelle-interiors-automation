@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requireRole, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { runFollowUps } from '../services/followups.js';
 
@@ -22,6 +22,7 @@ followUpsRouter.get(
 // Update a follow-up's status (e.g. mark sent / dismissed / done).
 followUpsRouter.patch(
   '/:id',
+  requirePermission('follow_ups', 'update'),
   asyncHandler(async (req, res) => {
     const status = String(req.body?.status ?? '');
     const allowed = ['open', 'drafted', 'sent', 'dismissed', 'done'];
