@@ -36,6 +36,22 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 /**
+ * Fetch an endpoint that deliberately has no session: the token in the URL
+ * is the credential. Used by the shared AI usage report, which is opened by
+ * people who have no account here.
+ */
+export async function publicApi<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}/api${path}`, {
+    headers: { 'Content-Type': 'application/json' },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error((body as { error?: string }).error ?? `Request failed (${res.status})`);
+  }
+  return (body as { data: T }).data;
+}
+
+/**
  * Fetch a binary response (e.g. a PDF) with the auth token attached,
  * returning a blob. Throws with the server error message on non-2xx.
  */

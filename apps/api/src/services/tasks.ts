@@ -1,13 +1,118 @@
-import { TASK_KIND_ROLE, TASK_KINDS, type TaskKind, type UserRole } from '@janelle/shared';
+import { SEATS, SEAT_KEYS, TASK_KIND_ROLE, TASK_KINDS, type Seat, type TaskKind, type UserRole } from '@janelle/shared';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { extractTask } from './extract.js';
 import type { ParsedEmail } from './gmail.js';
 
-/** Classes that never imply internal work — skipped before spending a Claude call. */
-const IGNORED_CLASSES = ['general', 'houzz_notification', 'unclassified'];
+/**
+ * Classes that never imply internal work.
+ *
+ * Only Houzz's own automated notifications are excluded. "general" is NOT:
+ * the studio delegates by email, so internal messages like "Task in houzz —
+ * can you see if you can get Yael to send elevations" classify as general
+ * and are exactly the work this system exists to capture. Filtering noise is
+ * the extraction prompt's job, via needs_task.
+ */
+const IGNORED_CLASSES = ['houzz_notification'];
 
 /** Statuses that still count against someone's workload. */
 const LIVE_STATUSES = ['open', 'in_progress', 'blocked'];
+
+/**
+ * Resolve a name or address the sender used ("Joanna", "get Yael to...")
+ * against the team. Matches on full name, either part of it, or the local
+ * part of the email address, so a first name is enough.
+ */
+async function resolveNamedPerson(orgId: string, hint: string | null): Promise<string | null> {
+  if (!supabaseAdmin || !hint) return null;
+  const needle = hint.trim().toLowerCase();
+  if (needle.length < 2) return null;
+
+  const { data } = await supabaseAdmin
+    .from('profiles')
+    .select('id, full_name, email')
+    .eq('org_id', orgId);
+
+  for (const row of data ?? []) {
+    const p = row as { id: string; full_name: string | null; email: string | null };
+    const name = (p.full_name ?? '').toLowerCase();
+    const local = (p.email ?? '').split('@')[0].toLowerCase();
+    if (!name && !local) continue;
+    const parts = name.split(/\s+/).filter(Boolean);
+    if (
+      (name && (name === needle || name.includes(needle))) ||
+      parts.some((part) => part === needle) ||
+      (local && (local === needle || local.includes(needle))) ||
+      (p.email ?? '').toLowerCase() === needle
+    ) {
+      return p.id;
+    }
+  }
+  return null;
+}
+
+/**
+ * Route to whoever holds a seat. The roles document names the person for
+ * every seat except the vacant COO, so a seat resolves to a real teammate
+ * by name — and falls through to the seat's role when that person has no
+ * profile yet.
+ */
+async function resolveBySeat(orgId: string, seat: Seat | null): Promise<string | null> {
+  if (!seat || !SEAT_KEYS.includes(seat)) return null;
+  const brief = SEATS[seat];
+  if (!brief.person) return null; // vacant seat — nobody to route to
+
+  // "Brianna / Amanda" share the design seat; try each name in turn.
+  for (const name of brief.person.split('/').map((n) => n.trim())) {
+    const id = await resolveNamedPerson(orgId, name);
+    if (id) return id;
+  }
+  return null;
+}
+
+/**
+ * Work out who owns a task from the email chain itself.
+ *
+ * The sender is delegating, so the person being written TO is the owner —
+ * not the person writing. Skips the sender and the connected mailbox, and
+ * prefers the first teammate on the To: line, falling back to Cc.
+ */
+async function resolveFromChain(
+  orgId: string,
+  parsed: { from?: string; to?: string; cc?: string[] },
+): Promise<string | null> {
+  if (!supabaseAdmin) return null;
+
+  const addresses = (raw: string | undefined) =>
+    (raw ?? '')
+      .split(',')
+      .map((part) => {
+        const m = part.match(/<([^>]+)>/);
+        return (m ? m[1] : part).trim().toLowerCase();
+      })
+      .filter((a) => a.includes('@'));
+
+  const sender = new Set(addresses(parsed.from));
+  const recipients = [...addresses(parsed.to), ...(parsed.cc ?? []).map((c) => c.toLowerCase())]
+    .filter((a) => !sender.has(a));
+  if (recipients.length === 0) return null;
+
+  const { data } = await supabaseAdmin
+    .from('profiles')
+    .select('id, email')
+    .eq('org_id', orgId);
+
+  const byEmail = new Map<string, string>();
+  for (const row of data ?? []) {
+    const p = row as { id: string; email: string | null };
+    if (p.email) byEmail.set(p.email.toLowerCase(), p.id);
+  }
+  // Order matters: To: before Cc:, first named first.
+  for (const addr of recipients) {
+    const id = byEmail.get(addr);
+    if (id) return id;
+  }
+  return null;
+}
 
 /**
  * Pick the person who should own a task of this kind: whoever holds the
@@ -150,7 +255,19 @@ export async function createTaskFromEmail(
 
   const kind: TaskKind = TASK_KINDS.includes(extracted.kind) ? extracted.kind : 'admin';
   const role = TASK_KIND_ROLE[kind];
-  const assignedTo = await resolveAssignee(orgId, role);
+
+  // Four ways to decide the owner, most specific first. Each step is a
+  // weaker signal than the one above it:
+  //   1. a person named in the body — the sender already decided
+  //   2. whoever the mail was addressed to — the chain says who was asked
+  //   3. the seat that owns this outcome, per the studio's roles document
+  //   4. the role that owns this kind of work
+  const seat = (extracted.seat && SEAT_KEYS.includes(extracted.seat) ? extracted.seat : null) as Seat | null;
+  const assignedTo =
+    (await resolveNamedPerson(orgId, extracted.assignee_hint ?? null)) ??
+    (await resolveFromChain(orgId, parsed as { from?: string; to?: string })) ??
+    (await resolveBySeat(orgId, seat)) ??
+    (await resolveAssignee(orgId, role));
 
   // promoteEmail may have re-linked this email to a project/vendor, so read
   // the row back rather than trusting the ids the caller started with.
@@ -166,7 +283,9 @@ export async function createTaskFromEmail(
     detail: extracted.detail ?? null,
     kind,
     assigned_to: assignedTo,
-    assigned_role: role,
+    assigned_role: seat ? SEATS[seat].role : role,
+    seat,
+    next_step: extracted.next_step ?? null,
     project_id: (email as { project_id: string | null } | null)?.project_id ?? null,
     vendor_id: (email as { vendor_id: string | null } | null)?.vendor_id ?? null,
     source_email_id: emailId,

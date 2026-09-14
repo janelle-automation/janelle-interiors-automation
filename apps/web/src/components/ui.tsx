@@ -121,6 +121,52 @@ export function Pill({
   );
 }
 
+/**
+ * An on/off switch. Reads as a control at a glance, which a coloured dot
+ * does not — you can see the state, and see that you may change it.
+ *
+ * `marked` draws attention to a value that differs from its default.
+ */
+export function Switch({
+  checked,
+  onChange,
+  disabled = false,
+  marked = false,
+  label,
+  title,
+}: {
+  checked: boolean;
+  onChange?: (next: boolean) => void;
+  disabled?: boolean;
+  marked?: boolean;
+  label: string;
+  title?: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      title={title}
+      disabled={disabled || !onChange}
+      onClick={() => onChange?.(!checked)}
+      className={[
+        'focusable relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors',
+        checked ? 'bg-brass' : 'bg-ink-faint/30',
+        disabled || !onChange ? 'cursor-not-allowed opacity-45' : 'cursor-pointer hover:opacity-85',
+        marked ? 'ring-2 ring-brass/40 ring-offset-1 ring-offset-surface' : '',
+      ].join(' ')}
+    >
+      <span
+        className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${
+          checked ? 'translate-x-[18px]' : 'translate-x-[3px]'
+        }`}
+      />
+    </button>
+  );
+}
+
 export function money(n: number | null | undefined): string {
   if (n == null) return '—';
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n);

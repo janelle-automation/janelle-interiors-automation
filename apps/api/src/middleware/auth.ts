@@ -1,7 +1,8 @@
 import type { NextFunction, Request, Response } from 'express';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { supabaseAdmin, supabaseForToken } from '../lib/supabase.js';
-import { can, type Action, type Resource, type UserRole } from '@janelle/shared';
+import { canWith, type Action, type PermissionOverrides, type Resource, type UserRole } from '@janelle/shared';
+import { loadOverrides } from '../lib/permissions.js';
 
 /** Data attached to an authenticated request. */
 export interface AuthContext {
@@ -11,6 +12,8 @@ export interface AuthContext {
   role: UserRole | null;
   /** Supabase client scoped to this user (RLS-enforced). */
   db: SupabaseClient;
+  /** The studio's edits to the default permission matrix, if any. */
+  permissions: PermissionOverrides;
 }
 
 declare global {
@@ -54,13 +57,16 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     .eq('id', data.user.id)
     .maybeSingle();
 
+  const orgId = profile?.org_id ?? null;
+
   req.auth = {
     userId: data.user.id,
     email: data.user.email ?? null,
-    orgId: profile?.org_id ?? null,
+    orgId,
     role: (profile?.role as UserRole) ?? null,
     // Non-null here: we returned 503 above when Supabase is unconfigured.
     db: supabaseForToken(token) as SupabaseClient,
+    permissions: await loadOverrides(orgId),
   };
 
   next();
@@ -73,7 +79,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
  */
 export function requirePermission(resource: Resource, action: Action) {
   return (req: Request, res: Response, next: NextFunction) => {
-    if (!can(req.auth?.role ?? null, resource, action)) {
+    if (!canWith(req.auth?.permissions, req.auth?.role ?? null, resource, action)) {
       return res.status(403).json({
         error: 'Insufficient permissions',
         detail: `Your role (${req.auth?.role ?? 'none'}) cannot ${action} ${resource}.`,

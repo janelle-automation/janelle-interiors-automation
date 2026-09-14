@@ -1,19 +1,73 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { estimateCostUsd, type AiFeature } from '@janelle/shared';
 import { env, isAnthropicConfigured } from '../env.js';
+import { resolveAi } from '../lib/aiSettings.js';
+import { resolveOrgId } from '../lib/org.js';
+import { supabaseAdmin } from '../lib/supabase.js';
+
+/** The activity_log action that marks one Claude call. */
+export const AI_USAGE_ACTION = 'ai.usage';
 
 /**
- * Single Anthropic client for the intelligence layer. Null until an
- * API key is configured, so callers degrade gracefully.
+ * The environment-configured client, kept for callers that only need to
+ * know whether Claude is available at boot. The client actually used for
+ * a call is resolved per studio in `clientFor()`, because the key and
+ * model are now editable from Settings.
  */
 export const anthropic: Anthropic | null = isAnthropicConfigured()
   ? new Anthropic({ apiKey: env.anthropic.apiKey })
   : null;
+
+/**
+ * One client per distinct key. Constructing an SDK client is cheap but
+ * not free, and every Claude call goes through here.
+ */
+const clients = new Map<string, Anthropic>();
+
+function clientForKey(apiKey: string): Anthropic {
+  const existing = clients.get(apiKey);
+  if (existing) return existing;
+  const created = new Anthropic({ apiKey });
+  clients.set(apiKey, created);
+  return created;
+}
+
+/**
+ * The studio's key and model, falling back to the environment. Null when
+ * no key is configured anywhere — callers degrade gracefully.
+ */
+export async function clientFor(
+  orgId?: string | null,
+): Promise<{ client: Anthropic; model: string } | null> {
+  const { apiKey, model } = await resolveAi(orgId);
+  if (!apiKey) return null;
+  return { client: clientForKey(apiKey), model };
+}
+
+/** Whether this studio can call Claude at all. */
+export async function isAiReady(orgId?: string | null): Promise<boolean> {
+  return Boolean(await clientFor(orgId));
+}
 
 export class AnthropicNotConfigured extends Error {
   constructor() {
     super('Claude API is not configured (set ANTHROPIC_API_KEY).');
     this.name = 'AnthropicNotConfigured';
   }
+}
+
+/**
+ * Who this call was for. Every helper below takes one, so a new caller
+ * cannot spend the studio's money without appearing on the usage report.
+ */
+export interface CallContext {
+  feature: AiFeature;
+  /** Left out by the background services, which resolve the studio below. */
+  orgId?: string | null;
+  /** The person who pressed the button; null when the agent acted alone. */
+  actor?: string | null;
+  entity?: string | null;
+  entityId?: string | null;
 }
 
 /** Concatenate the text blocks of a Claude response. */
@@ -24,6 +78,99 @@ function textOf(message: Anthropic.Message): string {
     .join('\n')
     .trim();
 }
+
+// ── Usage recording ─────────────────────────────────────────
+
+/**
+ * One row per API call, success or failure. Never throws and never
+ * blocks the caller: a book-keeping problem must not take down the
+ * feature that was doing the actual work.
+ */
+async function record(
+  ctx: CallContext,
+  model: string,
+  usage: Anthropic.Usage | null,
+  latencyMs: number,
+  error: unknown,
+): Promise<void> {
+  try {
+    if (!supabaseAdmin) return;
+    const orgId = await resolveOrgId(ctx.orgId);
+    if (!orgId) return;
+
+    const tokens = {
+      input_tokens: usage?.input_tokens ?? 0,
+      output_tokens: usage?.output_tokens ?? 0,
+      cache_write_tokens: usage?.cache_creation_input_tokens ?? 0,
+      cache_read_tokens: usage?.cache_read_input_tokens ?? 0,
+    };
+
+    // Written to activity_log rather than a table of its own: the studio
+    // has one database connection, and a new table would need DDL and a
+    // second credential before any of this could be recorded at all. The
+    // audit log already exists, is already org-scoped, and this genuinely
+    // is activity — the Audit Log screen filters these out so it stays
+    // readable, and the usage report reads them back by action.
+    await supabaseAdmin.from('activity_log').insert({
+      org_id: orgId,
+      actor: ctx.actor ?? null,
+      action: AI_USAGE_ACTION,
+      entity: ctx.entity ?? null,
+      entity_id: ctx.entityId ?? null,
+      meta: {
+        feature: ctx.feature,
+        model,
+        ...tokens,
+        cost_usd: Number(estimateCostUsd(model, tokens).toFixed(6)),
+        latency_ms: latencyMs,
+        ok: !error,
+        // The message only — an API error can carry a whole request in it.
+        error: error ? String((error as Error).message ?? error).slice(0, 500) : null,
+      },
+    });
+  } catch (err) {
+    console.error('[ai_usage] could not record call', (err as Error).message);
+  }
+}
+
+/**
+ * Run a Claude call and record what it cost, whatever happens to it.
+ *
+ * The model comes from the studio's settings unless the caller named one
+ * explicitly, so changing the model in Settings changes every feature at
+ * once without touching a single call site.
+ */
+async function recorded(
+  ctx: CallContext,
+  params: Omit<Anthropic.MessageCreateParamsNonStreaming, 'model'> & { model?: string },
+): Promise<Anthropic.Message> {
+  const ai = await clientFor(ctx.orgId);
+  if (!ai) throw new AnthropicNotConfigured();
+
+  const request = { ...params, model: params.model ?? ai.model };
+  const started = Date.now();
+  try {
+    const message = await ai.client.messages.create(request);
+    await record(ctx, request.model, message.usage, Date.now() - started, null);
+    return message;
+  } catch (err) {
+    await record(ctx, request.model, null, Date.now() - started, err);
+    throw err;
+  }
+}
+
+/**
+ * For callers that build their own request (the Assistant runs a tool
+ * loop). Everything still lands on the usage report.
+ */
+export function createMessage(
+  ctx: CallContext,
+  params: Omit<Anthropic.MessageCreateParamsNonStreaming, 'model'> & { model?: string },
+): Promise<Anthropic.Message> {
+  return recorded(ctx, params);
+}
+
+// ── Helpers ─────────────────────────────────────────────────
 
 /** Pull the first balanced JSON object/array out of a string. */
 export function firstJson<T>(text: string): T | null {
@@ -63,10 +210,12 @@ type UserContent = string | Anthropic.ContentBlockParam[];
  * must instruct the required fields; this returns the parsed object or
  * null if nothing parseable came back.
  */
-export async function extractJson<T>(system: string, user: UserContent): Promise<T | null> {
-  if (!anthropic) throw new AnthropicNotConfigured();
-  const message = await anthropic.messages.create({
-    model: env.anthropic.model,
+export async function extractJson<T>(
+  system: string,
+  user: UserContent,
+  ctx: CallContext,
+): Promise<T | null> {
+  const message = await recorded(ctx, {
     max_tokens: 4096,
     system: `${system}\n\nRespond with ONLY a single JSON object. No prose, no code fences.`,
     messages: [{ role: 'user', content: user }],
@@ -75,10 +224,13 @@ export async function extractJson<T>(system: string, user: UserContent): Promise
 }
 
 /** Free-form generation (prompt runner, report narrative). */
-export async function generate(system: string, user: string, maxTokens = 8000): Promise<string> {
-  if (!anthropic) throw new AnthropicNotConfigured();
-  const message = await anthropic.messages.create({
-    model: env.anthropic.model,
+export async function generate(
+  system: string,
+  user: string,
+  ctx: CallContext,
+  maxTokens = 8000,
+): Promise<string> {
+  const message = await recorded(ctx, {
     max_tokens: maxTokens,
     system,
     messages: [{ role: 'user', content: user }],

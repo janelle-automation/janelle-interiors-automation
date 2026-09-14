@@ -20,6 +20,10 @@ import { tasksRouter } from './routes/tasks.js';
 import { teamRouter } from './routes/team.js';
 import { digestsRouter } from './routes/digests.js';
 import { assistantRouter } from './routes/assistant.js';
+import { usageRouter } from './routes/usage.js';
+import { publicUsageRouter } from './routes/publicUsage.js';
+import { permissionsRouter } from './routes/permissions.js';
+import { settingsRouter } from './routes/settings.js';
 import { errorHandler, notFound } from './middleware/error.js';
 
 /**
@@ -33,9 +37,31 @@ import { errorHandler, notFound } from './middleware/error.js';
 const app = express();
 
 app.use(express.json({ limit: '4mb' }));
+
+/**
+ * Which browser origins may call this API.
+ *
+ * In development the Vite dev server slides to 5174, 5175 … whenever a
+ * previous instance is still holding 5173, and an origin that is not on
+ * the list comes back to the browser as a bare "Failed to fetch" — which
+ * looks exactly like the API being down, and sends you looking in the
+ * wrong place. So locally any loopback origin is accepted; deployments
+ * still honour CORS_ORIGINS exactly.
+ */
+const isDev = process.env.NODE_ENV !== 'production';
+const LOOPBACK = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
+
 app.use(
   cors({
-    origin: env.corsOrigins.length ? env.corsOrigins : true,
+    origin(origin, callback) {
+      // No Origin header at all: curl, same-origin, health checks.
+      if (!origin) return callback(null, true);
+      if (env.corsOrigins.includes(origin)) return callback(null, true);
+      if (isDev && LOOPBACK.test(origin)) return callback(null, true);
+      // Omit the header rather than erroring — the browser blocks it,
+      // and a rejected origin should not become a 500 in the log.
+      return callback(null, false);
+    },
     credentials: true,
   }),
 );
@@ -60,6 +86,12 @@ app.use('/api/tasks', tasksRouter);
 app.use('/api/team', teamRouter);
 app.use('/api/digests', digestsRouter);
 app.use('/api/assistant', assistantRouter);
+app.use('/api/usage', usageRouter);
+app.use('/api/permissions', permissionsRouter);
+app.use('/api/settings', settingsRouter);
+
+// No session required — the token in the URL is the credential.
+app.use('/api/public', publicUsageRouter);
 
 // Fallbacks
 app.use(notFound);

@@ -1,0 +1,96 @@
+﻿Janelle Interiors — AI Workflow System
+Functional flow brief
+
+
+
+
+________________
+
+
+How the system works
+Your team keeps working in Houzz Pro. Nothing changes there. Google becomes the layer the AI reads and writes.
+
+
+Gmail + Drive                ──▶  System reads, sorts, records           ──▶  Live tracking sheet
+
+
+(vendor mail,                                                                                Report
+Follow-up drafts, 
+approvals, POs)                                                                                                 
+
+
+Phase 1 — Prompt system -  I guess it should be list of prompts across design, procurement/FF&E, client communication and admin, built from your own spec sheets, proposals and emails. Next I am fully sure where they would run these prompts. Would it be copy-paste prompts to ChatGPT, or Claude? It would be fine if you please add your comment here. 
+
+
+Phase 2 — Tracking layer  The system reads project email and Drive — including PDF quotes and order confirmations — pulls out project, vendor, item, PO number, etc. and keeps a live Google Sheet current: active projects, vendor/PO tracker, awaiting client, spec gaps.
+
+
+
+
+Phase 3 — Follow-up + reporting  Nightly checks for vendor updates, overdue client approvals,slipping dates. Each one becomes a draft in your Gmail for you to send — not auto-sent and a Monday weekly report. It would be fine if you please list what would be part of weekly report
+
+
+ 
+
+
+________________
+
+
+What I need from you
+Access
+
+
+* A Google Workspace seat  with access to Drive folders. Revocable any time
+* Houzz Pro.
+
+
+Materials
+
+
+* Your spec sheet/Google spreadsheets/Drive access
+* Your team list roles as there are 4–5 people already working. Permission access for each role
+* Project list export from Houzz Pro, if it offers one.
+
+
+
+
+
+
+________________
+
+
+Questions
+Email setup — please answer these first, they shape the build
+
+
+1. The Ojai email thread shows each person (Carissa, Adeleigh, Janelle) emailing from their own address. We will have an option where each team member connects their email granting read access across the team's project email. This would allow us to read emails and extract project data and status etc. 
+
+
+
+
+Houzz Pro — 2. Can you export your project list (CSV)? 3. Does Houzz Pro send notification emails — new lead, client comment, invoice paid? Those land in Gmail and we can read useful data from them. One example of each would help.  
+
+
+Your workflow 4. What stages do you think in? e.g. Lead → Concept → Spec → Approval → PO → Production → Shipping → Install.  
+
+4. What counts as stuck — how many days of vendor silence before a nudge? Same for client approvals?  
+ 
+
+
+________________
+
+
+Scope
+Included: up to 20 prompts + playbook · Gmail/Drive tracking layer + live sheet · follow-up nudges + weekly report · one revision round per phase · handover docs and walkthrough.
+
+
+Not included: changes to Houzz Pro or writing data back into it · integrations beyond Google Workspace (Dropbox, Canva, accounting) · custom web or mobile app · ongoing support after handover · AI subscription/usage costs.
+
+
+Anything outside this can be added by change order.
+
+
+
+
+Thank you 
+________________

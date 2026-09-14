@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '../lib/supabase.js';
-import { anthropic, generate } from './anthropic.js';
+import { generate, isAiReady } from './anthropic.js';
 import { PROJECT_STAGES } from '@janelle/shared';
 
 export interface ReportResult {
@@ -52,11 +52,12 @@ export async function runReport(orgId: string): Promise<ReportResult> {
     `${figures.pos_updated_this_week} purchase orders moved this week, ${figures.committed_spend.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })} committed. ` +
     `${figures.open_follow_ups} follow-ups open (${figures.drafts_pending} drafts ready), ${figures.spec_gaps} spec gaps outstanding.`;
 
-  if (anthropic) {
+  if (await isAiReady(orgId)) {
     try {
       narrative = await generate(
         'You write a calm, one-paragraph Monday summary for an interior design studio principal. Warm, concise, concrete.',
         `Summarize the studio's week from these figures as one short paragraph:\n${JSON.stringify(figures, null, 2)}`,
+        { feature: 'report.narrative', orgId },
         600,
       );
     } catch (err) {

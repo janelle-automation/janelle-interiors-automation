@@ -1,6 +1,6 @@
 import { DEFAULT_SLA, TASK_KIND_LABELS, type SlaSettings, type TaskKind } from '@janelle/shared';
 import { supabaseAdmin } from '../lib/supabase.js';
-import { anthropic, generate } from './anthropic.js';
+import { generate, isAiReady } from './anthropic.js';
 
 export interface DigestResult {
   ok: boolean;
@@ -129,7 +129,7 @@ export async function runDigest(orgId: string): Promise<DigestResult> {
     sla,
   };
 
-  const narrative = await writeNarrative(figures, escalations);
+  const narrative = await writeNarrative(orgId, figures, escalations);
 
   const { data, error } = await supabaseAdmin
     .from('digests')
@@ -166,6 +166,7 @@ export async function runDigest(orgId: string): Promise<DigestResult> {
 
 /** A short, plain summary a busy principal can read on a phone. */
 async function writeNarrative(
+  orgId: string,
   figures: Record<string, unknown>,
   escalations: DigestRow[],
 ): Promise<string> {
@@ -186,7 +187,7 @@ async function writeNarrative(
     return `${bits.join(', ')}. ${escalations.length} item(s) need you.`;
   };
 
-  if (!anthropic) return plain();
+  if (!(await isAiReady(orgId))) return plain();
   if (!overdue.length && !unassigned.length && !quotes.length) return plain();
 
   const lines = [
@@ -211,6 +212,7 @@ Rules:
 - Be matter-of-fact, never alarmed, never chirpy. No emoji. No praise.
 - If something needs her personally, say so in one clear sentence at the end.`,
       lines,
+      { feature: 'digest.summary', orgId },
       600,
     );
   } catch {

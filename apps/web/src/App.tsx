@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from './context/AuthContext';
 import { AppShell } from './components/AppShell';
 import Dashboard from './pages/Dashboard';
@@ -9,12 +9,15 @@ import Prompts from './pages/Prompts';
 import FollowUps from './pages/FollowUps';
 import Tasks from './pages/Tasks';
 import Assistant from './pages/Assistant';
+import Team from './pages/Team';
+import Permissions from './pages/Permissions';
 import Drafts from './pages/Drafts';
 import Reports from './pages/Reports';
 import Activity from './pages/Activity';
 import Settings from './pages/Settings';
 import Login from './pages/Login';
 import ConfigNeeded from './pages/ConfigNeeded';
+import UsageReport from './pages/UsageReport';
 import { Inbox, Documents } from './pages/Simple';
 
 function FullScreen({ label }: { label: string }) {
@@ -47,6 +50,18 @@ function BackendError({ message, onRetry, onSignOut }: { message: string; onRetr
 
 export default function App() {
   const { configured, loading, session, user, profileError, refresh, signOut } = useAuth();
+  const { pathname } = useLocation();
+
+  // The shared AI usage report is reachable by its link alone: no sidebar,
+  // no sign-in, and no wait on the session — whoever holds the URL is not
+  // expected to have an account here.
+  if (pathname.startsWith('/u/')) {
+    return (
+      <Routes>
+        <Route path="/u/:token" element={<UsageReport />} />
+      </Routes>
+    );
+  }
 
   if (!configured) return <ConfigNeeded />;
   if (loading) return <FullScreen label="Loading…" />;
@@ -73,6 +88,8 @@ export default function App() {
         <Route path="/drafts" element={<Drafts />} />
         <Route path="/reports" element={<Reports />} />
         <Route path="/activity" element={<Activity />} />
+        <Route path="/team" element={<Team />} />
+        <Route path="/permissions" element={<Permissions />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

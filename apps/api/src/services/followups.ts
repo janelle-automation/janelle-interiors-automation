@@ -1,6 +1,6 @@
 import { DEFAULT_SLA, type FollowUpType, type SlaSettings } from '@janelle/shared';
 import { supabaseAdmin } from '../lib/supabase.js';
-import { anthropic, generate } from './anthropic.js';
+import { generate, isAiReady } from './anthropic.js';
 
 export interface FollowUpResult {
   ok: boolean;
@@ -16,6 +16,8 @@ interface Trigger {
   target: string | null;
   reason: string;
   context: string;
+  /** Set for the internal reminders, so one task raises one nudge. */
+  taskId?: string;
 }
 
 function daysAgoIso(days: number): string {
@@ -31,18 +33,25 @@ async function draftBody(t: Trigger): Promise<{ subject: string; body: string }>
     // Proactive, not apologetic: the client should hear from us first.
     quote_overdue: 'An update on your quote',
     client_waiting: 'An update on your request',
+    task_overdue: 'A reminder on something assigned to you',
+    task_escalation: 'Still open after a reminder',
   };
   const subject = SUBJECTS[t.type] ?? 'Checking in on timing';
 
-  if (!anthropic) {
+  if (!(await isAiReady())) {
     return {
       subject,
       body: `Hi,\n\nJust following up regarding ${t.context}. ${t.reason} Could you share an update when you have a moment?\n\nThank you,\nJanelle Interiors`,
     };
   }
+  // A teammate gets a colleague's nudge, not a client-facing letter.
+  const internal = t.type === 'task_overdue' || t.type === 'task_escalation';
   const body = await generate(
-    'You write short, warm, professional follow-up emails for an interior design studio. 2 short paragraphs, no placeholders, sign off as "Janelle Interiors".',
+    internal
+      ? 'You write brief internal reminders between colleagues at a small interior design studio. One short paragraph, plain and matter-of-fact, never scolding — the point is to unblock the work, not to tell someone off. Ask if anything is in the way. No placeholders, sign off as "Janelle Interiors".'
+      : 'You write short, warm, professional follow-up emails for an interior design studio. 2 short paragraphs, no placeholders, sign off as "Janelle Interiors".',
     `Write a follow-up email. Situation: ${t.reason} Context: ${t.context}`,
+    { feature: 'followup.draft' },
     800,
   );
   return { subject, body };
@@ -149,6 +158,62 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
     });
   }
 
+  // 0c. Internal reminders — the studio's own people, not vendors or clients.
+  //     A task that has gone past its due date gets its owner nudged; if the
+  //     nudge has already been sent and the task is still sitting there, the
+  //     principal is told instead. Repeats on a cadence rather than nightly.
+  const today = todayIso();
+  const { data: liveTasks } = await supabaseAdmin
+    .from('tasks')
+    .select('id, title, kind, status, due_date, created_at, reminded_at, reminder_count, assigned_to, project_id, vendor_id, projects(name), profiles(full_name, email)')
+    .eq('org_id', orgId)
+    .in('status', ['open', 'in_progress', 'blocked']);
+
+  for (const row of liveTasks ?? []) {
+    const t = row as unknown as {
+      id: string; title: string; status: string; due_date: string | null; created_at: string;
+      reminded_at: string | null; reminder_count: number; assigned_to: string | null;
+      project_id: string | null; vendor_id: string | null;
+      projects: { name: string } | null;
+      profiles: { full_name: string | null; email: string | null } | null;
+    };
+
+    // "Overdue" means past a stated due date, or blocked, or simply old with
+    // no date on it at all — otherwise a task with no deadline never surfaces.
+    const ageDays = Math.floor((Date.now() - new Date(t.created_at).getTime()) / 86400_000);
+    const overdue =
+      (t.due_date !== null && t.due_date < today) ||
+      t.status === 'blocked' ||
+      (t.due_date === null && ageDays >= sla.task_reminder_days + sla.quote_response_days);
+    if (!overdue) continue;
+
+    // Respect the cadence: no second nudge until the repeat window passes.
+    if (t.reminded_at) {
+      const sinceDays = Math.floor((Date.now() - new Date(t.reminded_at).getTime()) / 86400_000);
+      if (sinceDays < sla.reminder_repeat_days) continue;
+    }
+
+    const owner = t.profiles?.full_name ?? 'whoever picks it up';
+    const where = t.projects?.name ? ` on ${t.projects.name}` : '';
+    const escalate = t.reminder_count >= 1;
+
+    triggers.push({
+      type: escalate ? 'task_escalation' : 'task_overdue',
+      projectId: t.project_id,
+      vendorId: t.vendor_id,
+      // Unassigned work has nobody to nudge; it still needs raising so it
+      // shows up rather than quietly rotting.
+      target: escalate ? null : (t.profiles?.email ?? null),
+      reason: escalate
+        ? `${owner} was reminded and "${t.title}" is still open${t.due_date ? ` (due ${t.due_date})` : ''}.`
+        : t.assigned_to
+          ? `This is overdue${t.due_date ? ` (due ${t.due_date})` : ` — raised ${ageDays} days ago`} and still with ${owner}.`
+          : `This is overdue${t.due_date ? ` (due ${t.due_date})` : ` — raised ${ageDays} days ago`} and nobody owns it.`,
+      context: `${t.title}${where}`,
+      taskId: t.id,
+    });
+  }
+
   // 1. Vendor silence — POs placed but not confirmed past the threshold.
   const { data: silentPos } = await supabaseAdmin
     .from('purchase_orders')
@@ -233,8 +298,9 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
       .eq('org_id', orgId)
       .eq('type', t.type)
       .in('status', ['open', 'drafted']);
-    if (t.projectId) dedupe.eq('project_id', t.projectId);
-    if (t.vendorId) dedupe.eq('vendor_id', t.vendorId);
+    if (t.taskId) dedupe.eq('task_id', t.taskId);
+    else if (t.projectId) dedupe.eq('project_id', t.projectId);
+    if (!t.taskId && t.vendorId) dedupe.eq('vendor_id', t.vendorId);
     const { data: dupes } = await dedupe;
     if (dupes && dupes.length) continue;
 
@@ -244,7 +310,11 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
     // Resolve the real correspondent + thread from recent email; fall
     // back to the vendor's stored contact where no email exists yet.
     let resolved: Recipient | null = null;
-    if (t.type === 'vendor_silence' || t.type === 'date_slipping') {
+    // Internal reminders go to the teammate on t.target; never resolve them
+    // against a vendor thread, or a nudge would be addressed to the vendor.
+    if (t.type === 'task_overdue' || t.type === 'task_escalation') {
+      resolved = null;
+    } else if (t.type === 'vendor_silence' || t.type === 'date_slipping') {
       resolved = await resolveRecipient(orgId, { vendorId: t.vendorId });
     } else if (t.type === 'client_approval_overdue') {
       resolved = await resolveRecipient(orgId, { projectId: t.projectId, preferClass: 'client_approval' });
@@ -280,12 +350,30 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
       type: t.type,
       project_id: t.projectId,
       vendor_id: t.vendorId,
+      task_id: t.taskId ?? null,
       target: to,
       reason: t.reason,
       due_date: todayIso(),
       status,
       draft_id: draftId,
     });
+
+    // Stamp the task so the next run waits out the repeat window instead of
+    // nudging the same person every night.
+    if (t.taskId) {
+      const { data: cur } = await supabaseAdmin!
+        .from('tasks')
+        .select('reminder_count')
+        .eq('id', t.taskId)
+        .maybeSingle();
+      await supabaseAdmin!
+        .from('tasks')
+        .update({
+          reminded_at: new Date().toISOString(),
+          reminder_count: ((cur as { reminder_count?: number } | null)?.reminder_count ?? 0) + 1,
+        })
+        .eq('id', t.taskId);
+    }
     raised++;
   }
 

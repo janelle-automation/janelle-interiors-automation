@@ -53,7 +53,11 @@ export type FollowUpType =
   | 'date_slipping'
   | 'spec_gap'
   | 'quote_overdue'
-  | 'client_waiting';
+  | 'client_waiting'
+  /** Internal nudge: the person who owns a task has let it go overdue. */
+  | 'task_overdue'
+  /** The nudge was ignored, so the principal is told. */
+  | 'task_escalation';
 
 /**
  * Service levels the studio actually works to, captured from the
@@ -71,6 +75,10 @@ export interface SlaSettings {
   client_approval_days: number;
   /** A task overdue by this much → escalate to the principal. */
   escalation_days: number;
+  /** How long a task may sit past its due date before its owner is nudged. */
+  task_reminder_days: number;
+  /** Days between repeat nudges on the same task, so it is a cadence not a nightly spam. */
+  reminder_repeat_days: number;
 }
 
 export const DEFAULT_SLA: SlaSettings = {
@@ -79,6 +87,8 @@ export const DEFAULT_SLA: SlaSettings = {
   vendor_silence_days: 3,
   client_approval_days: 5,
   escalation_days: 2,
+  task_reminder_days: 1,
+  reminder_repeat_days: 2,
 };
 
 export type FollowUpStatus = 'open' | 'drafted' | 'sent' | 'dismissed' | 'done';
@@ -132,6 +142,92 @@ export const TASK_KIND_ROLE: Record<TaskKind, UserRole> = {
   admin: 'assistant',
 };
 
+/**
+ * The studio's named seats, from "Team Roles Scorecards v3 — Named Seats"
+ * (10 September 2026). The rule that document sets is one owner per
+ * outcome: dual-seat is allowed, dual-ownership of the same outcome is not.
+ *
+ * A seat is more specific than a role. Both Carissa and Joanna do
+ * coordination, but only Carissa owns the data standard and POs, and the
+ * document is explicit that Joanna "is not a second Carissa". Routing by
+ * seat keeps that distinction; routing by role alone loses it.
+ */
+export type Seat =
+  | 'owner'
+  | 'coo'
+  | 'operations'
+  | 'pm_support'
+  | 'technical_production'
+  | 'hotel_ffe'
+  | 'design';
+
+export interface SeatBrief {
+  /** The person holding it today; null where the document says HIRE. */
+  person: string | null;
+  label: string;
+  role: UserRole;
+  /** What this seat owns, in the document's own words — used to route work. */
+  owns: string;
+  /** What it must NOT own. Just as important: it stops mis-assignment. */
+  notOwns: string;
+}
+
+export const SEATS: Record<Seat, SeatBrief> = {
+  owner: {
+    person: 'Janelle',
+    label: 'Owner',
+    role: 'principal',
+    owns: 'vision, brand, new-client close, hotel relationship at principal level, hire/fire, approving money leaving the bank, checks and wires, live-project renames',
+    notOwns: 'assembling status, issuing finish schedules, building POs, being default designer, the daily task board',
+  },
+  coo: {
+    person: null, // vacant — the document's first hire
+    label: 'Integrator / COO',
+    role: 'coordinator',
+    owns: 'the weekly meeting, scorecards, seat capacity, making sure the RFI tracker exists and is used, CRM cadence, cross-seat issues with no other owner, protecting the calendar of the Owner',
+    notOwns: 'design intent, drawing, vendor negotiation, writing POs, being the day-to-day contact for the hotel client',
+  },
+  operations: {
+    person: 'Carissa',
+    label: 'Operations + Finance',
+    role: 'coordinator',
+    owns: 'Houzz data standard and hygiene, RFI numbering and the M/W/F digest, due dates, QuickBooks COGS/AR/AP, purchase orders from complete specs, card payment after approval, the weekly ops pack',
+    notOwns: 'aesthetic decisions, issued-set version control, being default designer, approving spend',
+  },
+  pm_support: {
+    person: 'Joanna',
+    label: 'Operations Support / PM assistant',
+    role: 'assistant',
+    owns: 'pushing tasks so each has ONE owner, a due date and a next step, chasing overdue and unassigned tasks, scanning proposals for ones with no next step',
+    notOwns: 'answering design RFIs, inventing specs, rewriting the data standard, being a second Operations seat',
+  },
+  technical_production: {
+    person: 'Victoria',
+    label: 'Technical production',
+    role: 'assistant',
+    owns: 'Canva finish schedules built from the current Drive set, matching Canva to Drive, logging disagreements as RFIs, Houzz record cleanup and folder hygiene',
+    notOwns: 'client email, purchase orders, renaming live projects, design intent, being Lead Designer or PM',
+  },
+  hotel_ffe: {
+    person: 'Adelaide',
+    label: 'Hotel FF&E / Procurement',
+    role: 'procurement',
+    owns: 'hotel buying, order tracking, receiving and damage claims, vendor follow-up, flagging delays within 24 hours, hotel order status',
+    notOwns: 'finding the next hotel client, residential design boards, approving spend',
+  },
+  design: {
+    person: 'Brianna / Amanda',
+    label: 'Lead / Technical Designer',
+    role: 'designer',
+    owns: 'design intent and issued sets on assigned projects, elevations and drawings, complete specs with no TBD rows, client design email',
+    notOwns: 'due dates, purchase orders, sale or contract, hotel backup',
+  },
+};
+
+export const SEAT_KEYS: Seat[] = [
+  'owner', 'coo', 'operations', 'pm_support', 'technical_production', 'hotel_ffe', 'design',
+];
+
 export type EmailClass =
   | 'vendor_quote'
   | 'order_confirmation'
@@ -148,6 +244,7 @@ export type PromptCategory = 'design' | 'procurement' | 'client' | 'admin';
 
 export type Resource =
   | 'projects'
+  | 'spec_gaps'
   | 'vendors'
   | 'purchase_orders'
   | 'documents'
@@ -164,6 +261,37 @@ export type Resource =
 
 export type Action = 'read' | 'create' | 'update' | 'delete';
 
+/** Every resource, in the order the permission matrix should display them. */
+export const RESOURCES: Resource[] = [
+  'projects', 'spec_gaps', 'vendors', 'purchase_orders', 'documents', 'emails',
+  'tasks', 'follow_ups', 'drafts', 'prompts', 'reports', 'digests',
+  'team', 'settings', 'ops',
+];
+
+export const RESOURCE_LABELS: Record<Resource, string> = {
+  projects: 'Projects',
+  spec_gaps: 'Spec gaps',
+  vendors: 'Vendors',
+  purchase_orders: 'Purchase orders',
+  documents: 'Documents',
+  emails: 'Email',
+  tasks: 'Tasks',
+  follow_ups: 'Follow-ups',
+  drafts: 'Drafts',
+  prompts: 'Prompt library',
+  reports: 'Reports',
+  digests: 'Morning digest',
+  team: 'Team & roles',
+  settings: 'Studio settings',
+  ops: 'Run jobs',
+};
+
+export const ACTIONS: Action[] = ['read', 'create', 'update', 'delete'];
+
+export const USER_ROLES: UserRole[] = [
+  'principal', 'designer', 'procurement', 'coordinator', 'assistant',
+];
+
 /**
  * Who may do what. A five-person studio does not need compartmented
  * reads — everyone can see the org's work, which is the point of the
@@ -174,12 +302,13 @@ export type Action = 'read' | 'create' | 'update' | 'delete';
  */
 const WRITERS: Record<Resource, UserRole[]> = {
   projects: ['principal', 'coordinator', 'designer'],
+  spec_gaps: ['principal', 'coordinator', 'designer', 'procurement', 'assistant'],
   vendors: ['principal', 'coordinator', 'procurement'],
   purchase_orders: ['principal', 'coordinator', 'procurement'],
   documents: ['principal', 'coordinator', 'designer', 'procurement', 'assistant'],
   emails: ['principal', 'coordinator'],
   tasks: ['principal', 'coordinator', 'designer', 'procurement', 'assistant'],
-  follow_ups: ['principal', 'coordinator'],
+  follow_ups: ['principal', 'coordinator', 'procurement'],
   drafts: ['principal', 'coordinator', 'designer', 'procurement', 'assistant'],
   prompts: ['principal', 'coordinator', 'designer'],
   reports: ['principal', 'coordinator'],
@@ -341,3 +470,414 @@ export interface ApiError {
 }
 
 export type ApiResult<T> = { data: T } | ApiError;
+
+// ── Dynamic module access ───────────────────────────────────
+
+/**
+ * The matrix above is the studio's DEFAULT. A principal can override any
+ * single cell of it — "let procurement edit projects", "stop assistants
+ * creating drafts" — from Team & Roles, and those overrides live in the
+ * `role_permissions` table, keyed exactly like this.
+ *
+ * Overrides are SPARSE: a missing key means "use the default". A studio
+ * that has never opened the screen behaves exactly as it did before, and
+ * the matrix above stays the thing you read to understand the system.
+ *
+ * Mirrored by can_act() in supabase/migrations/0008. Change both.
+ */
+export type PermissionKey = string; // `${UserRole}:${Resource}:${Action}`
+export type PermissionOverrides = Record<PermissionKey, boolean>;
+
+export function permissionKey(role: UserRole, resource: Resource, action: Action): PermissionKey {
+  return `${role}:${resource}:${action}`;
+}
+
+/**
+ * Cells that may never be revoked. Without them a studio can lock itself
+ * out of its own permission screen, with no way back short of editing the
+ * database by hand. Reads are locked open for the same reason they are
+ * open by default: seeing the studio's work is the point of the system.
+ */
+export function isLockedPermission(role: UserRole, resource: Resource, action: Action): boolean {
+  if (action === 'read') return true;
+  if (role !== 'principal') return false;
+  return resource === 'team' || resource === 'settings';
+}
+
+/** `can()`, with the studio's own overrides applied. */
+export function canWith(
+  overrides: PermissionOverrides | null | undefined,
+  role: UserRole | null,
+  resource: Resource,
+  action: Action,
+): boolean {
+  if (!role) return false;
+  if (isLockedPermission(role, resource, action)) return can(role, resource, action);
+  const override = overrides?.[permissionKey(role, resource, action)];
+  if (typeof override === 'boolean') return override;
+  return can(role, resource, action);
+}
+
+/** One stored override, as the permissions API returns it. */
+export interface RolePermissionRow {
+  role: UserRole;
+  resource: Resource;
+  action: Action;
+  allowed: boolean;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
+// ── AI usage ────────────────────────────────────────────────
+
+/**
+ * Every place the studio spends Claude tokens. Recorded at the single
+ * chokepoint in services/anthropic.ts, so a new caller cannot quietly
+ * spend money without showing up here.
+ */
+export type AiFeature =
+  | 'email.extract'
+  | 'task.extract'
+  | 'document.extract'
+  | 'followup.draft'
+  | 'reply.draft'
+  | 'digest.summary'
+  | 'report.narrative'
+  | 'prompt.run'
+  | 'assistant.answer';
+
+export const AI_FEATURES: AiFeature[] = [
+  'email.extract', 'task.extract', 'document.extract', 'followup.draft',
+  'reply.draft', 'digest.summary', 'report.narrative', 'prompt.run', 'assistant.answer',
+];
+
+export const AI_FEATURE_LABELS: Record<AiFeature, string> = {
+  'email.extract': 'Reading email',
+  'task.extract': 'Raising tasks',
+  'document.extract': 'Parsing documents',
+  'followup.draft': 'Drafting follow-ups',
+  'reply.draft': 'Drafting replies',
+  'digest.summary': 'Morning digest',
+  'report.narrative': 'Weekly report',
+  'prompt.run': 'Prompt Studio',
+  'assistant.answer': 'Assistant answers',
+};
+
+/** Whether the spend was the agent working, or a person pressing a button. */
+export const AI_FEATURE_TRIGGER: Record<AiFeature, 'agent' | 'person'> = {
+  'email.extract': 'agent',
+  'task.extract': 'agent',
+  'document.extract': 'agent',
+  'followup.draft': 'agent',
+  'reply.draft': 'agent',
+  'digest.summary': 'agent',
+  'report.narrative': 'agent',
+  'prompt.run': 'person',
+  'assistant.answer': 'person',
+};
+
+/**
+ * US dollars per MILLION tokens, from Anthropic's published rates.
+ * Cache writes bill at ~1.25x input and cache reads at ~0.1x, so both are
+ * derived from the input rate rather than listed per model.
+ */
+export const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  'claude-fable-5-1': { input: 10, output: 50 },
+  'claude-fable-5': { input: 10, output: 50 },
+  'claude-opus-5': { input: 5, output: 25 },
+  'claude-opus-4-8': { input: 5, output: 25 },
+  'claude-opus-4-7': { input: 5, output: 25 },
+  'claude-opus-4-6': { input: 5, output: 25 },
+  'claude-sonnet-5': { input: 2, output: 10 },
+  'claude-sonnet-4-6': { input: 3, output: 15 },
+  'claude-haiku-4-5': { input: 1, output: 5 },
+};
+
+export const CACHE_WRITE_MULTIPLIER = 1.25;
+export const CACHE_READ_MULTIPLIER = 0.1;
+
+export interface TokenCounts {
+  input_tokens: number;
+  output_tokens: number;
+  cache_write_tokens?: number;
+  cache_read_tokens?: number;
+}
+
+/**
+ * Cost of one call, in USD. An unknown model prices at 0 rather than
+ * guessing: a wrong number on a spend page is worse than a missing one,
+ * and the report names any model it could not price.
+ */
+export function estimateCostUsd(model: string, t: TokenCounts): number {
+  const rate = MODEL_PRICING[model];
+  if (!rate) return 0;
+  const perInputToken = rate.input / 1_000_000;
+  return (
+    t.input_tokens * perInputToken +
+    t.output_tokens * (rate.output / 1_000_000) +
+    (t.cache_write_tokens ?? 0) * perInputToken * CACHE_WRITE_MULTIPLIER +
+    (t.cache_read_tokens ?? 0) * perInputToken * CACHE_READ_MULTIPLIER
+  );
+}
+
+export interface AiUsageRow {
+  id: string;
+  feature: string;
+  model: string;
+  actor_name: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_write_tokens: number;
+  cache_read_tokens: number;
+  cost_usd: number;
+  latency_ms: number | null;
+  ok: boolean;
+  error: string | null;
+  created_at: string;
+}
+
+export interface AiUsageBucket {
+  key: string;
+  label: string;
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+}
+
+export interface AiUsageReport {
+  org_name: string;
+  /** Days covered, counted back from now. */
+  window_days: number;
+  generated_at: string;
+  totals: {
+    calls: number;
+    failed: number;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cost_usd: number;
+    avg_latency_ms: number | null;
+  };
+  /** Cost over the window immediately before this one, for the trend. */
+  previous_cost_usd: number;
+  by_feature: AiUsageBucket[];
+  by_model: AiUsageBucket[];
+  by_day: AiUsageBucket[];
+  by_person: AiUsageBucket[];
+  recent: AiUsageRow[];
+  /** Models present in the data that have no published price here. */
+  unpriced_models: string[];
+}
+
+// ── Role-wise dashboard ─────────────────────────────────────
+
+/**
+ * A dashboard card, named. The API computes every figure once; each role
+ * is then shown only the ones its seat is accountable for, in the order
+ * that person actually works. The client's stated test is "you don't need
+ * to be in this system" — so the first card someone sees has to be the one
+ * that would otherwise have arrived as a text message.
+ */
+export type DashboardCardKey =
+  | 'myOpenTasks'
+  | 'myOverdueTasks'
+  | 'unassignedTasks'
+  | 'tasksWithoutNextStep'
+  | 'openFollowUps'
+  | 'awaitingClient'
+  | 'draftsPending'
+  | 'specGaps'
+  | 'openPOs'
+  | 'activeProjects'
+  | 'installsSoon'
+  | 'emailsRead'
+  | 'documentsParsed'
+  | 'escalations';
+
+export const DASHBOARD_CARD_KEYS: DashboardCardKey[] = [
+  'myOpenTasks', 'myOverdueTasks', 'unassignedTasks', 'tasksWithoutNextStep',
+  'openFollowUps', 'awaitingClient', 'draftsPending', 'specGaps', 'openPOs',
+  'activeProjects', 'installsSoon', 'emailsRead', 'documentsParsed', 'escalations',
+];
+
+export const DASHBOARD_CARD_LABELS: Record<DashboardCardKey, string> = {
+  myOpenTasks: 'My open tasks',
+  myOverdueTasks: 'My overdue tasks',
+  unassignedTasks: 'Unassigned tasks',
+  tasksWithoutNextStep: 'No next step',
+  openFollowUps: 'Open follow-ups',
+  awaitingClient: 'Awaiting client',
+  draftsPending: 'Drafts to review',
+  specGaps: 'Open spec gaps',
+  openPOs: 'Open purchase orders',
+  activeProjects: 'Active projects',
+  installsSoon: 'Installs approaching',
+  emailsRead: 'Emails read',
+  documentsParsed: 'Documents parsed',
+  escalations: 'Escalated to you',
+};
+
+/** Where a card sends you when it is not zero. */
+export const DASHBOARD_CARD_LINKS: Record<DashboardCardKey, string> = {
+  myOpenTasks: '/tasks',
+  myOverdueTasks: '/tasks',
+  unassignedTasks: '/tasks',
+  tasksWithoutNextStep: '/tasks',
+  openFollowUps: '/follow-ups',
+  awaitingClient: '/follow-ups',
+  draftsPending: '/drafts',
+  specGaps: '/projects',
+  openPOs: '/vendors',
+  activeProjects: '/projects',
+  installsSoon: '/projects',
+  emailsRead: '/inbox',
+  documentsParsed: '/documents',
+  escalations: '/follow-ups',
+};
+
+export interface RoleDashboard {
+  /** The one sentence this role should read first. */
+  focus: string;
+  cards: DashboardCardKey[];
+}
+
+/**
+ * Derived from "Team Roles Scorecards v3 — Named Seats" (10 Sep 2026):
+ * each role sees what its seat OWNS, and not what the document says it
+ * must not own. Procurement gets orders and vendor silence, never the task
+ * board; the assistant seats get the board and never the money; the
+ * principal gets only what the document reserves to the Owner, because
+ * the studio's acceptance test is that she does not need to be in here.
+ */
+export const ROLE_DASHBOARD: Record<UserRole, RoleDashboard> = {
+  principal: {
+    focus: 'What needs you, and only you. Everything else belongs to a seat.',
+    cards: ['escalations', 'awaitingClient', 'draftsPending', 'activeProjects', 'openPOs', 'installsSoon'],
+  },
+  coordinator: {
+    focus: 'The board: nothing unassigned, nothing without a next step, nothing silent.',
+    cards: ['unassignedTasks', 'tasksWithoutNextStep', 'openFollowUps', 'myOverdueTasks', 'openPOs', 'activeProjects'],
+  },
+  designer: {
+    focus: 'Design intent and issued sets. No TBD rows reaching procurement.',
+    cards: ['myOpenTasks', 'myOverdueTasks', 'specGaps', 'draftsPending', 'activeProjects', 'documentsParsed'],
+  },
+  procurement: {
+    focus: 'Orders moving, vendors answering. A delay gets flagged inside 24 hours.',
+    cards: ['openPOs', 'myOpenTasks', 'myOverdueTasks', 'openFollowUps', 'installsSoon', 'documentsParsed'],
+  },
+  assistant: {
+    focus: 'Your queue first, then the gaps: one owner, a date and a next step on every task.',
+    cards: ['myOpenTasks', 'myOverdueTasks', 'unassignedTasks', 'tasksWithoutNextStep', 'draftsPending', 'emailsRead'],
+  },
+};
+
+export interface DashboardSummary {
+  role: UserRole | null;
+  focus: string;
+  /** The cards this role should see, already ordered. */
+  cards: DashboardCardKey[];
+  figures: Record<DashboardCardKey, number>;
+  byStage: Record<string, number>;
+  /** Seats with nobody in them — work routed there has no owner. */
+  vacantSeats: { seat: Seat; label: string; role: UserRole }[];
+}
+
+// ── The assistant ───────────────────────────────────────────
+
+/**
+ * What the studio's assistant is called. She answers from the studio's own
+ * records — projects, tasks, orders, email — rather than from anything
+ * general, so she needs a name people can ask for by name.
+ */
+export const ASSISTANT_NAME = 'Jenny';
+
+// ── AI configuration ────────────────────────────────────────
+
+export const DEFAULT_MODEL = 'claude-opus-5';
+
+export interface SelectableModel {
+  id: string;
+  label: string;
+  /** Why a studio would pick this one. */
+  note: string;
+}
+
+/**
+ * The models a studio may choose between, most capable first. Deliberately
+ * short: every extra option is a decision someone has to make, and the
+ * three here span the real trade-off — quality, speed, cost.
+ */
+export const SELECTABLE_MODELS: SelectableModel[] = [
+  {
+    id: 'claude-opus-5',
+    label: 'Claude Opus 5',
+    note: 'Most capable. Best at reading messy email and getting the details right.',
+  },
+  {
+    id: 'claude-sonnet-5',
+    label: 'Claude Sonnet 5',
+    note: 'Noticeably cheaper and quicker. A good default once the studio is busy.',
+  },
+  {
+    id: 'claude-haiku-4-5',
+    label: 'Claude Haiku 4.5',
+    note: 'Cheapest and fastest. Fine for simple extraction, weaker on judgement.',
+  },
+];
+
+/** What the studio's AI settings look like to the app. Never the key itself. */
+export interface AiSettingsView {
+  /** True once a key is stored, whether in the database or the environment. */
+  configured: boolean;
+  /** Where the key came from — the studio cannot edit an environment key. */
+  source: 'studio' | 'environment' | 'none';
+  /** Last four characters, so a person can tell which key is in use. */
+  keyHint: string | null;
+  model: string;
+  /** True when the model is the built-in default rather than a choice. */
+  modelIsDefault: boolean;
+}
+
+// ── Reading email ───────────────────────────────────────────
+
+/**
+ * How often the system goes looking for new mail.
+ *
+ * Every new email costs a Claude call to classify, another to decide
+ * whether it raises a task, and sometimes a third to draft a reply — so
+ * how often the studio looks, and whether it thinks about what it finds,
+ * are the two dials that actually move the bill.
+ */
+export interface IngestInterval {
+  minutes: number;
+  label: string;
+}
+
+export const INGEST_INTERVALS: IngestInterval[] = [
+  { minutes: 0, label: 'Only when I ask' },
+  { minutes: 1, label: 'Every minute' },
+  { minutes: 5, label: 'Every 5 minutes' },
+  { minutes: 10, label: 'Every 10 minutes' },
+  { minutes: 15, label: 'Every 15 minutes' },
+  { minutes: 30, label: 'Every 30 minutes' },
+  { minutes: 60, label: 'Every hour' },
+];
+
+/**
+ * Ten minutes: email is not an emergency channel, and a quote that
+ * arrives at 10:02 being noticed at 10:10 changes nothing about the day.
+ */
+export const DEFAULT_INGEST_MINUTES = 10;
+
+export interface IngestSettingsView {
+  intervalMinutes: number;
+  /**
+   * False fetches and files the mail without asking Claude to read it —
+   * no classification, no tasks raised, no reply drafts. The Inbox still
+   * fills up; nothing is spent on it.
+   */
+  useAi: boolean;
+  intervals: IngestInterval[];
+}

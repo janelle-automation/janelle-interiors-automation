@@ -1,5 +1,5 @@
 import type { EmailClass } from '@janelle/shared';
-import { anthropic, generate } from './anthropic.js';
+import { generate, isAiReady } from './anthropic.js';
 import type { ParsedEmail } from './gmail.js';
 
 /** Email classes that warrant an auto-drafted reply. */
@@ -25,7 +25,7 @@ export interface ReplyDraft {
  * unavailable.
  */
 export async function draftReply(email: ParsedEmail, cls: EmailClass): Promise<ReplyDraft | null> {
-  if (!anthropic || !REPLYABLE.includes(cls)) return null;
+  if (!REPLYABLE.includes(cls) || !(await isAiReady())) return null;
 
   const subject = email.subject.toLowerCase().startsWith('re:') ? email.subject : `Re: ${email.subject}`;
 
@@ -42,6 +42,7 @@ export async function draftReply(email: ParsedEmail, cls: EmailClass): Promise<R
       'Email content:',
       (email.body || email.snippet).slice(0, 6000),
     ].join('\n'),
+    { feature: 'reply.draft' },
     700,
   );
 

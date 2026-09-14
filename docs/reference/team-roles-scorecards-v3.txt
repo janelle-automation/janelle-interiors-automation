@@ -1,0 +1,343 @@
+﻿Role/Person
+
+
+
+
+Role/Person
+	Responsibilities
+	Success Metrics
+	You
+	Handles big-picture relationships, final spend sign-offs, and hiring or firing decisions.
+	Scaling down ops work to 10 hours a week or less, with zero status update texts landing in your inbox.
+	COO (Hire)
+	Runs meetings, keeps an eye on team capacity, tracks RFIs, and keeps the CRM organized.
+	Ops running smoothly without you having to step in, plus squashing recurring issues within 3 weeks.
+	Carissa
+	Manages Houzz standards, RFI tracking, deadlines, QBO, and POs.
+	Sending out M/W/F digests, running weekly reconciliations, and never having to bug you for status updates.
+	Joanna
+	Takes care of Houzz task delegation and proposal reviews.
+	Every single task clearly answers the six key questions and has a single point person attached to it.
+	Victoria
+	In charge of Canva schedules and general Drive cleanup.
+	Absolute alignment between Canva and the live Drive files with zero hidden mismatches.
+	Adelaide
+	Oversees hotel purchases, tracking, and receiving.
+	Flagging delays within 24 hours and keeping hotel-related texts completely off your personal phone.
+	Brianna / Amanda
+	Own design intent and issued sets on written project lists.
+	Nailing down intent within 48 hours and making sure no "TBD" rows get sent over to procurement.
+	
+
+TEAM ROLES OUTLINE
+TEAM ROLES OUTLINE
+Named seats. One owner per outcome. Built from Drive SOPs + current people + the pain points you named.
+Sources: Houzz Pro SOP Addendum (4 Sep 2026); Tasks in Houzz SOP; Design Team SOP; Procurement SOP; FF&E Receiving/Inspection SOP; Generic Roles Outline v2.1; Team Roles Scorecards (8 Jul / 4 Sep).
+1. Pain points this document exists to fix
+*  Ping-pong — questions bounce across email, text, Houzz, and you.
+*  Hotel dependency — one account is ~80% of revenue; two buyers are maxed; no named #2.
+*  You cannot step out of operations — you are covering COO, PM, designer, and admin. Visionary is empty.
+*  Three hands in Houzz (Carissa, Joanna, Victoria) with no written standard owner.
+*  Finish schedules bounce between Canva, Drive, and Houzz.
+*  No firm RFI tracker. Status lives in your head.
+2. How to read this
+Dual-seat is allowed. Dual-ownership of the same outcome is not. If two names could own it, the table is wrong.
+Scorecards are the weekly conversation. A red number starts a problem-solve, not a blame session. Targets stay blank until one baseline week is tracked — then lock them.
+1099 model: ~20 hours per seat. 20 hours means that seat, not 20 plus nights of Owner cleanup.
+3. Systems of record (do not invent a sixth)
+Work
+	Source of truth
+	Owner
+	SOP
+	Projects, tasks, contacts, vendors, files, daily logs
+	Houzz Pro
+	Carissa (standard); Joanna executes tasks
+	Houzz SOP Addendum + Tasks SOP
+	Money, COGS, AR, AP
+	QuickBooks Online
+	Carissa / bookkeeper
+	Payroll + Invoice SOPs
+	Current drawings + issued sets
+	Google Drive
+	Amanda / Brianna + Victoria inputs
+	Design Team SOP
+	Finish-schedule visual
+	Canva from the Drive set
+	Victoria inputs; designers own intent
+	Canva SOP + Design SOP
+	RFI / open questions
+	One firm tracker (build this week)
+	Carissa owns; COO requires it
+	Roles v2.1 RFI workflow
+	Hotel pipeline
+	Elevate Hotel Manager CRM
+	COO cadence; Janelle relationships
+	—
+	Spend path
+	Owner yes/no → card or check
+	Janelle approves; Carissa/Adelaide card-pay
+	Procurement SOP
+	4. Current people in seats
+Person
+	Primary seat
+	Secondary
+	Hours
+	Janelle
+	Owner — execution pile-up (COO/PM/Designer/Admin)
+	Spend approval + hotel principal
+	as needed
+	Carissa
+	Operations + Finance + POs
+	Light PM until Joanna is locked
+	~20
+	Adelaide
+	Hotel FF&E / Procurement
+	—
+	~20
+	Brianna
+	Lead / Technical Designer (assigned projects)
+	—
+	~20
+	Amanda
+	Lead / Technical Designer (assigned projects)
+	—
+	~20
+	Joanna (Upwork VA)
+	Operations Support / PM assistant
+	Houzz task push + proposal overlook
+	~20
+	Victoria (Upwork VA)
+	Technical production — Canva schedules
+	Houzz hygiene cleanup only
+	~20
+	Terrin
+	CONFIRM — named in capacity list; seat not written
+	—
+	CONFIRM
+	COO / Integrator
+	HIRE — vacant
+	—
+	20–30
+	Confirm Terrin this week. Do not leave a person off the chart.
+5. Houzz collision rule (write this today)
+Houzz has one standard owner. Everyone else executes a slice.
+Who
+	Touches Houzz for
+	Does not
+	Carissa
+	Data standard, status meanings, folders, vendors, contacts, RFI numbers, due dates
+	Design intent; inventing SKUs
+	Joanna
+	Push tasks: assign ONE owner, due date, next step (Tasks SOP six questions)
+	Rewrite the hygiene standard; answer design RFIs
+	Victoria
+	Cleanup per SOP Addendum + schedule-related tasks only
+	Client emails; POs; renaming live projects
+	Adelaide
+	Hotel order status, receiving notes on hotel POs
+	Residential design boards
+	Brianna / Amanda
+	Tasks on their assigned design projects
+	Firm hygiene
+	Janelle
+	Exceptions and live-project renames only
+	Daily task board
+	6. Finish-schedule split (from Design SOP)
+*  Lead Designer (Brianna/Amanda by project) approves intent in 48 hours.
+*  Victoria inputs the Canva schedule from the current Drive set only.
+*  Carissa owns the due date.
+*  If Canva disagrees with Drive, that conflict is an RFI — nobody silently overwrites.
+*  Yellow TBD = do not PO, do not install.
+Selection status labels 1–18 in the Design SOP stay the language. Do not invent a parallel set.
+7. Spend path (lock)
+1) Complete spec exists.  2) Price + vendor on the record.  3) Janelle approves in writing.  4) Carissa or Adelaide card-pays — or Janelle cuts check/wire.  5) Finance records in QBO. Incomplete packages bounce. They do not become a card charge.
+8. Seat briefs + scorecards
+8.1 Janelle — Owner
+Purpose. Point the firm. Hold key relationships. Approve money leaving the bank. Target: Visionary. Current truth: empty — you are in four other seats.
+Owns: vision and quarterly priorities; brand; new-client close; flagship hotel at principal level; hire/fire/seat design; checks and wires.
+Must not own (target): assembling status; issuing finish schedules; building POs; default designer; hotel backup; daily Houzz.
+Metric
+	Target (lock after 1 week)
+	Cadence
+	Hours on operational questions
+	Trend down; goal ≤ 10 hrs/wk by day 90
+	Weekly
+	Status texts to you
+	Trend to 0
+	Weekly
+	New hotel conversations started
+	CRM rock — count weekly
+	Weekly
+	Spend approvals sitting > 2 business days
+	0
+	Weekly
+	Monthly financial review
+	By the 10th
+	Monthly
+	8.2 Integrator / COO — HIRE
+Purpose. Run the week so Janelle can leave execution. This is not a senior designer and not a third buyer.
+Correction to the draft scorecard you sent: do not give this seat “all day-to-day project execution,” “Adelaide’s work,” or “single point of contact for every client.” That is how the last COO collapsed onto you. The COO assigns, escalates, and protects capacity. Delivery seats still deliver.
+Owns: weekly meeting; scorecards read aloud; seat capacity (who is maxed); RFI tracker exists and is used; CRM weekly cadence; cross-seat issues with no other owner; protecting Janelle’s calendar.
+Must not own: design intent; drawing; vendor negotiations; writing POs; being the hotel client’s day-to-day.
+Weekly report to Janelle (20 min, exceptions only): hotel milestones / delays / budget flags; residential active / stalled / coming; cash snapshot Carissa prepares; capacity and hiring ask.
+Metric
+	Target
+	Cadence
+	Weekly meeting held; numbers read; no story
+	1 / week
+	Weekly
+	Off-track items have owner + date
+	100%
+	Weekly
+	Owner hours on ops questions
+	≤ 10 by day 90
+	Weekly
+	Same issue 3 weeks in a row
+	0
+	Weekly
+	Firm RFI digest sent M/W/F
+	3 / 3
+	Weekly
+	Hotel critical-path misses with no flag 24 hrs prior
+	0
+	Weekly
+	Top 5 workflows documented and running without Janelle
+	5 / 5 by day 90
+	Monthly
+	90-day “great”: Janelle < 10 hrs/wk on ops questions; client/vendor first-response time cut in half on seats that own comms; zero unflagged hotel deadline misses; five SOPs handed off (Houzz hygiene, Tasks, spend path, RFI, finish-schedule split) running without Janelle assembling them.
+Key test: if this person leaves, does the week still have a meeting, a tracker, and a pack? If no, you still own too much.
+8.3 Carissa — Operations + Finance
+Purpose. Single source of truth + books. Antidote to ping-pong.
+Daily: Houzz hygiene per SOP Addendum; RFI tracker (number, classify, bounce, digest M/W/F 3pm PT); due dates; QBO COGS / AR / hours; POs from complete specs; card-pay after Janelle approval; weekly ops pack of counts, not narrative; task Studio Support / Joanna only through this seat.
+Must not own: aesthetic decisions; issued-set version control; being default designer; approving spend.
+Metric
+	Target
+	Cadence
+	Active projects with current Houzz board
+	100%
+	Weekly
+	RFI digest sent M/W/F
+	3 / 3
+	Weekly
+	RFIs aging > 5 business days, no owner
+	0
+	Weekly
+	New projects meeting setup checklist before In Progress
+	100%
+	Weekly
+	Houzz ↔ QBO recon
+	Weekly complete
+	Weekly
+	COGS entered after vendor invoice
+	100% within 3 business days
+	Weekly
+	Janelle asked “what’s the status?”
+	Trend to 0
+	Weekly
+	8.4 Joanna — Operations Support / PM assistant
+Purpose. Take coordination off Carissa and Janelle. Not a second Carissa. Not a designer.
+Daily (Tasks SOP): every task she touches answers the six questions in 30 seconds — what, where, status, next step, who, when. Assign ONE person. Push overdue and unassigned tasks same day. Scan design projects + pending proposals; send Carissa a short list: late tasks, proposals with no next step. Do not answer design RFIs or invent specs.
+Metric
+	Target
+	Cadence
+	Tasks she touches that fail the 6-question test
+	0
+	Weekly
+	Overdue unassigned tasks at day-end (active jobs)
+	0
+	Daily
+	Proposal pipeline list sent to Carissa
+	2× / week
+	Weekly
+	Side-channel tasking around Carissa
+	0
+	Weekly
+	8.5 Victoria — Technical production (Canva + Houzz cleanup)
+Purpose. Finish-schedule inputs and Houzz record cleanup. Not Lead Designer. Not PM.
+Daily: Canva schedules from the current Drive set only; match Canva to Drive; log disagreements as RFIs; SOP Addendum cleanup (account names, vendor contacts, folders, daily-log photo rule). Houzz: schedule-related tasks and cleanup only. No client emails. No POs. No renaming live projects without Janelle.
+Metric
+	Target
+	Cadence
+	Schedules issued from the live Drive set (not a stale file)
+	100%
+	Weekly
+	Canva / Drive / Houzz mismatches left unlogged
+	0
+	Weekly
+	SOP cleanup items closed vs list
+	Track weekly
+	Weekly
+	Files left in project root on jobs she touched
+	0
+	Weekly
+	8.6 Adelaide — Hotel FF&E / Procurement
+Purpose. Deliver the existing hotel account: buys, tracking, receiving, awarded-work comms.
+Daily: hotel tracker current; vendor follow-up; card-pay only after Janelle approval; receiving / damage / claims same day (Receiving SOP); flag delays to Carissa within 24 hours; Houzz hotel order status; route design questions to Brianna/Amanda.
+Must not own: finding the next hotel client; firm vision; being the only person who knows the account; approving spend.
+Metric
+	Target
+	Cadence
+	Hotel client first response
+	≤ 24 business hours
+	Weekly
+	Critical-path POs issued on time
+	≥ 98%
+	Weekly
+	Order status current in Houzz
+	100% open POs
+	Weekly
+	Delays flagged within 24 hours
+	100%
+	Weekly
+	Hotel “we don’t know status” events
+	0
+	Weekly
+	8.7 Brianna & Amanda — Lead / Technical Designer (split by project)
+Purpose. Intent + issued documents for assigned residential work. Write which projects each owns. Do not leave it verbal.
+Daily: advance assigned rooms per Design SOP page sequence; intent answers in 48 hours; one live Drive set, dated; complete specs only — no TBD rows to procurement; client design emails ≤ 24 business hours after handoff; Houzz tasks on their projects; hours on the correct job.
+Must not own: due dates; POs; sale/contract; hotel backup.
+Metric
+	Target
+	Cadence
+	Assigned milestones on the published date
+	≥ 90%
+	Weekly
+	Intent to Victoria / Technical within 48 hours
+	100%
+	Weekly
+	Packages returned incomplete by Procurement
+	≤ 2%
+	Weekly
+	Client design response time
+	≤ 24 business hours
+	Weekly
+	One identifiable current set per active job
+	100%
+	Weekly
+	8.8 Finance slice (stays with Carissa until split)
+If a bookkeeper already exists outside Carissa, write the split: Carissa = Houzz money fields + spend execution; bookkeeper = QBO accuracy + recon. Do not leave “helps when needed.”
+9. COO weekly pack — what Janelle sees
+Four lines. No narrative.
+*  Hotel: milestones hit / delays / budget variance / unflagged risks.
+*  Residential: active / stalled / coming.
+*  Cash: invoices sent, payments in, outstanding (Carissa prepares).
+*  Capacity: who is red; hiring ask or scope cut.
+Janelle gets the RFI digest only if a BLOCKER blew SLA or a spend decision is required.
+10. Hiring sequence (do not skip)
+A — Integrator / COO. Gets you out of running the week.
+B — Hotel FF&E Associate. Named #2 so the CRM rock can land. Adelaide cannot also be the backup.
+Do not hire next: a Project Manager title (deleted on purpose — Joanna is the assistant slice); a Junior Designer while you are still Lead and COO; another fractional COO with no 90-day list.
+After A and B sit 30–45 days: COO brings a capacity map. Only then add technical hours or a true Lead so you exit production.
+11. Top five workflows to hand off (COO 90-day list)
+*  Houzz hygiene + project setup checklist (SOP Addendum).
+*  Tasks in Houzz — six questions, one owner, due date.
+*  Spend path — spec → approval → card or check → QBO.
+*  Firm RFI tracker + M/W/F digest.
+*  Finish-schedule split — intent / Canva input / due date.
+12. Confirm this week
+*  Terrin’s seat, hours, and who tasks her.
+*  Bookkeeper: same as Carissa or separate?
+*  Hotel Associate starts on a slice of the CURRENT account (recommended) or only new work?
+*  COO overlap window that matches Ojai.
+*  Which projects Brianna vs Amanda own — written list.
+v3 — 10 September 2026. Named seats. Use as the hiring and weekly-meeting source of truth. Prior generic outlines stay in Drive as archive.

@@ -7,7 +7,8 @@ import { extractPdf } from './extract.js';
 import { draftReply, REPLYABLE } from './reply.js';
 import { promoteDocument, promoteEmail } from './promote.js';
 import { createTaskFromEmail } from './tasks.js';
-import { anthropic } from './anthropic.js';
+import { isAiReady } from './anthropic.js';
+import { readIngestSettings } from '../lib/ingestSettings.js';
 
 export interface IngestResult {
   ok: boolean;
@@ -56,7 +57,12 @@ export async function runIngest(
   opts: { emailQuery?: string; folderId?: string } = {},
 ): Promise<IngestResult> {
   if (!supabaseAdmin) return { ok: false, reason: 'supabase_not_configured', emails: 0, documents: 0, replies: 0, tasks: 0 };
-  if (!anthropic) return { ok: false, reason: 'anthropic_not_configured', emails: 0, documents: 0, replies: 0, tasks: 0 };
+
+  // Reading email without Claude is a supported mode — the mail still
+  // lands in the Inbox, it just arrives unclassified and raises nothing.
+  // Only refuse when the studio wants AI and has not configured it.
+  const { useAi } = await readIngestSettings(orgId);
+  if (useAi && !(await isAiReady())) return { ok: false, reason: 'anthropic_not_configured', emails: 0, documents: 0, replies: 0, tasks: 0 };
   if (ingestInFlight) return { ok: false, reason: 'busy', emails: 0, documents: 0, replies: 0, tasks: 0 };
 
   const userId = await orgSourceUserId(orgId);
@@ -64,7 +70,7 @@ export async function runIngest(
 
   ingestInFlight = true;
   try {
-    return await ingestInternal(orgId, userId, opts);
+    return await ingestInternal(orgId, userId, opts, useAi);
   } finally {
     ingestInFlight = false;
   }
@@ -74,8 +80,9 @@ async function ingestInternal(
   orgId: string,
   userId: string,
   opts: { emailQuery?: string; folderId?: string },
+  useAi: boolean,
 ): Promise<IngestResult> {
-  if (!supabaseAdmin || !anthropic) return { ok: false, reason: 'not_configured', emails: 0, documents: 0, replies: 0, tasks: 0 };
+  if (!supabaseAdmin) return { ok: false, reason: 'not_configured', emails: 0, documents: 0, replies: 0, tasks: 0 };
 
   let emailCount = 0;
   let docCount = 0;
@@ -98,7 +105,9 @@ async function ingestInternal(
         if (existing) continue;
 
         const email = await getEmail(gmail, id);
-        const extracted = await classifyEmail(email);
+        // Every one of these is a Claude call. With reading turned off the
+        // message is still stored, just unclassified and unlinked.
+        const extracted = useAi ? await classifyEmail(email, { orgId }) : null;
         const projectId = await resolveByName(orgId, 'projects', extracted?.project_hint ?? null);
         const vendorId = await resolveByName(orgId, 'vendors', extracted?.vendor_hint ?? null);
 
@@ -136,7 +145,7 @@ async function ingestInternal(
 
         // Raise an internal task when the email implies work, assigned by
         // role. Isolated so an extraction failure never loses the email.
-        if (emailRow) {
+        if (emailRow && useAi) {
           try {
             const made = await createTaskFromEmail(
               orgId,
@@ -207,8 +216,9 @@ async function ingestInternal(
         }
 
         // Parse any PDF attachments (quotes / order confirmations) that
-        // arrived on this email into the documents table.
-        for (const att of email.attachments) {
+        // arrived on this email into the documents table. Reading a PDF is a
+        // Claude call, so with AI off we skip the download too.
+        for (const att of useAi ? email.attachments : []) {
           try {
             const ref = `gmail:${email.gmailId}:${att.attachmentId}`;
             const { data: seen } = await supabaseAdmin
@@ -248,7 +258,7 @@ async function ingestInternal(
   }
 
   // ── Drive documents (PDF quotes / confirmations) ──────────
-  const drive = await driveFor(userId);
+  const drive = useAi ? await driveFor(userId) : null;
   if (drive) {
     const files = await listPdfs(drive, { folderId: opts.folderId, max: 15 });
     for (const file of files) {

@@ -1,0 +1,73 @@
+# ============================================================
+#  Environment variables for the Vercel deployment.
+#
+#  Paste into: Vercel → Project → Settings → Environment Variables
+#  (the dashboard accepts this whole block at once), then REDEPLOY —
+#  Vite inlines client values at build time, so changing a variable
+#  has no effect until a new build runs.
+#
+#  Apply to Production and Preview. Fill every value; blanks are not
+#  the same as absent for some of these.
+# ============================================================
+
+# ── Supabase ────────────────────────────────────────────────
+# Settings → API. The anon key is safe in a browser; row-level
+# security is what protects the data. The service-role key is NOT —
+# it bypasses RLS and must never reach the client bundle.
+SUPABASE_URL=https://YOUR-PROJECT.supabase.co
+SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
+
+# ── Google (Gmail + Drive) ──────────────────────────────────
+# GOOGLE_REDIRECT_URI must be your deployed domain and must be
+# registered verbatim in the Google Cloud console as an authorised
+# redirect URI, or OAuth fails with redirect_uri_mismatch.
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_REDIRECT_URI=https://YOUR-DOMAIN.vercel.app/api/auth/google/callback
+GOOGLE_SCOPES=https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/drive.readonly
+
+# ── Claude ──────────────────────────────────────────────────
+ANTHROPIC_API_KEY=
+ANTHROPIC_MODEL=claude-opus-5
+
+# ── Encryption ──────────────────────────────────────────────
+# Encrypts the stored Google refresh tokens. Must match whatever
+# encrypted the tokens already in the database — changing it makes
+# every existing Google connection unreadable.
+TOKEN_ENCRYPTION_KEY=
+
+# ── Scheduled jobs ──────────────────────────────────────────
+# REQUIRED. Vercel Cron calls /api/ops/cron/* with this as a Bearer
+# token; the endpoints return 503 when it is unset, so follow-ups,
+# the weekly report and the morning digest all silently stop.
+# Generate: node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+CRON_SECRET=
+
+# ── CORS ────────────────────────────────────────────────────
+# The web app and the API share an origin on Vercel, so this only
+# matters if something else calls the API. Harmless to set.
+CORS_ORIGINS=https://YOUR-DOMAIN.vercel.app
+
+
+# ============================================================
+#  DO NOT SET THESE ON VERCEL
+#
+#  VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY
+#      vite.config.ts derives them from SUPABASE_URL and
+#      SUPABASE_ANON_KEY above. Setting them creates a second copy
+#      that can drift.
+#
+#  VITE_API_BASE_URL
+#      Must stay UNSET in production. The client then uses an empty
+#      base, which means same-origin requests and no CORS. Setting
+#      it to the Vercel domain also works but is redundant; setting
+#      it to localhost breaks the deployed app for everyone.
+#
+#  API_PORT / API_HOST / PORT
+#      Local-development only. Vercel provides its own runtime.
+#
+#  SUPABASE_DB_URL
+#      Only used by scripts/db-apply.mjs to run migrations, which you
+#      run from your machine, not from the deployment.
+# ============================================================

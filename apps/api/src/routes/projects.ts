@@ -47,12 +47,52 @@ projectsRouter.patch(
 projectsRouter.get(
   '/',
   asyncHandler(async (req, res) => {
-    const { data, error } = await req.auth!.db
-      .from('projects')
-      .select('id, name, client_name, stage, status, budget, target_install, assigned_to, updated_at')
-      .order('updated_at', { ascending: false });
+    const { db } = req.auth!;
 
-    if (error) throw new Error(error.message);
+    // The list needs the same PO figures the detail page shows, or a project
+    // with a live order reads as empty. Aggregated here rather than per-row
+    // in the client, which would be one request per project.
+    const [projectsRes, posRes, gapsRes] = await Promise.all([
+      db
+        .from('projects')
+        .select('id, name, client_name, stage, status, budget, target_install, assigned_to, updated_at')
+        .order('updated_at', { ascending: false }),
+      db.from('purchase_orders').select('project_id, amount, status'),
+      db.from('spec_gaps').select('project_id').eq('resolved', false),
+    ]);
+
+    if (projectsRes.error) throw new Error(projectsRes.error.message);
+    if (posRes.error) throw new Error(posRes.error.message);
+
+    type Po = { project_id: string | null; amount: number | null; status: string };
+    const CLOSED = ['received', 'cancelled'];
+
+    const openPos = new Map<string, number>();
+    const committed = new Map<string, number>();
+    for (const row of (posRes.data ?? []) as Po[]) {
+      if (!row.project_id) continue;
+      committed.set(row.project_id, (committed.get(row.project_id) ?? 0) + Number(row.amount ?? 0));
+      if (!CLOSED.includes(row.status)) {
+        openPos.set(row.project_id, (openPos.get(row.project_id) ?? 0) + 1);
+      }
+    }
+
+    const gaps = new Map<string, number>();
+    for (const row of (gapsRes.data ?? []) as { project_id: string | null }[]) {
+      if (row.project_id) gaps.set(row.project_id, (gaps.get(row.project_id) ?? 0) + 1);
+    }
+
+    const data = (projectsRes.data ?? []).map((p) => {
+      const row = p as { id: string };
+      return {
+        ...p,
+        open_pos: openPos.get(row.id) ?? 0,
+        /** Total value of every PO on the project, open or not. */
+        po_total: committed.get(row.id) ?? 0,
+        spec_gaps: gaps.get(row.id) ?? 0,
+      };
+    });
+
     res.json({ data });
   }),
 );
