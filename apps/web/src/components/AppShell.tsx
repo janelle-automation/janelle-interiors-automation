@@ -3,10 +3,10 @@ import { NavLink, Link, useLocation } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { useFollowUps, useDrafts, ageFrom } from '../lib/queries';
-import { ROLE_LABELS } from '@janelle/shared';
+import { ASSISTANT_NAME, ROLE_LABELS } from '@janelle/shared';
 import {
   IconDashboard, IconProjects, IconVendors, IconInbox, IconDoc,
-  IconPrompt, IconBell, IconTask, IconAssistant, IconReport, IconActivity, IconSettings, IconSun, IconMoon,
+  IconPrompt, IconBell, IconTask, IconAssistant, IconTeam, IconKey, IconReport, IconActivity, IconSettings, IconSun, IconMoon,
   IconLogout, IconArrow,
 } from './icons';
 
@@ -32,12 +32,19 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: 'Automation',
     items: [
-      { to: '/assistant', label: 'Assistant', Icon: IconAssistant },
+      { to: '/assistant', label: ASSISTANT_NAME, Icon: IconAssistant },
       { to: '/tasks', label: 'Tasks', Icon: IconTask },
       { to: '/follow-ups', label: 'Follow-ups', Icon: IconBell },
       { to: '/drafts', label: 'Drafts', Icon: IconDoc },
       { to: '/reports', label: 'Reports', Icon: IconReport },
       { to: '/activity', label: 'Audit Log', Icon: IconActivity },
+    ],
+  },
+  {
+    title: 'Admin',
+    items: [
+      { to: '/team', label: 'Team & Roles', Icon: IconTeam },
+      { to: '/permissions', label: 'Permissions', Icon: IconKey },
     ],
   },
 ];
@@ -51,12 +58,14 @@ const PAGE_TITLES: Record<string, string> = {
   '/inbox': 'Inbox',
   '/documents': 'Documents',
   '/prompts': 'Prompt Studio',
-  '/assistant': 'Assistant',
+  '/assistant': ASSISTANT_NAME,
   '/tasks': 'Tasks',
   '/follow-ups': 'Follow-ups',
   '/drafts': 'Drafts',
   '/reports': 'Reports',
   '/activity': 'Audit Log',
+  '/team': 'Team & Roles',
+  '/permissions': 'Permissions',
   '/settings': 'Settings',
 };
 

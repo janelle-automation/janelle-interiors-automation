@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
-import { generate, anthropic } from '../services/anthropic.js';
+import { generate, isAiReady } from '../services/anthropic.js';
 import type { PromptVariable } from '@janelle/shared';
 
 export const promptsRouter = Router();
@@ -25,11 +25,12 @@ promptsRouter.post(
   '/:id/run',
   requirePermission('prompts', 'update'),
   asyncHandler(async (req, res) => {
-    if (!anthropic) {
-      return res.status(503).json({ error: 'Claude API not configured (set ANTHROPIC_API_KEY).' });
+    const { db, userId, orgId } = req.auth!;
+
+    if (!(await isAiReady(orgId))) {
+      return res.status(503).json({ error: 'Claude is not set up yet — add an API key in Settings.' });
     }
 
-    const { db, userId, orgId } = req.auth!;
     const { data: prompt, error } = await db
       .from('prompts')
       .select('id, title, template, variables')
@@ -49,6 +50,7 @@ promptsRouter.post(
     const output = await generate(
       'You are an assistant for an interior design studio. Write in a warm, precise, professional studio voice. Return only the requested content.',
       filled,
+      { feature: 'prompt.run', orgId, actor: userId, entity: 'prompts', entityId: prompt.id },
     );
 
     await db.from('prompt_runs').insert({

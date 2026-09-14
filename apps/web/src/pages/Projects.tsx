@@ -66,7 +66,9 @@ export default function Projects() {
                   <th className="px-5 py-3 font-medium">Client</th>
                   <th className="px-5 py-3 font-medium">Stage</th>
                   <th className="px-5 py-3 text-right font-medium">Budget</th>
+                  <th className="px-5 py-3 text-right font-medium">On order</th>
                   <th className="px-5 py-3 text-right font-medium">Open POs</th>
+                  <th className="px-5 py-3 text-right font-medium">Spec gaps</th>
                   <th className="px-5 py-3 text-right font-medium">Target install</th>
                 </tr>
               </thead>
@@ -87,13 +89,21 @@ export default function Projects() {
                         </td>
                         <td className="px-5 py-3">{p.client}</td>
                         <td className="px-5 py-3"><StageBadge stage={p.stage} /></td>
+                        {/* money() renders an em dash for null, so an unset
+                            budget reads as "not set" rather than "$0". */}
                         <td className="px-5 py-3 text-right tabular-nums text-ink">{money(p.budget)}</td>
-                        <td className="px-5 py-3 text-right tabular-nums">{p.openPOs}</td>
+                        <td className="px-5 py-3 text-right tabular-nums text-ink">
+                          {p.committed > 0 ? money(p.committed) : '—'}
+                        </td>
+                        <td className="px-5 py-3 text-right tabular-nums">{p.openPOs || '—'}</td>
+                        <td className={`px-5 py-3 text-right tabular-nums ${p.specGaps > 0 ? 'font-semibold text-warn' : ''}`}>
+                          {p.specGaps || '—'}
+                        </td>
                         <td className="px-5 py-3 text-right tabular-nums">{shortDate(p.install)}</td>
                       </tr>
                       {isOpen && (
                         <tr className="bg-sunk/40">
-                          <td colSpan={6} className="px-5 py-5">
+                          <td colSpan={8} className="px-5 py-5">
                             <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-faint">Progress · auto-updated from email</div>
                             <StageTrack stage={p.stage} />
                             <div className="mt-4">

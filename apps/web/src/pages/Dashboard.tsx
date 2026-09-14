@@ -1,5 +1,11 @@
 import { useState, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import {
+  DASHBOARD_CARD_LABELS,
+  DASHBOARD_CARD_LINKS,
+  ROLE_LABELS,
+  type DashboardCardKey,
+} from '@janelle/shared';
 import { PageHeading, StatTile, Card, Pill, money, shortDate } from '../components/ui';
 import { IconArrow } from '../components/icons';
 import {
@@ -15,6 +21,8 @@ const followTone: Record<string, 'crit' | 'warn' | 'brass'> = {
   spec_gap: 'brass',
   quote_overdue: 'crit',
   client_waiting: 'crit',
+  task_overdue: 'warn',
+  task_escalation: 'crit',
 };
 const followLabel: Record<string, string> = {
   vendor_silence: 'Vendor silent',
@@ -23,6 +31,8 @@ const followLabel: Record<string, string> = {
   spec_gap: 'Spec gap',
   quote_overdue: 'Quote overdue',
   client_waiting: 'Client waiting',
+  task_overdue: 'Reminder sent',
+  task_escalation: 'Escalated',
 };
 
 function OpsBar() {
@@ -197,6 +207,78 @@ function MorningDigest() {
   );
 }
 
+/**
+ * Which cards are alarming depends on the card, not on the number: three
+ * active projects is fine, three overdue tasks is not.
+ */
+const URGENT: Partial<Record<DashboardCardKey, 'crit' | 'warn'>> = {
+  escalations: 'crit',
+  myOverdueTasks: 'crit',
+  awaitingClient: 'crit',
+  unassignedTasks: 'warn',
+  tasksWithoutNextStep: 'warn',
+  specGaps: 'warn',
+};
+
+const CARD_HINTS: Partial<Record<DashboardCardKey, string>> = {
+  myOpenTasks: 'assigned to you',
+  myOverdueTasks: 'past their due date',
+  unassignedTasks: 'nobody owns these yet',
+  tasksWithoutNextStep: 'no next action named',
+  openFollowUps: 'waiting on someone',
+  awaitingClient: 'approvals overdue',
+  draftsPending: 'waiting in Gmail for review',
+  specGaps: 'blocking an order',
+  openPOs: 'awaiting confirm or delivery',
+  activeProjects: 'across all stages',
+  installsSoon: 'shipping or installing',
+  emailsRead: 'classified & linked',
+  documentsParsed: 'quotes & confirmations',
+  escalations: 'overdue and escalated to you',
+};
+
+function RoleCard({ cardKey, value }: { cardKey: DashboardCardKey; value: number }) {
+  const tone = value > 0 ? (URGENT[cardKey] ?? 'neutral') : 'neutral';
+  return (
+    <Link to={DASHBOARD_CARD_LINKS[cardKey]} className="focusable rounded-xl">
+      <StatTile
+        label={DASHBOARD_CARD_LABELS[cardKey]}
+        value={value}
+        tone={tone}
+        hint={CARD_HINTS[cardKey]}
+      />
+    </Link>
+  );
+}
+
+/**
+ * A seat nobody holds silently swallows work: routing falls back to the
+ * role, and if that is empty too the task lands unassigned. The studio is
+ * still waiting on its own roster, so this stays visible until it is filled.
+ */
+function VacantSeats({ seats }: { seats: { seat: string; label: string; role: string }[] }) {
+  if (seats.length === 0) return null;
+  return (
+    <Card className="border-warn/40 p-5">
+      <div className="text-[13px] font-semibold text-ink">
+        {seats.length} seat{seats.length === 1 ? '' : 's'} with nobody in {seats.length === 1 ? 'it' : 'them'}
+      </div>
+      <p className="mt-1 text-[12.5px] text-ink-soft">
+        Work routed to {seats.length === 1 ? 'this seat' : 'these seats'} falls back to the role, and
+        lands unassigned when that is empty too.
+      </p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {seats.map((s) => (
+          <Pill key={s.seat} tone="warn">{s.label}</Pill>
+        ))}
+      </div>
+      <Link to="/team" className="mt-3 inline-block text-[12.5px] font-medium text-brass hover:underline">
+        Add someone to a seat →
+      </Link>
+    </Card>
+  );
+}
+
 function CardHeader({ title, to, linkText }: { title: string; to?: string; linkText?: string }) {
   return (
     <div className="flex items-center justify-between border-b border-line-soft px-5 py-3.5">
@@ -221,9 +303,9 @@ export default function Dashboard() {
   const recentPos = pos.slice(0, 5);
 
   const intel = [
-    { label: 'Emails read', value: summary.emailsRead, hint: 'classified & linked to projects', to: '/inbox' },
-    { label: 'Documents parsed', value: summary.documentsParsed, hint: 'quotes & order confirmations', to: '/documents' },
-    { label: 'Reply drafts', value: summary.draftsPending, hint: 'waiting in Gmail for review', to: '/drafts' },
+    { label: 'Emails read', value: summary.figures.emailsRead, hint: 'classified & linked to projects', to: '/inbox' },
+    { label: 'Documents parsed', value: summary.figures.documentsParsed, hint: 'quotes & order confirmations', to: '/documents' },
+    { label: 'Reply drafts', value: summary.figures.draftsPending, hint: 'waiting in Gmail for review', to: '/drafts' },
   ];
 
   return (
@@ -237,21 +319,20 @@ export default function Dashboard() {
       <MorningDigest />
 
       <section>
-        <SectionTitle>Studio at a glance</SectionTitle>
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-5">
-          <StatTile label="Active projects" value={summary.activeProjects} tone="neutral" hint="across all stages" />
-          <StatTile label="Open POs" value={summary.openPOs} tone="brass" hint="awaiting confirm or delivery" />
-          <StatTile label="Awaiting client" value={summary.awaitingClient} tone={summary.awaitingClient > 0 ? 'crit' : 'neutral'} hint="approvals overdue" />
-          <StatTile label="Spec gaps" value={summary.specGaps} tone={summary.specGaps > 0 ? 'warn' : 'neutral'} hint="blocking an order" />
-          <StatTile label="Installs soon" value={summary.installsSoon} tone="olive" hint="shipping or installing" />
-          <StatTile
-            label="Open tasks"
-            value={summary.openTasks}
-            tone={summary.unassignedTasks > 0 ? 'warn' : 'neutral'}
-            hint={summary.unassignedTasks > 0 ? `${summary.unassignedTasks} unassigned` : 'all assigned'}
-          />
+        <SectionTitle>
+          {summary.role ? `${ROLE_LABELS[summary.role]} · your board` : 'Studio at a glance'}
+        </SectionTitle>
+        {summary.focus && (
+          <p className="-mt-1 mb-4 text-[13px] text-ink-soft">{summary.focus}</p>
+        )}
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
+          {summary.cards.map((key) => (
+            <RoleCard key={key} cardKey={key} value={summary.figures[key] ?? 0} />
+          ))}
         </div>
       </section>
+
+      <VacantSeats seats={summary.vacantSeats} />
 
       <section>
         <SectionTitle>

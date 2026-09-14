@@ -128,6 +128,48 @@ authRouter.get(
   }),
 );
 
+/**
+ * Revoke the Google grant and clear it locally. Best-effort on the revoke:
+ * a token Google has already invalidated should still disconnect here.
+ */
+async function revokeGoogle(userId: string): Promise<void> {
+  if (!supabaseAdmin) return;
+
+  const { data: integration } = await supabaseAdmin
+    .from('integrations')
+    .select('org_id, encrypted_tokens')
+    .eq('user_id', userId)
+    .eq('provider', 'google')
+    .maybeSingle();
+
+  if (integration?.encrypted_tokens) {
+    try {
+      const tokens = JSON.parse(decrypt(integration.encrypted_tokens)) as { refresh_token?: string; access_token?: string };
+      const token = tokens.refresh_token ?? tokens.access_token;
+      if (token) await oauthClient().revokeToken(token);
+    } catch {
+      /* token may already be invalid — still disconnect locally */
+    }
+  }
+
+  await supabaseAdmin
+    .from('integrations')
+    .update({ status: 'disconnected', encrypted_tokens: null, scopes: '' })
+    .eq('user_id', userId)
+    .eq('provider', 'google');
+
+  if (integration?.org_id) {
+    await supabaseAdmin.from('activity_log').insert({
+      org_id: integration.org_id,
+      actor: userId,
+      action: 'google.disconnect',
+      entity: 'integrations',
+      entity_id: userId,
+      meta: {},
+    });
+  }
+}
+
 // Disconnect Google entirely: revoke the token best-effort and mark the
 // integration disconnected. Both Gmail and Drive stop working until reconnected.
 authRouter.delete(
@@ -135,43 +177,79 @@ authRouter.delete(
   requireAuth,
   asyncHandler(async (req, res) => {
     if (!supabaseAdmin) return res.status(503).json({ error: 'Backend not configured' });
+    await revokeGoogle(req.auth!.userId);
+    res.json({ data: { ok: true } });
+  }),
+);
+
+/**
+ * Disconnect ONE service, leaving the other working.
+ *
+ * Google issues a single grant covering both services, and its revoke
+ * endpoint is all-or-nothing — there is no way to hand back just
+ * drive.readonly. What is ours to control is which scopes this app holds
+ * and uses, so that is what this drops: Drive stops being read, Gmail
+ * carries on, and reconnecting is one consent screen away (Google
+ * re-grants an already-approved scope without a second prompt).
+ *
+ * When the last service goes, fall through to the full disconnect so a
+ * revoked-looking integration is actually revoked rather than left as a
+ * live token with no scopes.
+ */
+authRouter.delete(
+  '/google/:service',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    if (!supabaseAdmin) return res.status(503).json({ error: 'Backend not configured' });
     const { userId } = req.auth!;
+
+    const service = req.params.service;
+    if (service !== 'gmail' && service !== 'drive') {
+      return res.status(400).json({ error: 'Unknown service' });
+    }
 
     const { data: integration } = await supabaseAdmin
       .from('integrations')
-      .select('org_id, encrypted_tokens')
+      .select('org_id, scopes, encrypted_tokens')
       .eq('user_id', userId)
       .eq('provider', 'google')
       .maybeSingle();
 
-    if (integration?.encrypted_tokens) {
-      try {
-        const tokens = JSON.parse(decrypt(integration.encrypted_tokens)) as { refresh_token?: string; access_token?: string };
-        const token = tokens.refresh_token ?? tokens.access_token;
-        if (token) await oauthClient().revokeToken(token);
-      } catch {
-        /* token may already be invalid — still disconnect locally */
-      }
+    if (!integration) return res.status(404).json({ error: 'Google is not connected' });
+
+    const row = integration as { org_id: string | null; scopes: string | null };
+    const dropped = new Set(scopesFor(service));
+    const remaining = (row.scopes ?? '')
+      .split(/\s+/)
+      .filter(Boolean)
+      .filter((s) => !dropped.has(s));
+
+    // Nothing left to use — revoke the grant properly instead of keeping a
+    // token the app no longer has any reason to hold.
+    const stillUsed = servicesGranted(remaining.join(' '));
+    if (!stillUsed.gmail && !stillUsed.drive) {
+      await revokeGoogle(userId);
+      return res.json({ data: { ok: true, services: stillUsed } });
     }
 
     await supabaseAdmin
       .from('integrations')
-      .update({ status: 'disconnected', encrypted_tokens: null, scopes: '' })
+      .update({ scopes: remaining.join(' ') })
       .eq('user_id', userId)
       .eq('provider', 'google');
 
-    if (integration?.org_id) {
+    if (row.org_id) {
       await supabaseAdmin.from('activity_log').insert({
-        org_id: integration.org_id,
+        org_id: row.org_id,
         actor: userId,
-        action: 'google.disconnect',
+        action: 'google.disconnect_service',
         entity: 'integrations',
         entity_id: userId,
-        meta: {},
+        meta: { service, remaining: stillUsed },
       });
     }
 
-    res.json({ data: { ok: true } });
+    res.json({ data: { ok: true, services: stillUsed } });
   }),
 );
 

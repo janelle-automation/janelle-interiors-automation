@@ -55,6 +55,12 @@ cronRouter.all('/digest', asyncHandler(async (_req, res) => res.json({ data: awa
 
 opsRouter.use('/cron', cronRouter);
 
+// ── Signed-in operations ────────────────────────────────────
+// Everything below this line gets req.auth. Anything added ABOVE it will
+// not, and a role check there fails with "Insufficient permissions" even
+// for a principal — the role is simply undefined.
+opsRouter.use(requireAuth);
+
 // Raise tasks from email that was ingested before the tasks table existed.
 opsRouter.post(
   '/backfill-tasks',
@@ -64,9 +70,6 @@ opsRouter.post(
     res.json({ data: await backfillTasks(req.auth!.orgId) });
   }),
 );
-
-// ── Signed-in operations ────────────────────────────────────
-opsRouter.use(requireAuth);
 
 // Backfill: promote existing parsed emails + documents into vendors,
 // projects and purchase orders (principal / coordinator only).

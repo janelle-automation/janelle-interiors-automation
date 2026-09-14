@@ -1,17 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
+import { ASSISTANT_NAME } from '@janelle/shared';
 import { PageHeading, Card } from '../components/ui';
+import { IconMic, IconSend, IconStop } from '../components/icons';
 import {
   useAsk,
   useConfirmAction,
   type AssistantTurn,
   type ProposedAction,
 } from '../lib/queries';
-import {
-  detectLang, listenOnce, speak, speechInputSupported, speechOutputSupported, stopSpeaking,
-} from '../lib/speech';
-
-/** Remembered so the microphone opens in the right language next time. */
-const LANG_KEY = 'janelle.assistant.detected-lang';
+import { listenOnce, speak, speechInputSupported, speechOutputSupported, stopSpeaking } from '../lib/speech';
 
 interface Message extends AssistantTurn {
   proposed?: ProposedAction[];
@@ -34,25 +31,6 @@ export default function Assistant() {
   const [listening, setListening] = useState(false);
   const [voiceReplies, setVoiceReplies] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
-  // Learned, never chosen: seeded from the last conversation, then updated
-  // from the language the assistant actually replies in.
-  const [lang, setLang] = useState<string>(() => {
-    try {
-      return localStorage.getItem(LANG_KEY) ?? '';
-    } catch {
-      return '';
-    }
-  });
-
-  function rememberLang(next: string | null) {
-    if (!next || next === lang) return;
-    setLang(next);
-    try {
-      localStorage.setItem(LANG_KEY, next);
-    } catch {
-      /* storage may be blocked; detection still works for this session */
-    }
-  }
   const stopRef = useRef<(() => void) | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -86,11 +64,7 @@ export default function Assistant() {
       {
         onSuccess: (r) => {
           setMessages((prev) => [...prev, { role: 'assistant', content: r.reply, proposed: r.proposed, done: [] }]);
-          // The assistant answers in the user's language, so its reply is the
-          // cleanest signal of what that language is.
-          const replyLang = detectLang(r.reply) ?? detectLang(message);
-          rememberLang(replyLang);
-          if (voiceReplies) speak(r.reply, replyLang ?? lang ?? undefined);
+          if (voiceReplies) speak(r.reply);
         },
         onError: (e) => {
           setMessages((prev) => [...prev, { role: 'assistant', content: `Something went wrong: ${(e as Error).message}` }]);
@@ -110,15 +84,14 @@ export default function Assistant() {
       (text) => send(text),
       (msg) => setMicError(msg),
       () => setListening(false),
-      lang || undefined,
     );
   }
 
   return (
     <>
       <PageHeading
-        title="Assistant"
-        sub="Ask where things stand, or say what you need done — in any language. Answers come from the studio's live data, and it will say so when it cannot check something."
+        title={ASSISTANT_NAME}
+        sub={`Ask ${ASSISTANT_NAME} where things stand, or say what you need done. Answers come from the studio's live data, and she says so when she cannot check something.`}
         action={
           canSpeak ? (
             <button
@@ -223,16 +196,27 @@ export default function Assistant() {
             e.preventDefault();
             send(input);
           }}
-          className="flex items-center gap-2 border-t border-line-soft px-5 py-3"
+          className="relative flex items-center gap-2 border-t border-line-soft px-5 py-3"
         >
           {canListen && (
             <button
               type="button"
               onClick={toggleMic}
-              className={`btn-sm ${listening ? 'btn-primary' : 'btn-secondary'}`}
+              aria-label={listening ? 'Stop listening' : 'Speak instead of typing'}
+              aria-pressed={listening}
               title={listening ? 'Stop listening' : 'Speak instead of typing'}
+              className={`focusable grid h-9 w-9 shrink-0 place-items-center rounded-lg border transition-colors ${
+                listening
+                  ? 'border-crit bg-crit/10 text-crit'
+                  : 'border-line text-ink-soft hover:bg-sunk hover:text-ink'
+              }`}
             >
-              {listening ? 'Listening…' : 'Speak'}
+              {/* The icon carries the state: a stop square while listening,
+                  so the control never reads as "speak" mid-recording. */}
+              {listening ? <IconStop /> : <IconMic />}
+              {listening && (
+                <span className="absolute h-9 w-9 animate-ping rounded-lg bg-crit/20" aria-hidden="true" />
+              )}
             </button>
           )}
           <input
@@ -242,14 +226,19 @@ export default function Assistant() {
             placeholder={listening ? 'Listening…' : 'Ask about a project, or say what you need done'}
             disabled={ask.isPending}
           />
-          <button type="submit" className="btn-primary btn-sm" disabled={ask.isPending || !input.trim()}>
-            Send
+          <button
+            type="submit"
+            aria-label="Send"
+            title="Send"
+            disabled={ask.isPending || !input.trim()}
+            className="focusable grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brass text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <IconSend />
           </button>
         </form>
       </Card>
 
       <p className="mt-3 text-[12.5px] text-ink-faint">
-        Write or speak in any language — it answers in the one you used.
         The assistant never creates or reassigns work on its own; anything it prepares waits for your confirmation.
         {!canListen && ' Voice input is not available in this browser.'}
       </p>

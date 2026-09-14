@@ -9,6 +9,8 @@ const tone: Record<string, 'crit' | 'warn' | 'brass'> = {
   spec_gap: 'brass',
   quote_overdue: 'crit',
   client_waiting: 'crit',
+  task_overdue: 'warn',
+  task_escalation: 'crit',
 };
 const label: Record<string, string> = {
   vendor_silence: 'Vendor silent',
@@ -17,6 +19,8 @@ const label: Record<string, string> = {
   spec_gap: 'Spec gap',
   quote_overdue: 'Quote overdue',
   client_waiting: 'Client waiting',
+  task_overdue: 'Reminder sent',
+  task_escalation: 'Escalated',
 };
 
 export default function FollowUps() {

@@ -1,11 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from './api';
-import type { Prompt, ProjectStage, PoStatus, TaskKind, TaskStatus, UserRole } from '@janelle/shared';
+import type {
+  Action, AiSettingsView, AiUsageReport, DashboardSummary, IngestSettingsView,
+  Prompt, ProjectStage, PoStatus,
+  SelectableModel,
+  Resource, TaskKind, TaskStatus, UserRole,
+} from '@janelle/shared';
 
 // ── View models (what the UI renders) ───────────────────────
 export interface ProjectView {
   id: string; name: string; client: string; stage: ProjectStage;
-  budget: number; install: string; openPOs: number;
+  /** The project's own budget figure; null when never set. */
+  budget: number | null;
+  install: string; openPOs: number;
+  /** Total value of the project's purchase orders. */
+  committed: number;
+  specGaps: number;
 }
 export interface PoView {
   id: string; po: string; vendor: string; project: string;
@@ -65,20 +75,23 @@ export function useMe() {
 }
 
 // ── Dashboard ───────────────────────────────────────────────
-export interface Summary {
-  activeProjects: number; openPOs: number; awaitingClient: number;
-  specGaps: number; installsSoon: number; openFollowUps: number;
-  emailsRead: number; documentsParsed: number; draftsPending: number;
-  openTasks: number; unassignedTasks: number;
-  byStage: Record<string, number>;
-}
-const ZERO_SUMMARY: Summary = {
-  activeProjects: 0, openPOs: 0, awaitingClient: 0, specGaps: 0,
-  installsSoon: 0, openFollowUps: 0, emailsRead: 0, documentsParsed: 0, draftsPending: 0,
-  openTasks: 0, unassignedTasks: 0, byStage: {},
+export type Summary = DashboardSummary;
+
+/** Every card at zero, so the page renders before the first response. */
+const ZERO_SUMMARY: DashboardSummary = {
+  role: null,
+  focus: '',
+  cards: [],
+  figures: {
+    myOpenTasks: 0, myOverdueTasks: 0, unassignedTasks: 0, tasksWithoutNextStep: 0,
+    openFollowUps: 0, awaitingClient: 0, draftsPending: 0, specGaps: 0, openPOs: 0,
+    activeProjects: 0, installsSoon: 0, emailsRead: 0, documentsParsed: 0, escalations: 0,
+  },
+  byStage: {},
+  vacantSeats: [],
 };
 export function useDashboard() {
-  const q = useQuery({ queryKey: ['dashboard'], queryFn: () => api<Summary>('/dashboard/summary') });
+  const q = useQuery({ queryKey: ['dashboard'], queryFn: () => api<DashboardSummary>('/dashboard/summary') });
   return { ...q, data: q.data ?? ZERO_SUMMARY };
 }
 
@@ -86,6 +99,7 @@ export function useDashboard() {
 interface ProjectRow {
   id: string; name: string; client_name: string | null; stage: ProjectStage;
   budget: number | null; target_install: string | null;
+  open_pos: number; po_total: number; spec_gaps: number;
 }
 export function useProjects() {
   const q = useQuery({
@@ -94,7 +108,8 @@ export function useProjects() {
       const rows = await api<ProjectRow[]>('/projects');
       return rows.map((r) => ({
         id: r.id, name: r.name, client: r.client_name ?? '—', stage: r.stage,
-        budget: r.budget ?? 0, install: r.target_install ?? '', openPOs: 0,
+        budget: r.budget, install: r.target_install ?? '',
+        openPOs: r.open_pos ?? 0, committed: r.po_total ?? 0, specGaps: r.spec_gaps ?? 0,
       }));
     },
   });
@@ -200,13 +215,43 @@ export function useTasks() {
   return { ...q, data: q.data ?? [] };
 }
 
-export interface TeamMember { id: string; full_name: string | null; email: string | null; role: UserRole }
+export interface TeamMember {
+  id: string; full_name: string | null; email: string | null; role: UserRole;
+  created_at?: string; live_tasks?: number; is_you?: boolean;
+}
 export function useTeam() {
-  const q = useQuery({
-    queryKey: ['team'],
-    queryFn: () => api<TeamMember[]>('/team'),
-  });
+  const q = useQuery({ queryKey: ['team'], queryFn: () => api<TeamMember[]>('/team') });
   return { ...q, data: q.data ?? [] };
+}
+
+/** Change someone's role. Principal only; the API enforces it too. */
+export function useSetRole() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { id: string; role: UserRole }) =>
+      api(`/team/${v.id}`, { method: 'PATCH', body: JSON.stringify({ role: v.role }) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['team'] });
+      qc.invalidateQueries({ queryKey: ['me'] });
+    },
+  });
+}
+
+export interface NewTeamMember {
+  email: string; full_name: string; role: UserRole;
+  /** True sends them a sign-in email; false just creates the account. */
+  invite: boolean;
+}
+export function useAddTeamMember() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: NewTeamMember) =>
+      api<{ id: string }>(v.invite ? '/team/invite' : '/team', {
+        method: 'POST',
+        body: JSON.stringify({ email: v.email, full_name: v.full_name, role: v.role }),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['team'] }),
+  });
 }
 
 // ── Morning digest ──────────────────────────────────────────
@@ -511,6 +556,24 @@ export function useConnectGoogle() {
 }
 
 /** Revoke the Google connection (both Gmail and Drive). */
+/**
+ * Stop using ONE Google service. Google cannot revoke half a grant, so
+ * this drops that service’s scopes from the stored integration: the app
+ * stops reading it, the other service keeps working, and reconnecting is
+ * one consent screen away.
+ */
+export function useDisconnectGoogleService() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (service: GoogleService) =>
+      api<{ ok: boolean }>(`/auth/google/${service}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['me'] });
+      qc.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+}
+
 export function useDisconnectGoogle() {
   const qc = useQueryClient();
   return useMutation({
@@ -519,5 +582,149 @@ export function useDisconnectGoogle() {
       qc.invalidateQueries({ queryKey: ['me'] });
       qc.invalidateQueries({ queryKey: ['dashboard'] });
     },
+  });
+}
+
+// ── Permission matrix (dynamic module access) ───────────────
+export interface PermissionCell {
+  role: UserRole;
+  resource: Resource;
+  action: Action;
+  /** What the studio default says, before any override. */
+  default: boolean;
+  /** What is actually true right now. */
+  allowed: boolean;
+  overridden: boolean;
+  /** Cells the studio is not allowed to change, so it cannot lock itself out. */
+  locked: boolean;
+  updated_at: string | null;
+}
+
+export function usePermissionMatrix() {
+  return useQuery({
+    queryKey: ['permissions'],
+    queryFn: () =>
+      api<{ cells: PermissionCell[]; canEdit: boolean; storageReady: boolean }>('/permissions'),
+  });
+}
+
+/**
+ * Grant or revoke one module for one role. Invalidates everything: a
+ * permission change can add or remove controls anywhere in the app, and
+ * the API re-reads the matrix on its next request.
+ */
+export function useSetPermission() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { role: UserRole; resource: Resource; action: Action; allowed: boolean }) =>
+      api<PermissionCell>('/permissions', { method: 'PUT', body: JSON.stringify(v) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['permissions'] });
+      qc.invalidateQueries({ queryKey: ['me'] });
+    },
+  });
+}
+
+/** Put one cell back to the studio default. */
+export function useResetPermission() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { role: UserRole; resource: Resource; action: Action }) =>
+      api<PermissionCell>(
+        `/permissions?role=${v.role}&resource=${v.resource}&action=${v.action}`,
+        { method: 'DELETE' },
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['permissions'] });
+      qc.invalidateQueries({ queryKey: ['me'] });
+    },
+  });
+}
+
+// ── AI configuration ────────────────────────────────────────
+export interface AiConfig extends AiSettingsView {
+  models: SelectableModel[];
+}
+
+export function useAiConfig() {
+  return useQuery({ queryKey: ['ai-config'], queryFn: () => api<AiConfig>('/settings/ai') });
+}
+
+/** Changing the key or model changes what every AI feature can do. */
+function useAiMutation<V>(fn: (v: V) => Promise<AiSettingsView>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ai-config'] });
+      qc.invalidateQueries({ queryKey: ['health'] });
+    },
+  });
+}
+
+export function useSetAiKey() {
+  return useAiMutation((apiKey: string) =>
+    api<AiSettingsView>('/settings/ai/key', { method: 'PUT', body: JSON.stringify({ apiKey }) }),
+  );
+}
+
+export function useClearAiKey() {
+  return useAiMutation(() => api<AiSettingsView>('/settings/ai/key', { method: 'DELETE' }));
+}
+
+export function useIngestSettings() {
+  return useQuery({
+    queryKey: ['ingest-settings'],
+    queryFn: () => api<IngestSettingsView>('/settings/ingest'),
+  });
+}
+
+/** How often email is read, and whether Claude reads it. */
+export function useSetIngestSettings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: { intervalMinutes?: number; useAi?: boolean }) =>
+      api<IngestSettingsView>('/settings/ingest', { method: 'PUT', body: JSON.stringify(patch) }),
+    onSuccess: (data) => qc.setQueryData(['ingest-settings'], data),
+  });
+}
+
+export function useSetAiModel() {
+  return useAiMutation((model: string) =>
+    api<AiSettingsView>('/settings/ai/model', { method: 'PUT', body: JSON.stringify({ model }) }),
+  );
+}
+
+// ── AI usage ────────────────────────────────────────────────
+export interface UsageLink {
+  token: string | null;
+  path: string | null;
+  created_at: string | null;
+}
+
+export function useAiUsage(days = 30) {
+  return useQuery({
+    queryKey: ['ai-usage', days],
+    queryFn: () => api<AiUsageReport>(`/usage?days=${days}`),
+  });
+}
+
+export function useUsageLink() {
+  return useQuery({ queryKey: ['usage-link'], queryFn: () => api<UsageLink>('/usage/link') });
+}
+
+export function useRotateUsageLink() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<UsageLink>('/usage/link/rotate', { method: 'POST' }),
+    onSuccess: (data) => qc.setQueryData(['usage-link'], data),
+  });
+}
+
+export function useRevokeUsageLink() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<UsageLink>('/usage/link', { method: 'DELETE' }),
+    onSuccess: (data) => qc.setQueryData(['usage-link'], data),
   });
 }
