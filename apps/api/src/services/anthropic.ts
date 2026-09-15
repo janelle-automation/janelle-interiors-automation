@@ -9,13 +9,34 @@ import { supabaseAdmin } from '../lib/supabase.js';
 export const AI_USAGE_ACTION = 'ai.usage';
 
 /**
+ * How long one call to Claude may take, and how often it is re-sent.
+ *
+ * The SDK's own defaults are ten minutes and two retries, which is right
+ * for a script and wrong here: every caller runs inside a serverless
+ * function that the platform kills at 60s, and a single call left hanging
+ * takes the whole invocation down with it — the browser then sees a
+ * dropped connection rather than an error. Bounding each attempt is what
+ * makes the callers' own time budgets mean anything. One retry is kept,
+ * because a 429 or a 500 is worth re-sending and is usually quick.
+ *
+ * A PDF that cannot be read inside this is skipped and logged, which is
+ * why `MAX_PDF_BYTES` keeps documents small enough to finish.
+ */
+const CALL_TIMEOUT_MS = Number(process.env.ANTHROPIC_TIMEOUT_MS || 25_000);
+const CALL_MAX_RETRIES = Number(process.env.ANTHROPIC_MAX_RETRIES ?? 1);
+
+/**
  * The environment-configured client, kept for callers that only need to
  * know whether Claude is available at boot. The client actually used for
  * a call is resolved per studio in `clientFor()`, because the key and
  * model are now editable from Settings.
  */
 export const anthropic: Anthropic | null = isAnthropicConfigured()
-  ? new Anthropic({ apiKey: env.anthropic.apiKey })
+  ? new Anthropic({
+      apiKey: env.anthropic.apiKey,
+      timeout: CALL_TIMEOUT_MS,
+      maxRetries: CALL_MAX_RETRIES,
+    })
   : null;
 
 /**
@@ -27,7 +48,7 @@ const clients = new Map<string, Anthropic>();
 function clientForKey(apiKey: string): Anthropic {
   const existing = clients.get(apiKey);
   if (existing) return existing;
-  const created = new Anthropic({ apiKey });
+  const created = new Anthropic({ apiKey, timeout: CALL_TIMEOUT_MS, maxRetries: CALL_MAX_RETRIES });
   clients.set(apiKey, created);
   return created;
 }

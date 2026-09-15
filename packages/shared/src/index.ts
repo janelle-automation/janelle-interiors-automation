@@ -57,7 +57,16 @@ export type FollowUpType =
   /** Internal nudge: the person who owns a task has let it go overdue. */
   | 'task_overdue'
   /** The nudge was ignored, so the principal is told. */
-  | 'task_escalation';
+  | 'task_escalation'
+  // Task hygiene. A task missing any of these is not yet a task the studio's
+  // own SOP would accept, and it cannot be chased for lateness when it has no
+  // date — so these chase the shape of the work rather than its timing.
+  /** Nobody owns it. */
+  | 'task_unowned'
+  /** No single concrete action has been written down. */
+  | 'task_no_next_step'
+  /** No date to be late against. */
+  | 'task_no_due_date';
 
 /**
  * Service levels the studio actually works to, captured from the
@@ -141,6 +150,49 @@ export const TASK_KIND_ROLE: Record<TaskKind, UserRole> = {
   scheduling: 'coordinator',
   admin: 'assistant',
 };
+
+/**
+ * How long each kind of work may sit before it is late, when the email
+ * itself never said.
+ *
+ * Almost no email states a deadline, so Claude returns none and the task
+ * arrived with an empty due date — which reads on the board as "no rush"
+ * and, worse, makes the task unchaseable: the follow-up engine can only
+ * call something late against a date. The studio's own SLA already answers
+ * this per kind of work, so the date comes from there rather than being
+ * invented.
+ *
+ * Read against SlaSettings, so a studio that changes its SLA changes these
+ * with it. A date the email DID state always wins.
+ */
+export function defaultDueDays(kind: TaskKind, sla: SlaSettings): number {
+  switch (kind) {
+    // A quote unresolved past this is exactly what the SLA is about.
+    case 'quote_request':
+      return sla.quote_response_days;
+    case 'client_approval':
+      return sla.client_approval_days;
+    case 'order_followup':
+      return sla.vendor_silence_days;
+    // Nothing in the SLA speaks to these two, so they take the studio's
+    // shortest external promise — work the client can see should not sit
+    // longer than work the client is waiting on.
+    case 'spec_review':
+    case 'scheduling':
+      return sla.quote_response_days;
+    // Internal admin is the only kind nobody outside is waiting on.
+    case 'admin':
+    default:
+      return sla.vendor_silence_days;
+  }
+}
+
+/** That many days from today, as an ISO date. */
+export function dueDateFor(kind: TaskKind, sla: SlaSettings, from = new Date()): string {
+  const due = new Date(from);
+  due.setDate(due.getDate() + defaultDueDays(kind, sla));
+  return due.toISOString().slice(0, 10);
+}
 
 /**
  * The studio's named seats, from "Team Roles Scorecards v3 — Named Seats"
@@ -339,6 +391,39 @@ export function can(role: UserRole | null, resource: Resource, action: Action): 
 /** True when this person may reassign work that is not their own. */
 export function canSupervise(role: UserRole | null): boolean {
   return !!role && SUPERVISOR_ROLES.includes(role);
+}
+
+/**
+ * Seats that run the task board, whatever role they carry.
+ *
+ * The roles document hands PM support "pushing tasks so each has ONE owner,
+ * a due date and a next step, chasing overdue and unassigned tasks". That is
+ * the task board, and it cannot be done without moving other people's work —
+ * yet the seat's role is `assistant`, which `canSupervise` excludes.
+ *
+ * Widening the ROLE would have been the easy fix and the wrong one: it would
+ * hand the same power to Technical production, an assistant whose seat says
+ * in as many words that it must not be "Lead Designer or PM". Only the seat
+ * separates them.
+ */
+export const TASK_BOARD_SEATS: Seat[] = ['owner', 'coo', 'operations', 'pm_support'];
+
+/**
+ * The seat accountable for task hygiene — the one chased when a task has no
+ * owner, no next step or no due date.
+ */
+export const TASK_HYGIENE_SEAT: Seat = 'pm_support';
+
+/**
+ * True when this person may move work that is not their own.
+ *
+ * Deliberately separate from `canSupervise`, which still guards money,
+ * settings and the studio's rules. Running the board is not the same
+ * authority as approving spend, and the document keeps them apart.
+ */
+export function canManageTasks(role: UserRole | null, seat: Seat | null | undefined): boolean {
+  if (canSupervise(role)) return true;
+  return !!seat && TASK_BOARD_SEATS.includes(seat);
 }
 
 export const ROLE_LABELS: Record<UserRole, string> = {

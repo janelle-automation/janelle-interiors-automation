@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api } from './api';
+import { api, NetworkError } from './api';
 import type {
   Action, AiSettingsView, AiUsageReport, DashboardSummary, IngestSettingsView,
   Prompt, ProjectStage, PoStatus,
   SelectableModel,
-  Resource, TaskKind, TaskStatus, UserRole,
+  FollowUpType, Resource, Seat, TaskKind, TaskStatus, UserRole,
 } from '@janelle/shared';
 
 // ── View models (what the UI renders) ───────────────────────
@@ -25,7 +25,12 @@ export interface FollowUpView {
   id: string; type: 'vendor_silence' | 'client_approval_overdue' | 'date_slipping' | 'spec_gap';
   who: string; project: string; reason: string; age: string;
 }
-export interface VendorView { id: string; name: string; category: string; openPOs: number }
+export interface VendorView {
+  id: string; name: string; category: string;
+  openPOs: number;
+  /** Total value of those open orders. */
+  openValue: number;
+}
 export interface EmailView {
   id: string; from: string; subject: string; snippet: string;
   cls: string; project: string; when: string;
@@ -135,13 +140,20 @@ export function useProject(id: string | undefined) {
 }
 
 // ── Vendors ─────────────────────────────────────────────────
-interface VendorRow { id: string; name: string; category: string | null }
+interface VendorRow {
+  id: string; name: string; category: string | null;
+  open_pos?: number; open_value?: number;
+}
 export function useVendors() {
   const q = useQuery({
     queryKey: ['vendors'],
     queryFn: async (): Promise<VendorView[]> => {
       const rows = await api<VendorRow[]>('/vendors');
-      return rows.map((r) => ({ id: r.id, name: r.name, category: r.category ?? '—', openPOs: 0 }));
+      return rows.map((r) => ({
+        id: r.id, name: r.name, category: r.category ?? '—',
+        openPOs: r.open_pos ?? 0,
+        openValue: r.open_value ?? 0,
+      }));
     },
   });
   return { ...q, data: q.data ?? [] };
@@ -191,10 +203,16 @@ export interface TaskView {
   id: string; title: string; detail: string; kind: TaskKind; status: TaskStatus;
   assignedTo: string | null; assignee: string; project: string; due: string | null;
   age: string;
+  /** The single concrete action. The studio's SOP fails a task without one. */
+  nextStep: string | null;
+  seat: Seat | null;
+  /** Past its due date and still live — the board tints these. */
+  overdue: boolean;
 }
 interface TaskRow {
   id: string; title: string; detail: string | null; kind: TaskKind; status: TaskStatus;
   assigned_to: string | null; due_date: string | null; created_at: string;
+  next_step?: string | null; seat?: Seat | null;
   projects: { name: string } | null; vendors: { name: string } | null;
   profiles: { full_name: string | null } | null;
 }
@@ -209,6 +227,12 @@ export function useTasks() {
         assignee: r.profiles?.full_name ?? (r.assigned_to ? 'Assigned' : 'Unassigned'),
         project: r.projects?.name ?? r.vendors?.name ?? '—',
         due: r.due_date, age: ageFrom(r.created_at),
+        nextStep: r.next_step ?? null,
+        seat: r.seat ?? null,
+        overdue:
+          !!r.due_date &&
+          r.due_date < new Date().toISOString().slice(0, 10) &&
+          !['done', 'cancelled'].includes(r.status),
       }));
     },
   });
@@ -217,6 +241,8 @@ export function useTasks() {
 
 export interface TeamMember {
   id: string; full_name: string | null; email: string | null; role: UserRole;
+  /** The named seat from the roles document, where one is assigned. */
+  seat?: Seat | null;
   created_at?: string; live_tasks?: number; is_you?: boolean;
 }
 export function useTeam() {
@@ -224,12 +250,22 @@ export function useTeam() {
   return { ...q, data: q.data ?? [] };
 }
 
-/** Change someone's role. Principal only; the API enforces it too. */
+/**
+ * Change someone's role or their seat. Principal only; the API enforces it.
+ *
+ * The role is what the software lets them touch; the seat is the outcome the
+ * roles document holds them to, and it is what routes work. Either can be
+ * sent on its own — `seat: null` takes the seat away.
+ */
 export function useSetRole() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (v: { id: string; role: UserRole }) =>
-      api(`/team/${v.id}`, { method: 'PATCH', body: JSON.stringify({ role: v.role }) }),
+    mutationFn: (v: { id: string; role?: UserRole; seat?: Seat | null }) => {
+      const body: Record<string, unknown> = {};
+      if (v.role !== undefined) body.role = v.role;
+      if (v.seat !== undefined) body.seat = v.seat;
+      return api(`/team/${v.id}`, { method: 'PATCH', body: JSON.stringify(body) });
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['team'] });
       qc.invalidateQueries({ queryKey: ['me'] });
@@ -419,6 +455,71 @@ export function useRunPrompt() {
   });
 }
 
+/** One /ops/ingest response: a single time-budgeted pass. */
+export interface IngestPass {
+  ok?: boolean;
+  reason?: string;
+  emails: number;
+  documents: number;
+  replies: number;
+  tasks?: number;
+  /** False when the pass stopped on its time budget with work left. */
+  done?: boolean;
+  remaining?: number;
+}
+
+/** The whole run: every pass summed, plus how the last one ended. */
+export interface IngestRun extends IngestPass {
+  tasks: number;
+  rounds: number;
+  /** Set when the run stopped on a dropped connection rather than finishing. */
+  interrupted?: string;
+}
+
+export interface IngestProgress {
+  emails: number;
+  documents: number;
+  replies: number;
+  tasks: number;
+  round: number;
+}
+
+/**
+ * How many passes one click may chain. Reading a message costs up to three
+ * Claude calls, so a full inbox batch outlives any single invocation. The
+ * cap stops a very large backlog from holding the button forever — what is
+ * left is picked up by the next click or the scheduled run.
+ *
+ * Rounds are deliberately short (the API's budget, ~20s) rather than few:
+ * a request held open for most of a minute is the one that gets dropped in
+ * transit, and a dropped round used to lose the whole run.
+ */
+const INGEST_MAX_ROUNDS = 12;
+
+/** How many times a round that never reached the server is re-sent. */
+const INGEST_RETRIES = 2;
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * One pass, re-sent if the connection dropped.
+ *
+ * Only NetworkError is retried. It means no answer came back, so the pass
+ * either never ran or ran and its result was lost — and either way asking
+ * again is safe: ingestion dedupes on what it already stored. An error the
+ * server actually returned (not authorised, not configured) is reported.
+ */
+async function ingestPass(): Promise<IngestPass> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await api<IngestPass>('/ops/ingest', { method: 'POST', body: '{}' });
+    } catch (err) {
+      if (!(err instanceof NetworkError) || attempt >= INGEST_RETRIES) throw err;
+      await wait(1000 * (attempt + 1));
+    }
+  }
+}
+
 export function useOps() {
   const qc = useQueryClient();
   const invalidate = () => {
@@ -430,7 +531,42 @@ export function useOps() {
     qc.invalidateQueries({ queryKey: ['activity'] });
   };
   const ingest = useMutation({
-    mutationFn: () => api<{ ok?: boolean; reason?: string; emails: number; documents: number; replies: number }>('/ops/ingest', { method: 'POST', body: '{}' }),
+    // Each POST reads to a short time budget and reports `done: false` with
+    // what it left behind, so keep asking until the queue is clear. Totals
+    // are summed across the rounds; the last response is kept for ok/reason.
+    mutationFn: async (onProgress?: (p: IngestProgress) => void): Promise<IngestRun> => {
+      const total = { emails: 0, documents: 0, replies: 0, tasks: 0 };
+      let last: IngestRun = { ...total, done: true, rounds: 0 };
+
+      for (let round = 1; round <= INGEST_MAX_ROUNDS; round++) {
+        let r: IngestPass;
+        try {
+          r = await ingestPass();
+        } catch (err) {
+          // Every round before this one committed its work server-side, so
+          // report what got read and let them carry on — throwing here would
+          // show "Failed to fetch" over a run that mostly succeeded.
+          if (round === 1) throw err;
+          return { ...last, done: false, interrupted: (err as Error).message, rounds: round - 1 };
+        }
+
+        // Nothing ran — already busy, or Google/Claude not connected.
+        if (r.ok === false) return { ...r, ...total, rounds: round };
+
+        total.emails += r.emails ?? 0;
+        total.documents += r.documents ?? 0;
+        total.replies += r.replies ?? 0;
+        total.tasks += r.tasks ?? 0;
+        last = { ...r, ...total, rounds: round };
+        onProgress?.({ ...total, round });
+
+        if (r.done !== false) break;
+        // Show what has landed without competing with the next round for
+        // connections — the full refresh happens once the run finishes.
+        qc.invalidateQueries({ queryKey: ['dashboard'] });
+      }
+      return last;
+    },
     onSuccess: invalidate,
   });
   const followUps = useMutation({
@@ -473,16 +609,192 @@ export function useBackfillTasks() {
   });
 }
 
+// Duplicate projects are folded together by the server at the end of every
+// reading pass, so there is nothing for the web app to ask for. The manual
+// route (POST /ops/dedupe-projects) stays for clearing an old backlog.
+
+export interface HouzzImportResult {
+  ok: boolean;
+  reason?: string;
+  created: number;
+  updated: number;
+  skipped: number;
+  /** Which CSV column each field was read from. */
+  mapped: Record<string, string>;
+  /** Columns in the file nothing was read from. */
+  unusedColumns: string[];
+}
+
+/**
+ * Load a Houzz Pro project export.
+ *
+ * Houzz has no API for a studio's own projects, so the CSV that
+ * pro.houzz.com/manage/projects exports is the only way the list comes
+ * across. Safe to run again: rows match on the Houzz id, then on name.
+ */
+export function useImportHouzz() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (csv: string) =>
+      api<HouzzImportResult>('/ops/import-houzz', { method: 'POST', body: JSON.stringify({ csv }) }),
+    onSuccess: () => {
+      for (const key of ['projects', 'dashboard', 'activity']) {
+        qc.invalidateQueries({ queryKey: [key] });
+      }
+    },
+  });
+}
+
+/**
+ * Change a task's status, or hand it to someone else.
+ *
+ * Applied to the cache before the request goes out. Dragging a card across
+ * the board is a direct manipulation — the card has to land where it was
+ * dropped, immediately — and waiting for a round-trip plus a refetch made it
+ * hang in the old column long enough to feel broken, or to be dragged twice.
+ * The server is still the authority: a failure puts the board back exactly
+ * as it was and surfaces the error.
+ */
 export function useUpdateTask() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (v: { id: string; status?: TaskStatus; assigned_to?: string | null }) => {
+    mutationFn: (v: { id: string; status?: TaskStatus; assigned_to?: string | null; due_date?: string | null; next_step?: string | null }) => {
       const { id, ...patch } = v;
       return api(`/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
     },
-    onSuccess: () => {
+
+    onMutate: async (v) => {
+      // Stop a refetch already in flight from landing on top of this.
+      await qc.cancelQueries({ queryKey: ['tasks'] });
+      const previous = qc.getQueryData<TaskView[]>(['tasks']);
+
+      qc.setQueryData<TaskView[]>(['tasks'], (old) =>
+        (old ?? []).map((t) => {
+          if (t.id !== v.id) return t;
+          const next: TaskView = { ...t };
+
+          if (v.status !== undefined) {
+            next.status = v.status;
+            // Finished work is not overdue, whatever its date said.
+            next.overdue =
+              !!next.due &&
+              next.due < new Date().toISOString().slice(0, 10) &&
+              !['done', 'cancelled'].includes(v.status);
+          }
+
+          if (v.due_date !== undefined) {
+            next.due = v.due_date;
+            next.overdue =
+              !!v.due_date &&
+              v.due_date < new Date().toISOString().slice(0, 10) &&
+              !['done', 'cancelled'].includes(next.status);
+          }
+
+          if (v.next_step !== undefined) next.nextStep = v.next_step;
+
+          if (v.assigned_to !== undefined) {
+            next.assignedTo = v.assigned_to;
+            // Name it from the roster we already hold, so the card does not
+            // flash a placeholder before the refetch catches up.
+            const team = qc.getQueryData<TeamMember[]>(['team']) ?? [];
+            const who = team.find((m) => m.id === v.assigned_to);
+            next.assignee = v.assigned_to
+              ? who?.full_name ?? who?.email ?? 'Assigned'
+              : 'Unassigned';
+          }
+
+          return next;
+        }),
+      );
+
+      return { previous };
+    },
+
+    onError: (_err, _vars, ctx) => {
+      // Put the board back; the error is rendered by the page.
+      if (ctx?.previous) qc.setQueryData(['tasks'], ctx.previous);
+    },
+
+    // Reconcile with the server either way — the optimistic row is a guess
+    // at what it stored, not a replacement for it.
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: ['tasks'] });
       qc.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+}
+
+// ── One task, in full ───────────────────────────────────────
+
+export interface TaskEmail {
+  id: string;
+  subject: string | null;
+  from_addr: string | null;
+  to_addr: string | null;
+  snippet: string | null;
+  received_at: string | null;
+  class: string;
+  extracted_json: { summary?: string } | null;
+}
+
+export interface TaskHistoryEntry {
+  id: string;
+  type: FollowUpType;
+  reason: string | null;
+  status: string;
+  created_at: string;
+}
+
+export interface Subtask {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  assigned_to: string | null;
+  due_date: string | null;
+  created_at: string;
+  profiles?: { full_name: string | null } | null;
+}
+
+export interface TaskDetail {
+  task: {
+    id: string; title: string; detail: string | null; kind: TaskKind; status: TaskStatus;
+    assigned_to: string | null; assigned_role: UserRole | null; seat: Seat | null;
+    next_step: string | null; due_date: string | null;
+    created_at: string; updated_at: string | null;
+    reminded_at: string | null; reminder_count: number;
+    projects: { name: string } | null;
+    vendors: { name: string } | null;
+    profiles: { full_name: string | null; email: string | null } | null;
+  };
+  email: TaskEmail | null;
+  history: TaskHistoryEntry[];
+  subtasks: Subtask[];
+  /** False until migration 0009 is applied. */
+  subtasksAvailable: boolean;
+}
+
+/** Everything behind one task — fetched only while its panel is open. */
+export function useTaskDetail(id: string | null) {
+  return useQuery({
+    queryKey: ['task', id],
+    queryFn: () => api<TaskDetail>(`/tasks/${id}`),
+    enabled: !!id,
+  });
+}
+
+/** Break a task into a step of its own. */
+export function useAddSubtask(parentId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (title: string) =>
+      api<Subtask>(`/tasks/${parentId}/subtasks`, {
+        method: 'POST',
+        body: JSON.stringify({ title }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['task', parentId] });
+      // A subtask is a task, so it belongs on the board too.
+      qc.invalidateQueries({ queryKey: ['tasks'] });
     },
   });
 }

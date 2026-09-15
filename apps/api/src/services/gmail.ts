@@ -4,6 +4,8 @@ import { googleClientForUser } from '../lib/tokens.js';
 export interface PdfAttachment {
   filename: string;
   attachmentId: string;
+  /** Bytes, as Gmail reports them; 0 when the part did not say. */
+  size: number;
 }
 
 export interface ParsedEmail {
@@ -85,11 +87,128 @@ function collectPdfAttachments(payload: gmail_v1.Schema$MessagePart | undefined)
       part.mimeType === 'application/pdf' ||
       (part.filename ?? '').toLowerCase().endsWith('.pdf');
     if (isPdf && part.body?.attachmentId) {
-      out.push({ filename: part.filename || 'attachment.pdf', attachmentId: part.body.attachmentId });
+      out.push({
+        filename: part.filename || 'attachment.pdf',
+        attachmentId: part.body.attachmentId,
+        // Gmail reports the size on the part, so an oversized attachment is
+        // skipped without spending the download on it.
+        size: part.body.size ?? 0,
+      });
     }
     if (part.parts) stack.push(...part.parts);
   }
   return out;
+}
+
+/**
+ * Senders that are machinery rather than correspondence.
+ *
+ * The studio's own tools mail constantly — Slack telling it someone joined
+ * the workspace, GitHub relaying a bot's comment on a pull request. None of
+ * it is studio work, and every one of them used to cost three Claude calls
+ * (classify, raise a task, draft a reply) and land in the Inbox next to
+ * real vendor mail.
+ *
+ * Matched on the sending DOMAIN, deliberately, rather than on a "no-reply"
+ * local part: a great many vendors send their order confirmations from
+ * no-reply@, and that is exactly the mail the studio cannot afford to miss.
+ *
+ * NOT here, on purpose: Dropbox, Drive, Box and WeTransfer. Their mail runs
+ * both ways — a sign-in notice is noise, but "Carlos shared Lemon Residence
+ * elevations with you" is how a drawing or a quote actually reaches the
+ * studio, and losing one of those costs far more than reading a few sign-in
+ * notices. The task prompt already declines to raise work off a file-share
+ * notification, so the noise stops there rather than here.
+ *
+ * Extend with INGEST_IGNORE_DOMAINS (comma-separated) without a code change.
+ */
+const BUILT_IN_IGNORED_DOMAINS = [
+  // Chat and collaboration
+  'slack.com', 'slack-mail.com', 'zoom.us', 'atlassian.com', 'atlassian.net',
+  'notion.so', 'figma.com', 'loom.com', 'asana.com', 'trello.com',
+  'monday.com', 'clickup.com', 'airtable.com',
+  // Developer tooling — this repo's own bots reach the studio through these
+  'github.com', 'gitlab.com', 'vercel.com', 'netlify.com', 'sentry.io',
+  'circleci.com', 'npmjs.com',
+  // Sign-in and security alerts only. Drive's own sharing mail comes from
+  // google.com and docs.google.com, which are deliberately left readable.
+  'accounts.google.com',
+  // Social
+  'linkedin.com', 'facebookmail.com', 'facebook.com', 'twitter.com', 'x.com',
+  'instagram.com', 'pinterest.com',
+];
+
+/** Domains the studio has added on top of the built-in list. */
+function extraIgnoredDomains(): string[] {
+  return (process.env.INGEST_IGNORE_DOMAINS ?? '')
+    .split(',')
+    .map((d) => d.trim().toLowerCase().replace(/^@/, ''))
+    .filter(Boolean);
+}
+
+export function ignoredDomains(): string[] {
+  return [...BUILT_IN_IGNORED_DOMAINS, ...extraIgnoredDomains()];
+}
+
+/**
+ * Gmail search terms that leave the noise out of the listing entirely.
+ *
+ * Cheaper than filtering after the fact: excluded mail is never listed, so
+ * it costs nothing on every later pass either. Note there is no `is:unread`
+ * here and there must never be one — the studio reads its mail in Gmail
+ * first, and mail already opened is exactly the mail it wants read.
+ */
+export function ignoredSenderQuery(): string {
+  return ignoredDomains()
+    .map((d) => `-from:${d}`)
+    .join(' ');
+}
+
+/**
+ * Whether this sender is machinery. The query above keeps almost all of it
+ * out; this catches the rest — a custom query, or a domain that slipped
+ * past Gmail's own matching.
+ */
+export function isIgnoredSender(from: string): boolean {
+  const address = addressOf(from || '');
+  const at = address.lastIndexOf('@');
+  if (at === -1) return false;
+  const domain = address.slice(at + 1);
+  return ignoredDomains().some((d) => domain === d || domain.endsWith(`.${d}`));
+}
+
+export interface EmailLink {
+  url: string;
+  /** The domain, so "the Canva link" can be found without reading the URL. */
+  host: string;
+}
+
+/**
+ * Every link in a message body.
+ *
+ * Done with a regex rather than by asking Claude: it is exact, free, and
+ * cannot invent a URL that was never there — which matters most for the
+ * thing people ask for by name ("send me the Canva link"). Tracking and
+ * unsubscribe machinery is dropped so the list stays worth reading.
+ */
+const LINK_NOISE = /googleusercontent|gstatic|doubleclick|list-manage|mailchimp|sendgrid|unsubscribe|\.gif|\.png|\.jpg/i;
+
+export function linksIn(body: string): EmailLink[] {
+  const found = new Map<string, EmailLink>();
+  // Stop at whitespace and at the punctuation that usually closes a URL in
+  // prose, so a trailing full stop or bracket does not become part of it.
+  for (const match of body.matchAll(/https?:\/\/[^\s<>"'`)\]}]+/g)) {
+    const url = match[0].replace(/[.,;:!?]+$/, '');
+    if (url.length > 500 || LINK_NOISE.test(url)) continue;
+    try {
+      const host = new URL(url).hostname.replace(/^www\./, '');
+      if (!found.has(url)) found.set(url, { url, host });
+    } catch {
+      // Not a URL the platform can parse; not worth storing.
+    }
+    if (found.size >= 25) break;
+  }
+  return [...found.values()];
 }
 
 /** List message ids matching a Gmail search query (e.g. "newer_than:2d"). */

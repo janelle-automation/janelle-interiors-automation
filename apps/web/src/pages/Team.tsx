@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ROLE_LABELS, USER_ROLES, type UserRole } from '@janelle/shared';
+import { ROLE_LABELS, SEATS, SEAT_KEYS, USER_ROLES, type Seat, type UserRole } from '@janelle/shared';
 import { PageHeading, Card, Pill } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import { useAddTeamMember, useSetRole, useTeam } from '../lib/queries';
@@ -147,21 +147,43 @@ export default function Team() {
                 </div>
 
                 {isPrincipal ? (
-                  <select
-                    className="input sm:w-48"
-                    value={m.role}
-                    // Losing the last principal would make roles unchangeable
-                    // by anyone, so that one case is locked in the UI too.
-                    disabled={setRole.isPending || (m.is_you && principals <= 1)}
-                    title={m.is_you && principals <= 1 ? 'You are the only principal' : undefined}
-                    onChange={(e) => setRole.mutate({ id: m.id, role: e.target.value as UserRole })}
-                  >
-                    {USER_ROLES.map((r) => (
-                      <option key={r} value={r}>{ROLE_LABELS[r]}</option>
-                    ))}
-                  </select>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <select
+                      className="input sm:w-44"
+                      value={m.role}
+                      // Losing the last principal would make roles unchangeable
+                      // by anyone, so that one case is locked in the UI too.
+                      disabled={setRole.isPending || (m.is_you && principals <= 1)}
+                      title={m.is_you && principals <= 1 ? 'You are the only principal' : undefined}
+                      onChange={(e) => setRole.mutate({ id: m.id, role: e.target.value as UserRole })}
+                    >
+                      {USER_ROLES.map((r) => (
+                        <option key={r} value={r}>{ROLE_LABELS[r]}</option>
+                      ))}
+                    </select>
+                    {/* The seat is what routes work: two people can share a
+                        role and owe completely different outcomes. Assigning
+                        it takes it off whoever held it — one seat, one holder. */}
+                    <select
+                      className="input sm:w-52"
+                      value={m.seat ?? ''}
+                      disabled={setRole.isPending}
+                      title="The named seat from the roles document — this is what routes work"
+                      onChange={(e) =>
+                        setRole.mutate({ id: m.id, seat: (e.target.value || null) as Seat | null })
+                      }
+                    >
+                      <option value="">No seat</option>
+                      {SEAT_KEYS.map((k) => (
+                        <option key={k} value={k}>{SEATS[k].label}</option>
+                      ))}
+                    </select>
+                  </div>
                 ) : (
-                  <Pill tone="neutral">{ROLE_LABELS[m.role]}</Pill>
+                  <div className="flex items-center gap-2">
+                    <Pill tone="neutral">{ROLE_LABELS[m.role]}</Pill>
+                    {m.seat && <Pill tone="brass">{SEATS[m.seat].label}</Pill>}
+                  </div>
                 )}
               </li>
             ))}

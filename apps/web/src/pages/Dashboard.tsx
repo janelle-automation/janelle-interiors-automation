@@ -10,7 +10,7 @@ import { PageHeading, StatTile, Card, Pill, money, shortDate } from '../componen
 import { IconArrow } from '../components/icons';
 import {
   useDashboard, useFollowUps, usePurchaseOrders, useOps,
-  useLatestDigest, useRunDigest,
+  useLatestDigest, useRunDigest, type IngestProgress,
 } from '../lib/queries';
 import { PROJECT_STAGES, STAGE_LABELS } from '@janelle/shared';
 
@@ -23,6 +23,9 @@ const followTone: Record<string, 'crit' | 'warn' | 'brass'> = {
   client_waiting: 'crit',
   task_overdue: 'warn',
   task_escalation: 'crit',
+  task_unowned: 'warn',
+  task_no_next_step: 'brass',
+  task_no_due_date: 'brass',
 };
 const followLabel: Record<string, string> = {
   vendor_silence: 'Vendor silent',
@@ -33,12 +36,17 @@ const followLabel: Record<string, string> = {
   client_waiting: 'Client waiting',
   task_overdue: 'Reminder sent',
   task_escalation: 'Escalated',
+  task_unowned: 'No owner',
+  task_no_next_step: 'No next step',
+  task_no_due_date: 'No due date',
 };
 
 function OpsBar() {
   const { ingest, followUps, report } = useOps();
   const navigate = useNavigate();
   const [msg, setMsg] = useState<{ text: string; tone: 'good' | 'crit'; to?: string; linkText?: string } | null>(null);
+  // Reading runs in several passes; this is the running total between them.
+  const [progress, setProgress] = useState<IngestProgress | null>(null);
   const busy = ingest.isPending || followUps.isPending || report.isPending;
 
   const ok = (text: string, to?: string, linkText?: string) => setMsg({ text, tone: 'good', to, linkText });
@@ -50,15 +58,37 @@ function OpsBar() {
         <button
           className="btn-primary"
           disabled={busy}
-          onClick={() =>
-            ingest.mutate(undefined, {
-              onSuccess: (d) =>
-                d.reason === 'busy'
-                  ? ok('Auto-sync is already running — new mail appears within seconds.')
-                  : ok(`Read ${d.emails} new email${d.emails === 1 ? '' : 's'}, ${d.documents} document${d.documents === 1 ? '' : 's'}, ${d.replies} reply draft${d.replies === 1 ? '' : 's'}.`),
-              onError: err,
-            })
-          }
+          onClick={() => {
+            setProgress(null);
+            ingest.mutate(setProgress, {
+              onSuccess: (d) => {
+                setProgress(null);
+                if (d.reason === 'busy') {
+                  return ok('Auto-sync is already running — new mail appears within seconds.');
+                }
+                // Not a fault in the system: the stored Google grant no
+                // longer matches the credentials, so only a reconnect fixes it.
+                if (d.reason === 'google_auth_failed') {
+                  return err(new Error('Google refused the connection — reconnect Gmail and Drive in Settings.'));
+                }
+                if (d.reason === 'no_source_user') {
+                  return err(new Error('No Google account is connected yet — connect Gmail and Drive in Settings.'));
+                }
+                if (d.reason === 'anthropic_not_configured') {
+                  return err(new Error('Claude is not set up — add an API key in Settings.'));
+                }
+                const read = `Read ${d.emails} new email${d.emails === 1 ? '' : 's'}, ${d.documents} document${d.documents === 1 ? '' : 's'}, ${d.replies} reply draft${d.replies === 1 ? '' : 's'}.`;
+                // Everything read so far is saved either way — the run just
+                // stopped early, on its time budget or on a dropped request.
+                if (d.interrupted) return ok(`${read} The connection dropped before it finished — press again to carry on.`);
+                return ok(d.done === false ? `${read} More is still waiting — press again to carry on.` : read);
+              },
+              onError: (e) => {
+                setProgress(null);
+                err(e);
+              },
+            });
+          }}
         >
           {ingest.isPending ? 'Reading…' : 'Read Gmail & Drive'}
         </button>
@@ -94,7 +124,9 @@ function OpsBar() {
         <div className={`text-[12.5px] ${busy ? 'text-ink-faint' : msg?.tone === 'crit' ? 'text-crit' : 'text-good'}`}>
           {busy ? (
             ingest.isPending
-              ? 'Reading Gmail & Drive — this can take a minute…'
+              ? progress
+                ? `Reading Gmail & Drive — ${progress.emails} email${progress.emails === 1 ? '' : 's'}, ${progress.documents} document${progress.documents === 1 ? '' : 's'} so far…`
+                : 'Reading Gmail & Drive — this can take a few minutes…'
               : followUps.isPending
                 ? 'Checking for follow-ups…'
                 : 'Writing the report…'
@@ -240,7 +272,7 @@ const CARD_HINTS: Partial<Record<DashboardCardKey, string>> = {
 function RoleCard({ cardKey, value }: { cardKey: DashboardCardKey; value: number }) {
   const tone = value > 0 ? (URGENT[cardKey] ?? 'neutral') : 'neutral';
   return (
-    <Link to={DASHBOARD_CARD_LINKS[cardKey]} className="focusable rounded-xl">
+    <Link to={DASHBOARD_CARD_LINKS[cardKey]} className="focusable block h-full rounded-xl">
       <StatTile
         label={DASHBOARD_CARD_LABELS[cardKey]}
         value={value}

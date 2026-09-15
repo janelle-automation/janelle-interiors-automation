@@ -1,8 +1,9 @@
 import { Router } from 'express';
-import { USER_ROLES, type UserRole } from '@janelle/shared';
+import { SEAT_KEYS, USER_ROLES, type Seat, type UserRole } from '@janelle/shared';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { supabaseAdmin } from '../lib/supabase.js';
+import { hasSeatColumn, profileColumns } from '../lib/columns.js';
 
 export const teamRouter = Router();
 teamRouter.use(requireAuth);
@@ -14,7 +15,7 @@ teamRouter.get(
   asyncHandler(async (req, res) => {
     const { data, error } = await req.auth!.db
       .from('profiles')
-      .select('id, full_name, email, role, created_at')
+      .select(await profileColumns('id, full_name, email, role, created_at'))
       .order('created_at', { ascending: true });
     if (error) throw new Error(error.message);
 
@@ -31,10 +32,13 @@ teamRouter.get(
       if (id) load.set(id, (load.get(id) ?? 0) + 1);
     }
 
+    // The select is built at runtime (seat only exists after 0008), so the
+    // client cannot infer a row type for it.
+    const rows = (data ?? []) as unknown as Record<string, unknown>[];
     res.json({
-      data: (data ?? []).map((p) => {
-        const row = p as { id: string };
-        return { ...p, live_tasks: load.get(row.id) ?? 0, is_you: row.id === req.auth!.userId };
+      data: rows.map((p) => {
+        const id = p.id as string;
+        return { ...p, live_tasks: load.get(id) ?? 0, is_you: id === req.auth!.userId };
       }),
     });
   }),
@@ -45,12 +49,32 @@ teamRouter.patch(
   '/:id',
   requirePermission('team', 'update'),
   asyncHandler(async (req, res) => {
+    // Role and seat are set through the same screen but mean different
+    // things: the role is what the software lets you touch, the seat is the
+    // outcome the roles document holds you to. Either may be sent alone.
+    const hasRole = 'role' in (req.body ?? {});
+    const hasSeat = 'seat' in (req.body ?? {});
     const role = String(req.body?.role ?? '');
-    if (!USER_ROLES.includes(role as UserRole)) {
+    // An empty seat is meaningful — it takes the seat away again.
+    const seat = req.body?.seat === null || req.body?.seat === '' ? null : String(req.body?.seat ?? '');
+
+    if (hasRole && !USER_ROLES.includes(role as UserRole)) {
       return res.status(400).json({ error: 'Invalid role' });
+    }
+    if (hasSeat && seat !== null && !SEAT_KEYS.includes(seat as Seat)) {
+      return res.status(400).json({ error: 'Invalid seat' });
+    }
+    if (!hasRole && !hasSeat) {
+      return res.status(400).json({ error: 'Nothing to change' });
     }
 
     if (!supabaseAdmin) return res.status(503).json({ error: 'Backend not configured' });
+
+    if (hasSeat && !(await hasSeatColumn())) {
+      return res.status(503).json({
+        error: 'Seats are not available yet — apply migration 0008 (npm run db:apply) first',
+      });
+    }
 
     const { data: target } = await supabaseAdmin
       .from('profiles')
@@ -67,7 +91,7 @@ teamRouter.patch(
     // refuse to demote the last one rather than leaving it unrecoverable.
     // This covers demoting ANY principal, not only yourself — the studio is
     // just as stuck either way.
-    if ((target as { role: string }).role === 'principal' && role !== 'principal') {
+    if (hasRole && (target as { role: string }).role === 'principal' && role !== 'principal') {
       const { count } = await supabaseAdmin
         .from('profiles')
         .select('id', { count: 'exact', head: true })
@@ -86,11 +110,27 @@ teamRouter.patch(
     // the role dropdown could never change anybody. Authorisation for this is
     // requirePermission('team','update') above; the write goes through the
     // service client, exactly as inviting and adding a teammate already do.
+    const patch: Record<string, unknown> = {};
+    if (hasRole) patch.role = role;
+    if (hasSeat) patch.seat = seat;
+
+    // One seat, one holder: the roles document allows a person two seats but
+    // never two people in one seat, and the whole point of routing by seat is
+    // that it names exactly one person. Clear it from whoever held it.
+    if (hasSeat && seat) {
+      await supabaseAdmin
+        .from('profiles')
+        .update({ seat: null })
+        .eq('org_id', req.auth!.orgId)
+        .eq('seat', seat)
+        .neq('id', req.params.id);
+    }
+
     const { data, error } = await supabaseAdmin
       .from('profiles')
-      .update({ role })
+      .update(patch)
       .eq('id', req.params.id)
-      .select('id, full_name, role')
+      .select(await profileColumns('id, full_name, role'))
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ error: 'Person not found in this studio' });
@@ -101,7 +141,11 @@ teamRouter.patch(
       action: 'team.role_change',
       entity: 'profiles',
       entity_id: req.params.id,
-      meta: { role, name: (data as { full_name: string | null }).full_name },
+      meta: {
+        ...(hasRole ? { role } : {}),
+        ...(hasSeat ? { seat } : {}),
+        name: (data as unknown as { full_name: string | null }).full_name,
+      },
     });
 
     res.json({ data });

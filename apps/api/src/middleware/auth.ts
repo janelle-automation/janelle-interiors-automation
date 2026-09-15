@@ -1,8 +1,9 @@
 import type { NextFunction, Request, Response } from 'express';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { supabaseAdmin, supabaseForToken } from '../lib/supabase.js';
-import { canWith, type Action, type PermissionOverrides, type Resource, type UserRole } from '@janelle/shared';
+import { canWith, type Action, type PermissionOverrides, type Resource, type Seat, type UserRole } from '@janelle/shared';
 import { loadOverrides } from '../lib/permissions.js';
+import { profileColumns } from '../lib/columns.js';
 
 /** Data attached to an authenticated request. */
 export interface AuthContext {
@@ -10,6 +11,13 @@ export interface AuthContext {
   email: string | null;
   orgId: string | null;
   role: UserRole | null;
+  /**
+   * The named seat this person holds, where one has been assigned.
+   *
+   * Finer than the role, and the roles document routes by it: two people
+   * can both be `assistant` and own completely different outcomes.
+   */
+  seat: Seat | null;
   /** Supabase client scoped to this user (RLS-enforced). */
   db: SupabaseClient;
   /** The studio's edits to the default permission matrix, if any. */
@@ -51,19 +59,23 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
 
   // Profile carries org + role. Read via admin to avoid a policy
   // chicken-and-egg on first login.
+  // `seat` only when migration 0008 has been applied — see lib/seats.ts.
+  // This select runs on every authenticated request, so asking for a column
+  // that is not there yet would take the whole API down.
   const { data: profile } = await supabaseAdmin
     .from('profiles')
-    .select('org_id, role')
+    .select(await profileColumns('org_id, role'))
     .eq('id', data.user.id)
     .maybeSingle();
 
-  const orgId = profile?.org_id ?? null;
+  const orgId = (profile as { org_id?: string | null } | null)?.org_id ?? null;
 
   req.auth = {
     userId: data.user.id,
     email: data.user.email ?? null,
     orgId,
-    role: (profile?.role as UserRole) ?? null,
+    role: ((profile as { role?: UserRole } | null)?.role as UserRole) ?? null,
+    seat: ((profile as { seat?: Seat | null } | null)?.seat as Seat) ?? null,
     // Non-null here: we returned 503 above when Supabase is unconfigured.
     db: supabaseForToken(token) as SupabaseClient,
     permissions: await loadOverrides(orgId),

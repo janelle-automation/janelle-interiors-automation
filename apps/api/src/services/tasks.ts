@@ -1,5 +1,10 @@
-import { SEATS, SEAT_KEYS, TASK_KIND_ROLE, TASK_KINDS, type Seat, type TaskKind, type UserRole } from '@janelle/shared';
+import {
+  DEFAULT_SLA, SEATS, SEAT_KEYS, TASK_HYGIENE_SEAT, TASK_KIND_ROLE, TASK_KINDS,
+  dueDateFor,
+  type Seat, type SlaSettings, type TaskKind, type UserRole,
+} from '@janelle/shared';
 import { supabaseAdmin } from '../lib/supabase.js';
+import { hasSeatColumn } from '../lib/columns.js';
 import { extractTask } from './extract.js';
 import type { ParsedEmail } from './gmail.js';
 
@@ -16,6 +21,36 @@ const IGNORED_CLASSES = ['houzz_notification'];
 
 /** Statuses that still count against someone's workload. */
 const LIVE_STATUSES = ['open', 'in_progress', 'blocked'];
+
+/**
+ * The studio's SLA, briefly cached.
+ *
+ * Every task raised needs it to work out a due date, and a reading pass
+ * raises them in a loop — without this that is one extra query per email.
+ */
+const SLA_TTL_MS = 60_000;
+const slaCache = new Map<string, { at: number; value: SlaSettings }>();
+
+async function readSla(orgId: string): Promise<SlaSettings> {
+  const hit = slaCache.get(orgId);
+  if (hit && Date.now() - hit.at < SLA_TTL_MS) return hit.value;
+  if (!supabaseAdmin) return DEFAULT_SLA;
+
+  try {
+    const { data } = await supabaseAdmin
+      .from('organizations')
+      .select('settings')
+      .eq('id', orgId)
+      .maybeSingle();
+    const settings = ((data as { settings?: Partial<SlaSettings> } | null)?.settings ?? {}) as Partial<SlaSettings>;
+    const value: SlaSettings = { ...DEFAULT_SLA, ...settings };
+    slaCache.set(orgId, { at: Date.now(), value });
+    return value;
+  } catch (err) {
+    console.error('[tasks] SLA unreadable, using defaults:', (err as Error).message);
+    return DEFAULT_SLA;
+  }
+}
 
 /**
  * Resolve a name or address the sender used ("Joanna", "get Yael to...")
@@ -156,6 +191,176 @@ async function resolveAssignee(
 }
 
 /**
+ * Whoever runs the task board, as a last resort before leaving work ownerless.
+ *
+ * A studio only half-onboarded has nobody in most roles, so routing by kind
+ * finds no one and the task lands unassigned — which in practice means
+ * nobody ever sees it. The roles document already names who that is: the PM
+ * support seat owns "chasing overdue and unassigned tasks", so triage is
+ * genuinely that seat's work rather than a dumping ground.
+ *
+ * Deliberately NOT the principal. She is the bottleneck this system exists
+ * to relieve, and quietly defaulting everything to her would rebuild the
+ * problem in software.
+ */
+async function resolveTriage(orgId: string): Promise<string | null> {
+  if (!supabaseAdmin) return null;
+
+  // By seat first, once seats exist.
+  if (await hasSeatColumn()) {
+    const { data } = await supabaseAdmin
+      .from('profiles')
+      .select('id')
+      .eq('org_id', orgId)
+      .eq('seat', TASK_HYGIENE_SEAT)
+      .limit(1)
+      .maybeSingle();
+    const id = (data as { id?: string } | null)?.id;
+    if (id) return id;
+  }
+
+  // Otherwise the person the roles document names for that seat.
+  const named = SEATS[TASK_HYGIENE_SEAT].person;
+  if (named) {
+    for (const name of named.split('/').map((n) => n.trim())) {
+      const id = await resolveNamedPerson(orgId, name);
+      if (id) return id;
+    }
+  }
+  return null;
+}
+
+// ── Deduplication ───────────────────────────────────────────
+
+/**
+ * Compare titles without caring about case, punctuation or spacing.
+ *
+ * Claude writes the title fresh for each email, so the same ask arriving
+ * twice comes back as "Tell Denish which Slack workspace to use (existing
+ * or new)" both times — but a stray comma or a trailing full stop would
+ * defeat a plain string comparison.
+ */
+function titleKey(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+interface DuplicateTaskRow {
+  id: string;
+  title: string;
+  status: string;
+  project_id: string | null;
+  assigned_to: string | null;
+  next_step: string | null;
+  due_date: string | null;
+  detail: string | null;
+  created_at: string;
+}
+
+/** Fields that make one copy of a task more useful than another. */
+const TASK_FIELDS = ['assigned_to', 'next_step', 'due_date', 'detail'] as const;
+
+function filled(t: DuplicateTaskRow): number {
+  return TASK_FIELDS.filter((f) => t[f] !== null && t[f] !== undefined && t[f] !== '').length;
+}
+
+export interface TaskDedupe {
+  ok: boolean;
+  reason?: string;
+  /** Task rows deleted. */
+  removed: number;
+  /** One entry per group folded together. */
+  merged: { kept: string; removed: number }[];
+}
+
+/**
+ * Remove tasks that are the same piece of work raised more than once.
+ *
+ * Creating a task now refuses a live duplicate, but the board already holds
+ * the ones raised before that guard existed. Only LIVE work is considered:
+ * a finished task and a new one with the same title are usually the job
+ * genuinely coming round again, not a mistake.
+ *
+ * The survivor keeps whatever the copies knew that it did not — an owner, a
+ * next step, a due date — so folding them together never loses detail.
+ */
+export async function mergeDuplicateTasks(orgId: string): Promise<TaskDedupe> {
+  if (!supabaseAdmin) return { ok: false, reason: 'supabase_not_configured', removed: 0, merged: [] };
+
+  const { data } = await supabaseAdmin
+    .from('tasks')
+    .select('id, title, status, project_id, assigned_to, next_step, due_date, detail, created_at')
+    .eq('org_id', orgId)
+    .in('status', LIVE_STATUSES)
+    .order('created_at', { ascending: true });
+
+  const tasks = (data ?? []) as DuplicateTaskRow[];
+
+  // Same wording AND same project. Two jobs may each need "Chase the vendor
+  // for a quote", and those are two real tasks.
+  const groups = new Map<string, DuplicateTaskRow[]>();
+  for (const t of tasks) {
+    const key = `${t.project_id ?? 'none'}::${titleKey(t.title)}`;
+    groups.set(key, [...(groups.get(key) ?? []), t]);
+  }
+
+  const result: TaskDedupe = { ok: true, removed: 0, merged: [] };
+
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+
+    // The most complete copy survives; the oldest breaks a tie, being the
+    // one people have already seen on the board.
+    const keep = [...group].sort(
+      (a, b) => filled(b) - filled(a) || a.created_at.localeCompare(b.created_at),
+    )[0];
+    const losers = group.filter((t) => t.id !== keep.id);
+
+    try {
+      const patch: Record<string, unknown> = {};
+      for (const field of TASK_FIELDS) {
+        if (keep[field] === null || keep[field] === undefined || keep[field] === '') {
+          const donor = losers.find((l) => l[field] !== null && l[field] !== undefined && l[field] !== '');
+          if (donor) patch[field] = donor[field];
+        }
+      }
+      if (Object.keys(patch).length) {
+        await supabaseAdmin.from('tasks').update(patch).eq('id', keep.id).eq('org_id', orgId);
+      }
+
+      // follow_ups.task_id cascades, so a reminder raised against a copy
+      // goes with it rather than dangling.
+      const { error } = await supabaseAdmin
+        .from('tasks')
+        .delete()
+        .eq('org_id', orgId)
+        .in('id', losers.map((l) => l.id));
+      if (error) throw new Error(error.message);
+
+      result.removed += losers.length;
+      result.merged.push({ kept: keep.title, removed: losers.length });
+    } catch (err) {
+      // Leave this group alone rather than half-merged; the rest still run.
+      console.error('[tasks] dedupe failed for', keep.title, (err as Error).message);
+    }
+  }
+
+  if (result.removed) {
+    await supabaseAdmin.from('activity_log').insert({
+      org_id: orgId,
+      action: 'tasks.deduped',
+      entity: 'tasks',
+      meta: { removed: result.removed, groups: result.merged },
+    });
+  }
+
+  return result;
+}
+
+/**
  * Raise tasks from email already stored in the system.
  *
  * Ingestion skips messages it has seen before, so mail that arrived before
@@ -256,19 +461,6 @@ export async function createTaskFromEmail(
   const kind: TaskKind = TASK_KINDS.includes(extracted.kind) ? extracted.kind : 'admin';
   const role = TASK_KIND_ROLE[kind];
 
-  // Four ways to decide the owner, most specific first. Each step is a
-  // weaker signal than the one above it:
-  //   1. a person named in the body — the sender already decided
-  //   2. whoever the mail was addressed to — the chain says who was asked
-  //   3. the seat that owns this outcome, per the studio's roles document
-  //   4. the role that owns this kind of work
-  const seat = (extracted.seat && SEAT_KEYS.includes(extracted.seat) ? extracted.seat : null) as Seat | null;
-  const assignedTo =
-    (await resolveNamedPerson(orgId, extracted.assignee_hint ?? null)) ??
-    (await resolveFromChain(orgId, parsed as { from?: string; to?: string })) ??
-    (await resolveBySeat(orgId, seat)) ??
-    (await resolveAssignee(orgId, role));
-
   // promoteEmail may have re-linked this email to a project/vendor, so read
   // the row back rather than trusting the ids the caller started with.
   const { data: email } = await supabaseAdmin
@@ -276,6 +468,45 @@ export async function createTaskFromEmail(
     .select('project_id, vendor_id')
     .eq('id', emailId)
     .maybeSingle();
+
+  // The unique index keys on the SOURCE EMAIL, so a thread where two
+  // messages both ask for the same thing raised the same task twice — the
+  // studio saw "Tell Denish which Slack workspace to use" on the board
+  // twice over. One live task per piece of work: if the same title is
+  // already open on the same project, the follow-up mail is a repeat of the
+  // ask, not new work.
+  //
+  // Scoped to the project, not the whole studio: "Chase the vendor for a
+  // quote" is one task per job, and org-wide matching would silently drop
+  // the second job's.
+  const { data: liveSame } = await supabaseAdmin
+    .from('tasks')
+    .select('id, title, project_id')
+    .eq('org_id', orgId)
+    .in('status', LIVE_STATUSES);
+
+  const wanted = titleKey(title);
+  const projectOf = (email as { project_id: string | null } | null)?.project_id ?? null;
+  const already = (liveSame ?? []).some((row) => {
+    const r = row as { title: string; project_id: string | null };
+    return titleKey(r.title) === wanted && r.project_id === projectOf;
+  });
+  if (already) return false;
+
+  // Four ways to decide the owner, most specific first. Each step is a
+  // weaker signal than the one above it:
+  //   1. a person named in the body — the sender already decided
+  //   2. whoever the mail was addressed to — the chain says who was asked
+  //   3. the seat that owns this outcome, per the studio's roles document
+  //   4. the role that owns this kind of work
+  //   5. whoever runs the board, so nothing is created ownerless
+  const seat = (extracted.seat && SEAT_KEYS.includes(extracted.seat) ? extracted.seat : null) as Seat | null;
+  const assignedTo =
+    (await resolveNamedPerson(orgId, extracted.assignee_hint ?? null)) ??
+    (await resolveFromChain(orgId, parsed as { from?: string; to?: string })) ??
+    (await resolveBySeat(orgId, seat)) ??
+    (await resolveAssignee(orgId, role)) ??
+    (await resolveTriage(orgId));
 
   const { error } = await supabaseAdmin.from('tasks').insert({
     org_id: orgId,
@@ -289,7 +520,10 @@ export async function createTaskFromEmail(
     project_id: (email as { project_id: string | null } | null)?.project_id ?? null,
     vendor_id: (email as { vendor_id: string | null } | null)?.vendor_id ?? null,
     source_email_id: emailId,
-    due_date: extracted.due_date ?? null,
+    // The email's own date when it gave one; otherwise the studio's SLA for
+    // this kind of work. A task with no date cannot be chased for being
+    // late, so "none" is the one answer that helps nobody.
+    due_date: extracted.due_date ?? dueDateFor(kind, await readSla(orgId)),
   });
 
   // A concurrent ingest may have won the race; the unique index makes that safe.
@@ -303,7 +537,14 @@ export async function createTaskFromEmail(
     action: 'task.create',
     entity: 'tasks',
     entity_id: emailId,
-    meta: { title, kind, assigned_role: role, assigned: Boolean(assignedTo) },
+    meta: {
+      title,
+      kind,
+      assigned_role: role,
+      assigned: Boolean(assignedTo),
+      // Worth recording which dates the studio actually committed to.
+      due_from: extracted.due_date ? 'email' : 'sla',
+    },
   });
 
   return true;

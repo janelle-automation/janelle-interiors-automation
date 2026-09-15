@@ -8,6 +8,27 @@ import { oauthClient, servicesGranted, type GoogleService } from './google.js';
  * their stored (encrypted) tokens. Returns null when the user has no
  * connected Google integration. Refreshed tokens are persisted back.
  */
+/**
+ * Whether this error means the stored Google grant is no longer usable.
+ *
+ * Google answers a refresh with `invalid_client` when the credentials in
+ * the environment are not the ones that issued the refresh token — the
+ * usual cause is the OAuth client being rotated or replaced while a token
+ * from the old one is still in the database. `invalid_grant` is the same
+ * problem from the other end: the user revoked access, or the token
+ * expired from disuse.
+ *
+ * Neither is retryable and neither is a bug. They need a person to
+ * reconnect Google, so callers report that rather than failing as though
+ * the server broke.
+ */
+export function isGoogleAuthFailure(err: unknown): boolean {
+  const e = err as { message?: string; response?: { data?: { error?: string } } } | null;
+  const code = e?.response?.data?.error ?? '';
+  const message = e?.message ?? '';
+  return /invalid_client|invalid_grant|unauthorized_client/i.test(`${code} ${message}`);
+}
+
 export async function googleClientForUser(userId: string, service?: GoogleService): Promise<OAuth2Client | null> {
   if (!supabaseAdmin) return null;
 
