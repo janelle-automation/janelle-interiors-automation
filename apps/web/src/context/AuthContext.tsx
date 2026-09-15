@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useState, type React
 import type { Session } from '@supabase/supabase-js';
 import { supabase, supabaseConfigured } from '../lib/supabase';
 import { api } from '../lib/api';
-import type { UserRole } from '@janelle/shared';
+import type { Seat, UserRole } from '@janelle/shared';
 
 interface Profile {
   id: string;
@@ -10,6 +10,8 @@ interface Profile {
   full_name: string | null;
   email: string | null;
   role: UserRole;
+  /** The named seat, where one has been assigned. Finer than the role. */
+  seat: Seat | null;
 }
 
 interface SessionUser {
@@ -17,6 +19,7 @@ interface SessionUser {
   email: string | null;
   name: string;
   role: UserRole;
+  seat: Seat | null;
 }
 
 interface AuthCtx {
@@ -100,6 +103,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           email: session.user.email ?? profile.email,
           name: profile.full_name ?? session.user.email ?? 'Team member',
           role: profile.role,
+          seat: profile.seat ?? null,
         }
       : null;
 

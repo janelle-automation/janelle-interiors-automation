@@ -1,8 +1,9 @@
-import { Fragment, useState } from 'react';
+import { Fragment, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { PageHeading, Card, StageBadge, money, shortDate } from '../components/ui';
-import { useProjects } from '../lib/queries';
-import { PROJECT_STAGES, STAGE_LABELS, type ProjectStage } from '@janelle/shared';
+import { useAuth } from '../context/AuthContext';
+import { useImportHouzz, useProjects } from '../lib/queries';
+import { PROJECT_STAGES, STAGE_LABELS, canSupervise, type ProjectStage } from '@janelle/shared';
 
 function StageTrack({ stage }: { stage: ProjectStage }) {
   const idx = PROJECT_STAGES.indexOf(stage);
@@ -32,9 +33,73 @@ function Chevron({ open }: { open: boolean }) {
   );
 }
 
+/**
+ * Load the project list out of Houzz Pro.
+ *
+ * Houzz has no API a third party can read a studio's own projects through,
+ * so the CSV that pro.houzz.com/manage/projects exports is the route. The
+ * file is read here and posted as text — it never leaves for anywhere but
+ * this studio's own API.
+ */
+function HouzzImport() {
+  const importCsv = useImportHouzz();
+  const [msg, setMsg] = useState<{ text: string; tone: 'good' | 'crit' } | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+
+  const onFile = async (file: File) => {
+    setMsg(null);
+    const csv = await file.text();
+    importCsv.mutate(csv, {
+      onSuccess: (d) => {
+        if (!d.ok) return setMsg({ text: d.reason ?? 'Nothing could be read from that file.', tone: 'crit' });
+        const parts = [`${d.created} added`, `${d.updated} updated`];
+        if (d.skipped) parts.push(`${d.skipped} skipped`);
+        // Name the columns nothing was read from: a Houzz export that has
+        // been renamed shows up here rather than importing silent blanks.
+        const missed = d.unusedColumns.length ? ` Columns not read: ${d.unusedColumns.join(', ')}.` : '';
+        setMsg({ text: `${parts.join(', ')}.${missed}`, tone: 'good' });
+      },
+      onError: (e) => setMsg({ text: (e as Error).message, tone: 'crit' }),
+    });
+    // Let the same file be chosen again after a correction.
+    if (input.current) input.current.value = '';
+  };
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <input
+        ref={input}
+        type="file"
+        accept=".csv,text/csv"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) void onFile(file);
+        }}
+      />
+      <button
+        onClick={() => input.current?.click()}
+        disabled={importCsv.isPending}
+        className="btn-secondary btn-sm"
+        title="Export your project list from pro.houzz.com/manage/projects, then choose the file here"
+      >
+        {importCsv.isPending ? 'Reading file…' : 'Import from Houzz'}
+      </button>
+      {msg && (
+        <span className={`max-w-md text-right text-[12px] ${msg.tone === 'crit' ? 'text-crit' : 'text-ink-faint'}`}>
+          {msg.text}
+        </span>
+      )}
+    </div>
+  );
+}
+
 export default function Projects() {
   const { data: projects, isLoading } = useProjects();
+  const { user } = useAuth();
   const [open, setOpen] = useState<Set<string>>(new Set());
+
+  const supervisor = canSupervise(user?.role ?? null);
 
   const toggle = (id: string) =>
     setOpen((prev) => {
@@ -48,12 +113,14 @@ export default function Projects() {
       <PageHeading
         title="Projects"
         sub="Every project across the studio pipeline. Expand a row to see its progress, or open it for POs, spec gaps and timeline."
+        action={supervisor && <HouzzImport />}
       />
 
       {isLoading && <div className="py-12 text-center text-[13px] font-medium text-ink-faint">Loading projects…</div>}
       {!isLoading && projects.length === 0 && (
         <div className="rounded-xl border border-dashed border-line py-14 text-center text-[14px] text-ink-soft">
-          No projects yet. They appear here as the system reads project email, or after a Houzz CSV import.
+          No projects yet. They appear here as the system reads project email — or export your list from
+          Houzz Pro (Projects → Export) and use “Import from Houzz” above.
         </div>
       )}
       {!isLoading && projects.length > 0 && (

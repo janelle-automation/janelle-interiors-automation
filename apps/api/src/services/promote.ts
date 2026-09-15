@@ -24,20 +24,143 @@ async function advanceStage(projectId: string | null, signal?: string | null): P
 function normalize(s: string): string {
   return s
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, "") // drop accents: Leon
+    .replace(/[̀-ͯ]/g, '') // drop accents: Leon
     .toLowerCase()
+    .replace(/'s\b/g, '') // possessive: "Lemon's" is the Lemon job
     .replace(/[^a-z0-9 ]/g, ' ')
     .replace(/\b(project|the|for|re|fwd|quote|order|proposal|inc|llc|ltd|co|company)\b/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-/** Two names refer to the same entity (exact-normalized or containment). */
-function sameEntity(a: string, b: string): boolean {
+/**
+ * Words that place a job rather than name it, plus the scaffolding around
+ * an address. "Lemon Residence 291 Saddle Lane Ojai, CA 93023" and "Lemon"
+ * are the same job written long and short.
+ */
+const NOISE_WORDS = new Set([
+  'residence', 'residences', 'house', 'home', 'property', 'job', 'site', 'apt', 'apartment',
+  'lane', 'street', 'st', 'road', 'rd', 'ave', 'avenue', 'drive', 'blvd', 'boulevard',
+  'way', 'court', 'ct', 'place', 'pl', 'terrace', 'circle', 'unit', 'ste',
+  'ca', 'usa', 'us',
+  // Paperwork, not a place. "Schumacher Hospitality PO" is the purchase
+  // order for that supplier, which is why it ended up filed as a project
+  // as well as a vendor — the "PO" was the only thing telling them apart.
+  'po', 'pos', 'rfq', 'rfi', 'invoice', 'estimate', 'proposal', 'confirmation',
+]);
+
+/**
+ * The words that actually identify a job.
+ *
+ * Numbers are dropped outright: "Lemon 81326" and "Carissa 90826/Oak Kit"
+ * carry a Houzz job number, and a street number and postcode ride along in
+ * an address — none of them tell one project from another, while all of
+ * them stopped the names matching. Plurals fold in for the same reason,
+ * so "Lemons" and "Lemon" are one job.
+ */
+function keyWords(normalized: string): string[] {
+  return normalized
+    .split(' ')
+    .filter(Boolean)
+    .filter((w) => !/^\d+$/.test(w))
+    .filter((w) => !NOISE_WORDS.has(w))
+    .map((w) => (w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w));
+}
+
+/**
+ * One name's word is the other's, allowing for an abbreviation:
+ * "Oak Kit" is the Oak Kitchen, but "Ojai" is not "Oj".
+ */
+function sameWord(a: string, b: string): boolean {
   if (a === b) return true;
   const [short, long] = a.length <= b.length ? [a, b] : [b, a];
-  return short.length >= 6 && long.includes(short);
+  return short.length >= 3 && long.startsWith(short);
 }
+
+/**
+ * Words that name nothing in particular. `normalize` already drops a few;
+ * these are the ones Claude reaches for when an email has no project name
+ * in it at all, and every one of them used to become a project row.
+ */
+const GENERIC_WORDS = new Set([
+  'client', 'clients', 'customer', 'enquiry', 'inquiry', 'invoice', 'sample', 'samples',
+  'update', 'updates', 'meeting', 'delivery', 'shipping', 'install', 'installation',
+  'general', 'unknown', 'none', 'null', 'na', 'various', 'misc', 'miscellaneous',
+  'tbc', 'tba', 'unspecified', 'new', 'job', 'work', 'design', 'interior', 'interiors',
+  'residence', 'house', 'home', 'apartment', 'hotel', 'office', 'room', 'kitchen',
+  'bathroom', 'bedroom', 'living', 'lobby', 'suite', 'unit', 'site', 'build',
+]);
+
+/** Word tokens of an already-normalized name. */
+function words(s: string): string[] {
+  return s.split(' ').filter(Boolean);
+}
+
+/**
+ * Two names refer to the same entity.
+ *
+ * Substring containment missed the commonest duplicate — a hint that is
+ * part of the real name ("Topa" arriving against "Topa Courtyard") — because
+ * the shorter side had to be six characters, so both were stored. Compare
+ * identifying words instead: every word of the shorter name present in the
+ * longer one is the same job, which folds "Lemon", "Lemons", "Lemon's" and
+ * "Lemon Residence 291 Saddle Lane" together once the plural, the job
+ * number and the address have been set aside. It still keeps "Miller House"
+ * and "Miller Barn" apart, and "OVI Oak Kitchen" apart from "OVI
+ * Oak/Ballrooms" — a kitchen and a ballroom are not the same room, and only
+ * the studio knows whether they are the same job.
+ *
+ * Vendors match the same way, which is why the generic-word test lives in
+ * `namesAProject` and not here — "The Kitchen Co" is a perfectly good
+ * vendor, and it normalizes down to one generic word.
+ */
+function sameEntity(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const ka = keyWords(a);
+  const kb = keyWords(b);
+  if (!ka.length || !kb.length) return false;
+  const [short, long] = ka.length <= kb.length ? [ka, kb] : [kb, ka];
+  // A single word carries the whole claim, so it has to be worth something.
+  if (short.length === 1 && short[0].length < 4) return false;
+  return short.every((w) => long.some((l) => sameWord(w, l)));
+}
+
+/**
+ * The existing project a name refers to, or null.
+ *
+ * Exported so the Houzz import lands on the project an email already
+ * raised — "Lemons" in the system and "Lemon Residence" in the export are
+ * one job, and matching them here is what stops the import from doubling
+ * the list it was meant to straighten out.
+ */
+export function matchProjectId(projects: { id: string; name: string }[], name: string): string | null {
+  const norm = normalize(name);
+  if (!norm) return null;
+  return projects.find((p) => sameEntity(normalize(p.name), norm))?.id ?? null;
+}
+
+/**
+ * Whether a hint is specific enough to be treated as a project at all.
+ *
+ * `project_hint` is Claude's best guess, and its best guess for mail that
+ * concerns no project is the subject's topic — or the vendor, which already
+ * has a row of its own. Both left a project behind per email.
+ */
+export function namesAProject(hint?: string | null, vendorHint?: string | null): boolean {
+  const norm = normalize(hint ?? '');
+  if (norm.length < 4) return false;
+  if (words(norm).every((w) => GENERIC_WORDS.has(w))) return false;
+  if (vendorHint && sameEntity(norm, normalize(vendorHint))) return false;
+  return true;
+}
+
+/**
+ * Below this, Claude is guessing at the project rather than reading it.
+ * Such an email may still be filed against a project that exists, but it
+ * may not open a new one.
+ */
+const MIN_PROJECT_CONFIDENCE = 0.55;
 
 async function upsertVendor(orgId: string, name?: string | null, email?: string | null): Promise<string | null> {
   if (!supabaseAdmin || !name || name.trim().length < 2) return null;
@@ -73,11 +196,14 @@ async function upsertVendor(orgId: string, name?: string | null, email?: string 
  * Find-or-create a project by fuzzy name match (so "OVI Topa Courtyard"
  * and "Topa Courtyard" resolve to one), and fill in client / target
  * install where they are still blank.
+ *
+ * With `create: false` this only ever finds: the caller had a name but not
+ * enough confidence in it to open a project the studio never asked for.
  */
 async function upsertProject(
   orgId: string,
   name?: string | null,
-  opts: { client?: string | null; target?: string | null } = {},
+  opts: { client?: string | null; target?: string | null; create?: boolean } = {},
 ): Promise<string | null> {
   if (!supabaseAdmin || !name || name.trim().length < 3) return null;
   const clean = name.trim();
@@ -102,6 +228,8 @@ async function upsertProject(
     if (Object.keys(patch).length) await supabaseAdmin.from('projects').update(patch).eq('id', hit.id);
     return hit.id;
   }
+
+  if (opts.create === false) return null;
 
   const { data } = await supabaseAdmin
     .from('projects')
@@ -145,7 +273,10 @@ export async function promoteDocument(
   if (!isOrderish || (!p.po_number && !(total > 0))) return false;
 
   const vendorId = await upsertVendor(orgId, p.vendor);
-  const projectId = doc.project_id ?? (await upsertProject(orgId, p.project_hint, { client: p.client, target: p.eta }));
+  // A quote or PO is a strong enough signal to open a project, but only if
+  // it actually names one — not when the hint is the vendor or "Samples".
+  const hint = namesAProject(p.project_hint, p.vendor) ? p.project_hint : null;
+  const projectId = doc.project_id ?? (await upsertProject(orgId, hint, { client: p.client, target: p.eta }));
 
   // Dedupe by PO number when present, else by vendor + project + amount
   // (so the same quote arriving on several attachments makes one PO).
@@ -229,6 +360,7 @@ export async function promoteEmail(
       client_name?: string | null;
       target_date?: string | null;
       stage_signal?: string | null;
+      confidence?: number | null;
     } | null;
   },
 ): Promise<void> {
@@ -238,14 +370,457 @@ export async function promoteEmail(
   if (email.class === 'general' || email.class === 'houzz_notification' || email.class === 'unclassified') return;
 
   const vendorId = email.vendor_id ?? (await upsertVendor(orgId, ex.vendor_hint, ex.reply_to_email));
+
+  // Mail that names no project gets no project. Mail that names one but is
+  // only guessing may be filed against a project that exists, but may not
+  // open a new one — that is where the duplicates came from, one row per
+  // email for correspondence that was never about a job in the first place.
+  const hint = namesAProject(ex.project_hint, ex.vendor_hint) ? ex.project_hint : null;
   const projectId =
-    email.project_id ?? (await upsertProject(orgId, ex.project_hint, { client: ex.client_name, target: ex.target_date }));
+    email.project_id ??
+    (await upsertProject(orgId, hint, {
+      client: ex.client_name,
+      target: ex.target_date,
+      create: (ex.confidence ?? 1) >= MIN_PROJECT_CONFIDENCE,
+    }));
   if (vendorId !== email.vendor_id || projectId !== email.project_id) {
     await supabaseAdmin.from('emails').update({ vendor_id: vendorId, project_id: projectId }).eq('id', email.id);
   }
 
   // Advance the project's stage based on what this email signals.
   await advanceStage(projectId, ex.stage_signal);
+}
+
+// ── Deduplication ───────────────────────────────────────────
+
+/** Every table that points at a project and must follow it to the survivor. */
+const PROJECT_REFS = [
+  'emails',
+  'documents',
+  'purchase_orders',
+  'tasks',
+  'follow_ups',
+  'spec_gaps',
+  'prompt_runs',
+] as const;
+
+interface ProjectRow {
+  id: string;
+  name: string;
+  client_name: string | null;
+  target_install: string | null;
+  stage: ProjectStage;
+  status: string;
+  budget: number | null;
+  start_date: string | null;
+  notes: string | null;
+  houzz_ref: string | null;
+  assigned_to: string | null;
+  created_at: string | null;
+}
+
+/** Fields worth keeping, in the order a survivor is judged on. */
+const FILLED_FIELDS = ['client_name', 'target_install', 'budget', 'start_date', 'notes', 'assigned_to'] as const;
+
+function filledCount(p: ProjectRow): number {
+  return FILLED_FIELDS.filter((f) => p[f] !== null && p[f] !== undefined && p[f] !== '').length;
+}
+
+/**
+ * Which row of a duplicate group to suggest keeping.
+ *
+ * A row imported from Houzz Pro is the studio's own record and always wins.
+ * Otherwise the most complete row does, and the oldest breaks a tie — it is
+ * the one people have been looking at and linking to. Only a suggestion:
+ * the caller names the survivor it actually wants.
+ */
+function pickSurvivor(group: ProjectRow[]): ProjectRow {
+  return [...group].sort((a, b) => {
+    if (Boolean(a.houzz_ref) !== Boolean(b.houzz_ref)) return a.houzz_ref ? -1 : 1;
+    const filled = filledCount(b) - filledCount(a);
+    if (filled !== 0) return filled;
+    return (a.created_at ?? '').localeCompare(b.created_at ?? '');
+  })[0];
+}
+
+export interface DuplicateCandidate {
+  id: string;
+  name: string;
+  client_name: string | null;
+  stage: ProjectStage;
+  created_at: string | null;
+  /** Mail, documents, POs and tasks filed against this row. */
+  links: number;
+}
+
+export interface DuplicateGroup {
+  /** The row suggested as the survivor; the caller may choose another. */
+  suggestedKeepId: string;
+  projects: DuplicateCandidate[];
+  /**
+   * How sure the names are. "likely" means every identifying word lines up
+   * and the rows are offered ticked; "possible" means they only share one,
+   * so they are offered for a look with nothing ticked.
+   */
+  confidence: 'likely' | 'possible';
+}
+
+async function projectRows(orgId: string): Promise<ProjectRow[]> {
+  if (!supabaseAdmin) return [];
+  const { data } = await supabaseAdmin
+    .from('projects')
+    .select('id, name, client_name, target_install, stage, status, budget, start_date, notes, houzz_ref, assigned_to, created_at')
+    .eq('org_id', orgId)
+    .order('created_at', { ascending: true });
+  return (data ?? []) as ProjectRow[];
+}
+
+/** How much is filed against each project, so a person can judge a merge. */
+async function linkCounts(orgId: string): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  if (!supabaseAdmin) return counts;
+  for (const table of ['emails', 'documents', 'purchase_orders', 'tasks'] as const) {
+    const { data } = await supabaseAdmin.from(table).select('project_id').eq('org_id', orgId);
+    for (const row of data ?? []) {
+      const id = (row as { project_id: string | null }).project_id;
+      if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+/**
+ * Projects that look like the same job written more than once.
+ *
+ * Only suggested, never merged here — merging deletes rows, and the names
+ * alone cannot settle every case. "Lemons" and "Lemon 81326" are plainly
+ * one job; "OVI Oak Kitchen" and "OVI Oak/Ballrooms" might be one job or
+ * two rooms of it, and only the studio knows which.
+ */
+export async function findDuplicateProjects(orgId: string): Promise<{ groups: DuplicateGroup[] }> {
+  const projects = await projectRows(orgId);
+  const counts = await linkCounts(orgId);
+
+  const candidate = (p: ProjectRow): DuplicateCandidate => ({
+    id: p.id,
+    name: p.name,
+    client_name: p.client_name,
+    stage: p.stage,
+    created_at: p.created_at,
+    links: counts.get(p.id) ?? 0,
+  });
+
+  // Two rows that both came from a Houzz Pro import are two projects the
+  // studio itself keeps apart, whatever their names look like here.
+  const oneImportOnly = (g: ProjectRow[]) =>
+    new Set(g.map((p) => p.houzz_ref).filter(Boolean)).size <= 1;
+
+  const toGroup = (g: ProjectRow[], confidence: 'likely' | 'possible'): DuplicateGroup => ({
+    suggestedKeepId: pickSurvivor(g).id,
+    projects: g.map(candidate),
+    confidence,
+  });
+
+  // ── Likely: every identifying word lines up ───────────────
+  // A project joins a group only when it matches EVERY name already in it.
+  // Matching any one of them would let a short name bridge two jobs that
+  // have nothing to do with each other — "Smith" pulls in both "Smith
+  // Residence" and "Smith Barn", and a merge is a delete.
+  const clusters: ProjectRow[][] = [];
+  for (const p of projects) {
+    const norm = normalize(p.name);
+    const cluster = clusters.find((g) => g.every((m) => sameEntity(normalize(m.name), norm)));
+    if (cluster) cluster.push(p);
+    else clusters.push([p]);
+  }
+
+  const likely = clusters.filter((g) => g.length > 1).filter(oneImportOnly);
+  const spokenFor = new Set(likely.flat().map((p) => p.id));
+
+  // ── Possible: one identifying word in common ──────────────
+  // "OVI Oak Kitchen", "OVI Oak/Ballrooms" and "Carissa 90826/Oak Kit" are
+  // one job, but nothing in the names says so — a kitchen and a ballroom
+  // read as two rooms. Grouping on a single shared word finds them without
+  // pretending to be sure, so they are offered for a look, never ticked.
+  const byWord = new Map<string, ProjectRow[]>();
+  for (const p of projects) {
+    if (spokenFor.has(p.id)) continue;
+    for (const w of new Set(keyWords(normalize(p.name)))) {
+      if (w.length < 3 || GENERIC_WORDS.has(w)) continue;
+      byWord.set(w, [...(byWord.get(w) ?? []), p]);
+    }
+  }
+
+  const possible: ProjectRow[][] = [];
+  const seen = new Set<string>();
+  const byWordGroups = [...byWord.entries()]
+    // Biggest group first, so the word that gathers the whole family wins:
+    // "oak" holds all three OVI rows where "ovi" holds only two, and
+    // whichever claims them first is the one that is offered. A longer
+    // shared word breaks a tie, being the more distinctive of the two.
+    .sort((a, b) => b[1].length - a[1].length || b[0].length - a[0].length);
+
+  for (const [, group] of byWordGroups) {
+    // A word shared by half the studio is a house style, not a job name.
+    if (group.length < 2 || group.length > 4) continue;
+    if (group.some((p) => seen.has(p.id))) continue;
+    if (!oneImportOnly(group)) continue;
+    possible.push(group);
+    for (const p of group) seen.add(p.id);
+  }
+
+  return {
+    groups: [
+      ...likely.map((g) => toGroup(g, 'likely')),
+      ...possible.map((g) => toGroup(g, 'possible')),
+    ],
+  };
+}
+
+export interface MergeResult {
+  ok: boolean;
+  reason?: string;
+  /** The surviving project's name. */
+  kept?: string;
+  /** How many rows were folded into it. */
+  removed: number;
+  /** How many linked records moved across. */
+  moved: number;
+}
+
+/**
+ * Fold the named projects into one, then delete them.
+ *
+ * Every reference is repointed at the survivor first, so nothing is lost —
+ * `spec_gaps` and `follow_ups` cascade on delete and would otherwise go
+ * with the row. The survivor takes any field it was missing and the
+ * furthest stage the group reached, since the duplicate may be the row that
+ * got advanced. Ids are checked against the org, so a caller cannot merge
+ * another studio's projects.
+ */
+export async function mergeProjects(
+  orgId: string,
+  keepId: string,
+  mergeIds: string[],
+): Promise<MergeResult> {
+  if (!supabaseAdmin) return { ok: false, reason: 'supabase_not_configured', removed: 0, moved: 0 };
+
+  const losers = [...new Set(mergeIds)].filter((id) => id !== keepId);
+  if (!losers.length) return { ok: false, reason: 'nothing_to_merge', removed: 0, moved: 0 };
+
+  const projects = await projectRows(orgId);
+  const keep = projects.find((p) => p.id === keepId);
+  if (!keep) return { ok: false, reason: 'unknown_project', removed: 0, moved: 0 };
+
+  const group = projects.filter((p) => losers.includes(p.id));
+  if (group.length !== losers.length) return { ok: false, reason: 'unknown_project', removed: 0, moved: 0 };
+
+  let moved = 0;
+  for (const loser of group) {
+    for (const table of PROJECT_REFS) {
+      const { data, error } = await supabaseAdmin
+        .from(table)
+        .update({ project_id: keep.id })
+        .eq('org_id', orgId)
+        .eq('project_id', loser.id)
+        .select('id');
+      if (error) return { ok: false, reason: `${table}: ${error.message}`, removed: 0, moved };
+      moved += (data ?? []).length;
+    }
+  }
+
+  const patch: Record<string, unknown> = {};
+  for (const field of FILLED_FIELDS) {
+    if (keep[field] === null || keep[field] === undefined || keep[field] === '') {
+      const donor = group.find((l) => l[field] !== null && l[field] !== undefined && l[field] !== '');
+      if (donor) patch[field] = donor[field];
+    }
+  }
+  const furthest = [keep, ...group].reduce((a, b) =>
+    PROJECT_STAGES.indexOf(b.stage) > PROJECT_STAGES.indexOf(a.stage) ? b : a,
+  );
+  if (furthest.stage !== keep.stage) patch.stage = furthest.stage;
+  if (Object.keys(patch).length) {
+    await supabaseAdmin.from('projects').update(patch).eq('id', keep.id);
+  }
+
+  const { error: delError } = await supabaseAdmin
+    .from('projects')
+    .delete()
+    .eq('org_id', orgId)
+    .in(
+      'id',
+      group.map((l) => l.id),
+    );
+  if (delError) return { ok: false, reason: delError.message, removed: 0, moved };
+
+  await supabaseAdmin.from('activity_log').insert({
+    org_id: orgId,
+    action: 'projects.merged',
+    entity: 'project',
+    entity_id: keep.id,
+    meta: { kept: keep.name, removed: group.map((l) => l.name), moved },
+  });
+
+  return { ok: true, kept: keep.name, removed: group.length, moved };
+}
+
+export interface AutoMergeResult {
+  ok: boolean;
+  reason?: string;
+  /** One entry per group folded together. */
+  merged: { kept: string; removed: string[] }[];
+  /** Project rows deleted. */
+  removed: number;
+  /** Linked records moved to a survivor. */
+  moved: number;
+}
+
+/**
+ * Fold every duplicate group into one project, without asking.
+ *
+ * Runs itself at the end of a reading pass, so the studio never has to
+ * tidy up after the mail. Both tiers are merged: names that line up word
+ * for word, and names that share one identifying word — the studio
+ * confirmed that "OVI Oak Kitchen", "OVI Oak/Ballrooms" and "Carissa
+ * 90826/Oak Kit" are one job, and nothing in the names themselves says so.
+ *
+ * This deletes rows, so the guards that remain are the ones that hold
+ * whatever the names look like: two Houzz Pro imports are never fused (the
+ * studio keeps those apart itself), a shared word has to appear in a handful
+ * of projects rather than across the board, and every merge is written to
+ * the audit log with the names it removed.
+ *
+ * Idempotent: a second run finds nothing left to merge.
+ */
+export async function autoMergeDuplicates(orgId: string): Promise<AutoMergeResult> {
+  if (!supabaseAdmin) return { ok: false, reason: 'supabase_not_configured', merged: [], removed: 0, moved: 0 };
+
+  const { groups } = await findDuplicateProjects(orgId);
+  const result: AutoMergeResult = { ok: true, merged: [], removed: 0, moved: 0 };
+
+  for (const group of groups) {
+    const keepId = group.suggestedKeepId;
+    const mergeIds = group.projects.map((p) => p.id).filter((id) => id !== keepId);
+    if (!mergeIds.length) continue;
+
+    // One failure must not strand the rest half-merged.
+    try {
+      const merged = await mergeProjects(orgId, keepId, mergeIds);
+      if (!merged.ok) {
+        console.error('[promote] auto-merge skipped a group:', merged.reason);
+        continue;
+      }
+      result.merged.push({
+        kept: merged.kept ?? '',
+        removed: group.projects.filter((p) => p.id !== keepId).map((p) => p.name),
+      });
+      result.removed += merged.removed;
+      result.moved += merged.moved;
+    } catch (err) {
+      console.error('[promote] auto-merge failed for a group:', (err as Error).message);
+    }
+  }
+
+  return result;
+}
+
+export interface VendorProjectCleanup {
+  ok: boolean;
+  reason?: string;
+  /** Project rows removed because they only ever named a vendor. */
+  removed: number;
+  names: string[];
+}
+
+/**
+ * Delete projects that are really just a vendor under another name.
+ *
+ * Before `namesAProject` existed, a quote whose project could not be
+ * identified fell back to the vendor, so "Schumacher Hospitality" ended up
+ * as a project AND a vendor — the same company filed twice in two different
+ * parts of the studio. New mail no longer does this; these are the rows
+ * left behind.
+ *
+ * Deliberately timid, because it deletes: a project goes only when it
+ * matches a vendor by name AND carries nothing that could not be recreated
+ * — no purchase orders, no tasks, no spec gaps, and no Houzz id, which
+ * would mean the studio keeps it as a real job. A vendor that genuinely is
+ * also a project ("Schumacher" the client as well as the supplier) will
+ * have work hanging off it and is left alone.
+ *
+ * Emails filed against it are moved to the vendor rather than orphaned, so
+ * the correspondence stays findable.
+ */
+export async function removeVendorProjects(orgId: string): Promise<VendorProjectCleanup> {
+  if (!supabaseAdmin) return { ok: false, reason: 'supabase_not_configured', removed: 0, names: [] };
+
+  const [{ data: vendorRows }, projects] = await Promise.all([
+    supabaseAdmin.from('vendors').select('id, name').eq('org_id', orgId),
+    projectRows(orgId),
+  ]);
+  const vendors = (vendorRows ?? []) as { id: string; name: string }[];
+  if (!vendors.length || !projects.length) return { ok: true, removed: 0, names: [] };
+
+  const result: VendorProjectCleanup = { ok: true, removed: 0, names: [] };
+
+  for (const project of projects) {
+    // The studio's own record always wins over a name coincidence.
+    if (project.houzz_ref) continue;
+
+    const norm = normalize(project.name);
+    const vendor = vendors.find((v) => sameEntity(normalize(v.name), norm));
+    if (!vendor) continue;
+
+    // Anything real hanging off it means this is a job, not a stray name.
+    const [{ count: pos }, { count: tasks }, { count: gaps }] = await Promise.all([
+      supabaseAdmin.from('purchase_orders').select('id', { count: 'exact', head: true }).eq('project_id', project.id),
+      supabaseAdmin.from('tasks').select('id', { count: 'exact', head: true }).eq('project_id', project.id),
+      supabaseAdmin.from('spec_gaps').select('id', { count: 'exact', head: true }).eq('project_id', project.id),
+    ]);
+    if ((pos ?? 0) > 0 || (tasks ?? 0) > 0 || (gaps ?? 0) > 0) continue;
+
+    try {
+      // The mail was about this vendor all along — keep it, on the vendor.
+      await supabaseAdmin
+        .from('emails')
+        .update({ project_id: null, vendor_id: vendor.id })
+        .eq('org_id', orgId)
+        .eq('project_id', project.id);
+
+      // Documents and prompt runs simply lose a link that was never right.
+      for (const table of ['documents', 'prompt_runs'] as const) {
+        await supabaseAdmin
+          .from(table)
+          .update({ project_id: null })
+          .eq('org_id', orgId)
+          .eq('project_id', project.id);
+      }
+
+      const { error } = await supabaseAdmin
+        .from('projects')
+        .delete()
+        .eq('org_id', orgId)
+        .eq('id', project.id);
+      if (error) throw new Error(error.message);
+
+      result.removed++;
+      result.names.push(project.name);
+    } catch (err) {
+      console.error('[promote] could not remove vendor-project', project.name, (err as Error).message);
+    }
+  }
+
+  if (result.removed) {
+    await supabaseAdmin.from('activity_log').insert({
+      org_id: orgId,
+      action: 'projects.vendor_rows_removed',
+      entity: 'project',
+      meta: { removed: result.removed, names: result.names },
+    });
+  }
+
+  return result;
 }
 
 /** Backfill: promote every existing document and email for an org. */

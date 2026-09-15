@@ -11,6 +11,9 @@ const tone: Record<string, 'crit' | 'warn' | 'brass'> = {
   client_waiting: 'crit',
   task_overdue: 'warn',
   task_escalation: 'crit',
+  task_unowned: 'warn',
+  task_no_next_step: 'brass',
+  task_no_due_date: 'brass',
 };
 const label: Record<string, string> = {
   vendor_silence: 'Vendor silent',
@@ -21,6 +24,9 @@ const label: Record<string, string> = {
   client_waiting: 'Client waiting',
   task_overdue: 'Reminder sent',
   task_escalation: 'Escalated',
+  task_unowned: 'No owner',
+  task_no_next_step: 'No next step',
+  task_no_due_date: 'No due date',
 };
 
 export default function FollowUps() {

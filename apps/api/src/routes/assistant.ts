@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { TASK_KINDS, TASK_KIND_ROLE, canSupervise, type TaskKind } from '@janelle/shared';
+import { TASK_KINDS, TASK_KIND_ROLE, canManageTasks, type TaskKind } from '@janelle/shared';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { ask, type AssistantTurn } from '../services/assistant.js';
@@ -51,8 +51,8 @@ assistantRouter.post(
     // task routes enforce.
     let assignedTo: string | null = null;
     if (input.assignee_name) {
-      if (!canSupervise(req.auth!.role)) {
-        return res.status(403).json({ error: 'Only a principal or coordinator can assign work to others' });
+      if (!canManageTasks(req.auth!.role, req.auth!.seat)) {
+        return res.status(403).json({ error: 'Only someone who runs the task board can assign work to others' });
       }
       const { data: people } = await req.auth!.db
         .from('profiles')

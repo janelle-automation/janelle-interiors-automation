@@ -14,8 +14,26 @@ const BASE = (
 ).replace(/\/+$/, '');
 
 /**
+ * The request never reached the API, or its answer never came back.
+ *
+ * `fetch` throws a bare `TypeError: Failed to fetch` for every one of these
+ * — offline, connection reset, a long request dropped in transit — which
+ * reads on screen as though the server rejected the work. It did not: the
+ * server may well have finished it. Callers that can safely ask again test
+ * for this and retry rather than reporting failure.
+ */
+export class NetworkError extends Error {
+  constructor(cause?: unknown) {
+    super('Could not reach the server — check your connection and try again.');
+    this.name = 'NetworkError';
+    this.cause = cause;
+  }
+}
+
+/**
  * Thin fetch wrapper that attaches the current Supabase access token
- * so the API can enforce row-level security. Throws on non-2xx.
+ * so the API can enforce row-level security. Throws on non-2xx, and
+ * throws NetworkError when there was no response at all.
  */
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
@@ -27,7 +45,13 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     if (token) headers.set('Authorization', `Bearer ${token}`);
   }
 
-  const res = await fetch(`${BASE}/api${path}`, { ...init, headers });
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}/api${path}`, { ...init, headers });
+  } catch (err) {
+    throw new NetworkError(err);
+  }
+
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error((body as { error?: string }).error ?? `Request failed (${res.status})`);

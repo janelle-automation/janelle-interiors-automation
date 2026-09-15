@@ -11,6 +11,8 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { AI_FEATURE_LABELS, ASSISTANT_NAME, DEFAULT_SLA } from '@janelle/shared';
 import { createMessage, isAiReady } from './anthropic.js';
+import { hasColumn } from '../lib/columns.js';
+import { bodyColumnsReady, readStoredText } from '../lib/emailStore.js';
 import { env } from '../env.js';
 
 export interface AssistantTurn {
@@ -41,6 +43,14 @@ export interface AssistantContext {
 }
 
 const LIVE = ['open', 'in_progress', 'blocked'];
+
+/**
+ * How long one question may take before the assistant must answer with
+ * what it has. Must stay under the serverless function's maxDuration (60s
+ * in vercel.json): past that the platform kills the request and the person
+ * gets nothing back at all.
+ */
+const ASSISTANT_BUDGET_MS = Number(process.env.ASSISTANT_BUDGET_MS || 40_000);
 
 // ── Tool surface ────────────────────────────────────────────
 // Read tools answer questions from real rows so the assistant cannot
@@ -118,6 +128,18 @@ const TOOLS: Anthropic.Tool[] = [
           description: 'Limit to one kind of email.',
         },
         days: { type: 'number', description: 'Only messages received in the last N days.' },
+      },
+    },
+  },
+  {
+    name: 'read_email',
+    description:
+      "Read one stored email IN FULL — the text of what was actually written, every link in it, and every attachment parsed from it (quotes, order confirmations, with vendor and total). Use this whenever the answer depends on the wording or on a detail the summary would not carry: a link ('the Canva link', 'the Drive folder'), a measurement, a price, an address, a name, a date, or 'what exactly did X say'. Pass the id from search_email, or a search phrase to find the most recent match. Costs more than search_email, so reach for it when the summary is not enough — but DO reach for it rather than saying something was not captured.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The email id from search_email.' },
+        search: { type: 'string', description: 'Instead of an id: match subject, sender or body; the newest match is read.' },
       },
     },
   },
@@ -263,6 +285,41 @@ const TOOLS: Anthropic.Tool[] = [
 type ToolOutput = Record<string, unknown> | Record<string, unknown>[];
 
 const ilike = (s: string) => `%${s.replace(/[%_]/g, '')}%`;
+
+/**
+ * The words of a search phrase, for matching them one at a time.
+ *
+ * A phrase matched whole found nothing the moment anyone typed a full name:
+ * "Brianna Johnson" appears in no column of her own email, because the
+ * sender is stored as `brianna@janelleinteriors.com` and the subject is
+ * about the project. Requiring every word to appear SOMEWHERE — the address
+ * carrying the first name, the body the surname — finds it, while still
+ * excluding rows that merely share one common word.
+ *
+ * Capped at four words so one rambling question cannot build a query of
+ * unbounded size.
+ */
+function searchWords(phrase: string): string[] {
+  return phrase
+    .split(/\s+/)
+    .map((w) => w.replace(/[%_]/g, '').trim())
+    .filter((w) => w.length >= 2)
+    .slice(0, 4);
+}
+
+/**
+ * Apply a phrase across several columns, one word at a time.
+ *
+ * Each `.or()` is ANDed with the last by PostgREST, so this reads as
+ * "every word appears in at least one of these columns".
+ */
+function matchPhrase<T>(query: T, phrase: string, columns: string[]): T {
+  let q = query as unknown as { or(filter: string): unknown };
+  for (const word of searchWords(phrase)) {
+    q = q.or(columns.map((c) => `${c}.ilike.${ilike(word)}`).join(',')) as typeof q;
+  }
+  return q as unknown as T;
+}
 
 /**
  * Unwrap a Supabase result, turning a database error into something the
@@ -472,9 +529,15 @@ async function runTool(
     }
 
     case 'search_email': {
+      // Columns once 0010 is applied; until then the same data sits inside
+      // extracted_json, which readStoredText knows how to unpack.
+      const hasLinks = await bodyColumnsReady();
       let q = db
         .from('emails')
-        .select('subject, from_addr, to_addr, snippet, received_at, class, extracted_json, projects(name), vendors(name)')
+        .select(
+          `id, subject, from_addr, to_addr, snippet, received_at, class, extracted_json,
+           ${hasLinks ? 'links,' : ''} projects(name), vendors(name)`,
+        )
         .order('received_at', { ascending: false, nullsFirst: false })
         .limit(40);
       if (input.klass) q = q.eq('class', String(input.klass));
@@ -483,14 +546,18 @@ async function runTool(
         q = q.gte('received_at', since);
       }
       if (input.search) {
-        const n = ilike(String(input.search));
-        q = q.or(`subject.ilike.${n},from_addr.ilike.${n},snippet.ilike.${n}`);
+        const cols = ['subject', 'from_addr', 'to_addr', 'snippet'];
+        // The body is searchable too, wherever 0010 has it living.
+        cols.push(hasLinks ? 'body_text' : 'extracted_json->>_body');
+        q = matchPhrase(q, String(input.search), cols);
       }
 
       let list = (await rows(q, 'email')) as unknown as {
+        id: string;
         subject: string | null; from_addr: string | null; snippet: string | null;
         received_at: string | null; class: string;
-        extracted_json: { summary?: string } | null;
+        extracted_json: (Record<string, unknown> & { summary?: string }) | null;
+        links?: { url: string; host: string }[] | null;
         projects: { name: string } | null; vendors: { name: string } | null;
       }[];
       if (input.project) {
@@ -505,8 +572,15 @@ async function runTool(
         total: list.length,
         by_type,
         messages: list.slice(0, 15).map((e) => ({
+          // So a follow-up question can ask for this exact message's body
+          // instead of searching again.
+          id: e.id,
           subject: e.subject,
           from: e.from_addr,
+          // Links are short and are what people ask for by name. Carried
+          // here so "send me the Canva link" is answered in one hop rather
+          // than costing a second call to read the whole message.
+          links: readStoredText(e).links.map((l) => l.url),
           received_at: e.received_at,
           type: e.class,
           project: e.projects?.name ?? null,
@@ -514,6 +588,103 @@ async function runTool(
           // The one-line summary Claude wrote at ingest time, if present.
           summary: e.extracted_json?.summary ?? e.snippet,
         })),
+      };
+    }
+
+    case 'read_email': {
+      const hasBody = await bodyColumnsReady();
+      const fields = `id, subject, from_addr, to_addr, received_at, class, snippet, extracted_json,
+                      ${hasBody ? 'body_text, links,' : ''} projects(name), vendors(name)`;
+
+      let q = db.from('emails').select(fields).order('received_at', { ascending: false, nullsFirst: false }).limit(1);
+      if (input.id) {
+        q = db.from('emails').select(fields).eq('id', String(input.id)).limit(1);
+      } else if (input.search) {
+        const bodyCol = hasBody ? 'body_text' : 'extracted_json->>_body';
+        // "What did Brianna say" means mail she SENT. Searching every column
+        // at once answered it with a thread she was merely copied on, which
+        // is a different message by a different person. Try the sender
+        // first, and only widen when nobody by that name sent anything.
+        const bySender = matchPhrase(
+          db.from('emails').select(fields).order('received_at', { ascending: false, nullsFirst: false }).limit(1),
+          String(input.search),
+          ['from_addr'],
+        );
+        const { data: sent } = await bySender;
+        if (sent?.length) {
+          // Re-issue it: the builder above has already been awaited.
+          q = matchPhrase(
+            db.from('emails').select(fields).order('received_at', { ascending: false, nullsFirst: false }).limit(1),
+            String(input.search),
+            ['from_addr'],
+          );
+        } else {
+          q = matchPhrase(q, String(input.search), ['subject', 'from_addr', 'to_addr', 'snippet', bodyCol]);
+        }
+      }
+
+      const found = (await rows(q, 'email')) as unknown as {
+        id: string; subject: string | null; from_addr: string | null; to_addr: string | null;
+        received_at: string | null; class: string; snippet: string | null;
+        body_text?: string | null; links?: { url: string; host: string }[] | null;
+        extracted_json: (Record<string, unknown> & { summary?: string }) | null;
+        projects: { name: string } | null; vendors: { name: string } | null;
+      }[];
+
+      const e = found[0];
+      if (!e) return { found: false, note: 'No stored email matches that.' };
+
+      // What arrived attached to it. Documents parsed from an attachment are
+      // stored as "gmail:<messageId>:<attachmentId>", so the message's own
+      // Gmail id is the join — the link was always there, nothing exposed it.
+      const { data: gmailIdRow } = await db.from('emails').select('gmail_id').eq('id', e.id).maybeSingle();
+      const gmailId = (gmailIdRow as { gmail_id?: string | null } | null)?.gmail_id ?? null;
+      const attachments: Record<string, unknown>[] = [];
+      if (gmailId) {
+        const { data: attached } = await db
+          .from('documents')
+          .select('id, type, parsed_json, drive_file_id')
+          .like('drive_file_id', `gmail:${gmailId}:%`);
+        for (const row of attached ?? []) {
+          const d = row as { type: string; parsed_json: Record<string, unknown> | null };
+          const pj = (d.parsed_json ?? {}) as {
+            vendor?: string; po_number?: string; total?: number; line_items?: unknown[];
+          };
+          attachments.push({
+            type: d.type,
+            vendor: pj.vendor ?? null,
+            po_number: pj.po_number ?? null,
+            total: pj.total ?? null,
+            line_item_count: pj.line_items?.length ?? 0,
+            // Attachments open in the thread; Gmail has no per-file URL.
+            link: `https://mail.google.com/mail/u/0/#all/${gmailId}`,
+          });
+        }
+      }
+
+      // Older mail was ingested before bodies were kept, so say which it is
+      // rather than letting the answer imply the message was empty.
+      const stored = readStoredText(e);
+      const body = stored.body;
+      return {
+        found: true,
+        id: e.id,
+        subject: e.subject,
+        from: e.from_addr,
+        to: e.to_addr,
+        received_at: e.received_at,
+        type: e.class,
+        project: e.projects?.name ?? null,
+        vendor: e.vendors?.name ?? null,
+        links: stored.links.map((l) => ({ url: l.url, host: l.host })),
+        attachments,
+        attachment_count: attachments.length,
+        // Capped: the assistant needs what was said, not a whole thread.
+        body: body ? body.slice(0, 4000) : null,
+        body_available: Boolean(body),
+        note: body
+          ? null
+          : "The TEXT of this message is not stored (it was read before bodies were kept), so you CANNOT tell whether it contains a link, a price, a measurement or any particular wording. Do NOT say a link or detail is absent — you have not seen the message. Say the text has not been captured yet and that re-reading the mail from the Dashboard will capture it. Subject, summary and the attachments listed above ARE reliable; answer from those where you can.",
       };
     }
 
@@ -840,7 +1011,80 @@ async function runTool(
 
 // ── The loop ────────────────────────────────────────────────
 
-function systemPrompt(ctx: AssistantContext): string {
+/**
+ * A few headline numbers, read before the conversation starts.
+ *
+ * Without it the assistant knows only that tools exist, so "how many
+ * projects do we have?" costs a tool round-trip — two Claude calls where
+ * one would do. That is slow, and on a function with a hard time limit it
+ * is the difference between an answer and a dropped connection. Anything
+ * past these headlines still comes from the tools.
+ *
+ * Read with the caller's own client, so it shows only what that person is
+ * allowed to see. Never throws: a snapshot that cannot be read leaves the
+ * assistant asking, which is what it did before.
+ */
+async function studioSnapshot(ctx: AssistantContext): Promise<string> {
+  const { db } = ctx;
+  const today = new Date().toISOString().slice(0, 10);
+
+  /** One `count` query, reported as null rather than thrown when it fails. */
+  const count = async (build: () => PromiseLike<{ count: number | null; error: unknown }>) => {
+    try {
+      const { count: n, error } = await build();
+      return error ? null : (n ?? 0);
+    } catch {
+      return null;
+    }
+  };
+  const head = (table: string) => db.from(table).select('*', { count: 'exact', head: true });
+
+  const [projects, activeProjects, openTasks, overdueTasks, unassignedTasks, vendors, openPos, followUps, drafts, specGaps] =
+    await Promise.all([
+      count(() => head('projects')),
+      count(() => head('projects').eq('status', 'active')),
+      count(() => head('tasks').in('status', LIVE)),
+      count(() => head('tasks').in('status', LIVE).lt('due_date', today)),
+      count(() => head('tasks').in('status', LIVE).is('assigned_to', null)),
+      count(() => head('vendors')),
+      count(() => head('purchase_orders').not('status', 'in', '(received,cancelled)')),
+      count(() => head('follow_ups').eq('status', 'open')),
+      count(() => head('drafts')),
+      count(() => head('spec_gaps').eq('resolved', false)),
+    ]);
+
+  // When the mail was last read, so "is this up to date?" needs no tool.
+  let lastRead = 'no record of a run yet';
+  try {
+    const { data } = await db
+      .from('activity_log')
+      .select('created_at')
+      .eq('action', 'ingest.run')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    const at = (data?.[0] as { created_at?: string } | undefined)?.created_at;
+    if (at) lastRead = `${at.slice(0, 16).replace('T', ' ')} UTC`;
+  } catch {
+    // Leave the wording as it is rather than failing the whole answer.
+  }
+
+  const say = (n: number | null) => (n === null ? 'unknown' : String(n));
+
+  return `Where the studio stands right now, counted before you were asked:
+- Projects: ${say(projects)} in total, ${say(activeProjects)} active.
+- Tasks: ${say(openTasks)} open, ${say(overdueTasks)} of them overdue and ${say(unassignedTasks)} with nobody on them.
+- Vendors: ${say(vendors)}. Purchase orders still open: ${say(openPos)}.
+- Follow-ups waiting: ${say(followUps)}. Reply drafts waiting to be sent: ${say(drafts)}.
+- Unresolved spec gaps: ${say(specGaps)}.
+- Gmail and Drive last read: ${lastRead}.
+
+Answer "how many" and "how are we doing overall" questions straight from these numbers —
+do not call a tool to count them again. Use the tools when the question needs names,
+dates, amounts, or anything not listed here. A number shown as "unknown" could not be
+read: say you could not check it rather than guessing.`;
+}
+
+function systemPrompt(ctx: AssistantContext, snapshot: string): string {
   return `You are ${ASSISTANT_NAME}, the operations assistant for Janelle Interiors, a small
 interior design studio. When someone greets you or asks who you are, say you are ${ASSISTANT_NAME}.
 You are speaking with ${ctx.name} (role: ${ctx.role ?? 'unknown'}). Today is ${new Date().toISOString().slice(0, 10)}.
@@ -859,25 +1103,56 @@ What you can see — the whole system, through the tools:
 - Tasks: who owns what, what is overdue, what has no owner.
 - Vendors and purchase orders: what is on order, from whom, for how much, and what is late.
 - Follow-ups: everywhere the system has noticed silence and wants someone chased.
-- Email that has been read, and the documents parsed out of it and out of Drive.
+- Email that has been read: who sent it, what it said in full, and every link in it.
 - Reply drafts waiting for a person to send.
 - The team and their roles, the morning digest, the weekly report.
 - The studio’s own rules (how long before chasing) and the audit trail of what has happened.
 - What the studio is spending on you.
 If a question touches any of that, there is a tool for it. Use it before saying you do not know.
 
+${snapshot}
+
 How to behave:
 - You CAN look things up. When asked for anything held in the studio’s records — a project,
   a task, an order, a vendor, an email, who owns what, what is overdue — call the tools and
   answer with what they return. Never say you are unable to access the system.
+- You CAN read whole emails. read_email returns the full text of a message, every link in it, and
+  every attachment parsed from it. Never say you "can only see subjects, senders and snippets", or
+  that you cannot extract or share a link — that was true of an earlier version of you and is false
+  now. If you said anything like it earlier in THIS conversation it was wrong: ignore it, call
+  read_email, and answer from the message itself.
 - ALWAYS answer from the tools. Never guess a status, a date, an owner or a number. If a tool returns
   nothing, say plainly that there is no record of it.
 - A tool error is NOT an empty result. If a tool reports it could not read something, say that you
   could not check and why. Never turn a failure to read into "there are none" — that is the one
   mistake that would make you untrustworthy.
-- Answers are spoken aloud as often as read. Keep them short and conversational — usually two or three
-  sentences. No headings, no bullet lists, no markdown, no emoji.
+- Never say something "was not parsed", "was not captured" or "is not in the system" until you have
+  called read_email on the actual message. search_email returns summaries; the summary leaving
+  something out does NOT mean the email did. A link, a measurement, a price, a name, a date — all of
+  that lives in the body, and read_email is what reads it. Sending someone to Gmail for a detail you
+  had not looked for yet is the same failure as inventing one.
+- When asked for a link, give the URL itself. read_email returns every link in a message, already
+  extracted — quote it exactly, never reconstruct or shorten it.
+- "I could not find X" and "X is not stored" are different answers and must never be swapped. If
+  read_email says a body is not stored, you have not looked at that message: say the text has not
+  been captured yet and how to capture it. Claiming a link is absent from an email you could not
+  read is exactly the mistake that makes you untrustworthy.
+- When something is missing, name the one action that fixes it. Never ask the person to narrow the
+  question down instead.
 - Lead with the answer, then the reason. Name people and projects plainly.
+- Answers are often spoken aloud, so keep them short — usually two or three sentences of plain
+  conversational prose. No headings, no markdown, no emoji, no bold.
+- Structure ONLY when the answer is genuinely a list of things — several tasks, orders, emails or
+  links. Then use one short line per item, starting with "- ", and nothing else. Three or four items
+  at most; say how many more there are rather than listing them all.
+- A URL always goes on its own line, bare, with nothing wrapped around it — that way it can be
+  copied. Say what it is on the line before.
+- Never pad. No preamble, no "I checked the system and".
+- End on the answer. Do NOT close with an offer or a question — no "would you like me to…",
+  no "let me know if…", no "shall I…". If a further lookup would obviously help, just do it in
+  the same turn instead of asking permission; reading is never something to ask about.
+- If part of an answer is unavailable, give the part that IS available first and keep the caveat
+  to one clause. Never lead with what you could not do.
 - Flag anything a client is waiting on: that is the studio's sorest point.
 - When asked to get something done, call propose_task. A proposal is NOT a completed action — say you
   have prepared it and that it needs confirming. Never say a task was created.
@@ -909,17 +1184,37 @@ export async function ask(
     { role: 'user' as const, content: message },
   ];
 
-  // Bounded so a confused model cannot spend the studio's budget in a loop.
+  const system = systemPrompt(ctx, await studioSnapshot(ctx));
+
+  // Six turns of tool use is minutes of work, and the function is killed
+  // long before that — the caller then gets no response at all, not even an
+  // error, which reads in the browser as "could not reach the server". So
+  // the loop watches the clock as well as the turn count, keeping back the
+  // time the slowest turn took so far, since a turn cannot be interrupted
+  // once it has started.
+  const deadline = Date.now() + ASSISTANT_BUDGET_MS;
+  const timeLeft = () => deadline - Date.now();
+  let slowestTurn = 0;
+
   for (let turn = 0; turn < 6; turn++) {
+    // Out of time with tool results in hand: spend what is left on an
+    // answer rather than another lookup. Dropping the tools is what forces
+    // one, and it is a cheaper call than a tool turn.
+    if (turn > 0 && timeLeft() <= slowestTurn) {
+      return { reply: await finalAnswer(ctx, system, messages, used), proposed, used };
+    }
+
+    const startedTurn = Date.now();
     const res = await createMessage(
       { feature: 'assistant.answer', orgId: ctx.orgId, actor: ctx.userId },
       {
         max_tokens: 2048,
-        system: systemPrompt(ctx),
+        system,
         tools: TOOLS,
         messages,
       },
     );
+    slowestTurn = Math.max(slowestTurn, Date.now() - startedTurn);
 
     const toolUses = res.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
 
@@ -958,4 +1253,44 @@ export async function ask(
     proposed,
     used,
   };
+}
+
+/**
+ * One last call with no tools, to turn whatever was looked up into an answer.
+ *
+ * Reached when the clock ran out mid-loop. Everything the tools returned is
+ * already in `messages`, so this usually answers the question properly; it
+ * only falls back to an apology if even this cannot be afforded.
+ */
+async function finalAnswer(
+  ctx: AssistantContext,
+  system: string,
+  messages: Anthropic.MessageParam[],
+  used: string[],
+): Promise<string> {
+  try {
+    const res = await createMessage(
+      { feature: 'assistant.answer', orgId: ctx.orgId, actor: ctx.userId },
+      {
+        max_tokens: 1024,
+        system: `${system}
+
+You are out of time to look anything else up. Answer now from what you already have.
+If what you have is not enough, say plainly which part you could not check.`,
+        messages,
+      },
+    );
+    const reply = res.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim();
+    if (reply) return reply;
+  } catch (err) {
+    console.error('[assistant] final answer failed:', (err as Error).message);
+  }
+
+  return used.length
+    ? 'That took longer than I have — I checked part of it but could not finish. Ask me again, or ask for one thing at a time.'
+    : 'That took longer than I have. Could you ask me again, or narrow it down a little?';
 }

@@ -184,11 +184,29 @@ Return JSON with exactly these keys:
 - "eta": estimated ship/delivery ISO date or null
 - "line_items": array of { "description", "sku" (or null), "qty" (number), "unit_price" (number or null) }`;
 
+/**
+ * The largest PDF worth reading.
+ *
+ * Reading one holds the file three times over — the downloaded buffer, its
+ * base64 form (a third larger again), and the JSON request body the SDK
+ * builds around it. On a 1024MB function a big attachment can exhaust the
+ * memory and take the whole invocation down, which reaches the browser as a
+ * dropped connection rather than an error, losing everything that pass had
+ * read. Claude refuses documents over 32MB anyway, so an oversized file
+ * costs the download and the memory and then fails regardless. Quotes and
+ * order confirmations are comfortably under this.
+ */
+export const MAX_PDF_BYTES = 12 * 1024 * 1024;
+
 export async function extractPdf(
   pdf: Buffer,
   filename: string,
   ctx: Partial<CallContext> = {},
 ): Promise<DocumentExtraction | null> {
+  if (pdf.byteLength > MAX_PDF_BYTES) {
+    console.warn(`[extract] skipping ${filename}: ${Math.round(pdf.byteLength / 1e6)}MB is over the read limit`);
+    return null;
+  }
   const content: Anthropic.ContentBlockParam[] = [
     {
       type: 'document',

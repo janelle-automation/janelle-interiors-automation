@@ -1,5 +1,6 @@
-import { DEFAULT_SLA, type FollowUpType, type SlaSettings } from '@janelle/shared';
+import { DEFAULT_SLA, TASK_HYGIENE_SEAT, type FollowUpType, type SlaSettings } from '@janelle/shared';
 import { supabaseAdmin } from '../lib/supabase.js';
+import { hasSeatColumn } from '../lib/columns.js';
 import { generate, isAiReady } from './anthropic.js';
 
 export interface FollowUpResult {
@@ -18,7 +19,36 @@ interface Trigger {
   context: string;
   /** Set for the internal reminders, so one task raises one nudge. */
   taskId?: string;
+  /**
+   * Whether this counts as having reminded the owner about the deadline.
+   *
+   * Hygiene nudges do not: being told a task has no next step is not the
+   * same as having been chased for being late, and escalation keys off the
+   * reminder count. Without this a single "add a due date" note would make
+   * the next genuine miss escalate straight to the principal.
+   */
+  countsAsReminder?: boolean;
 }
+
+/**
+ * The things every task must answer before it is a task at all.
+ *
+ * The studio's Tasks SOP requires one owner, a due date and a next step;
+ * the PM support seat owns "pushing tasks so each has ONE owner, a due date
+ * and a next step". Until now the follow-up engine only chased work that
+ * was LATE, so a task that was never properly formed sat there indefinitely
+ * — it cannot be late when it has no date.
+ */
+const HYGIENE: { type: FollowUpType; missing: string }[] = [
+  { type: 'task_unowned', missing: 'nobody owns it' },
+  { type: 'task_no_next_step', missing: 'it has no next step' },
+  { type: 'task_no_due_date', missing: 'it has no due date' },
+];
+
+/** Every follow-up type that goes to a colleague rather than out of the studio. */
+const INTERNAL_TYPES: FollowUpType[] = [
+  'task_overdue', 'task_escalation', 'task_unowned', 'task_no_next_step', 'task_no_due_date',
+];
 
 function daysAgoIso(days: number): string {
   return new Date(Date.now() - days * 86400_000).toISOString();
@@ -35,6 +65,9 @@ async function draftBody(t: Trigger): Promise<{ subject: string; body: string }>
     client_waiting: 'An update on your request',
     task_overdue: 'A reminder on something assigned to you',
     task_escalation: 'Still open after a reminder',
+    task_unowned: 'This task needs an owner',
+    task_no_next_step: 'This task needs a next step',
+    task_no_due_date: 'This task needs a due date',
   };
   const subject = SUBJECTS[t.type] ?? 'Checking in on timing';
 
@@ -45,7 +78,7 @@ async function draftBody(t: Trigger): Promise<{ subject: string; body: string }>
     };
   }
   // A teammate gets a colleague's nudge, not a client-facing letter.
-  const internal = t.type === 'task_overdue' || t.type === 'task_escalation';
+  const internal = INTERNAL_TYPES.includes(t.type);
   const body = await generate(
     internal
       ? 'You write brief internal reminders between colleagues at a small interior design studio. One short paragraph, plain and matter-of-fact, never scolding — the point is to unblock the work, not to tell someone off. Ask if anything is in the way. No placeholders, sign off as "Janelle Interiors".'
@@ -158,6 +191,21 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
     });
   }
 
+  // Whoever holds the seat that owns task hygiene, so a malformed task has
+  // somewhere to go even when nobody owns the task itself. Resolved once per
+  // run rather than per task.
+  let hygieneEmail: string | null = null;
+  if (await hasSeatColumn()) {
+    const { data: hygieneHolder } = await supabaseAdmin
+      .from('profiles')
+      .select('full_name, email')
+      .eq('org_id', orgId)
+      .eq('seat', TASK_HYGIENE_SEAT)
+      .limit(1)
+      .maybeSingle();
+    hygieneEmail = (hygieneHolder as { email?: string | null } | null)?.email ?? null;
+  }
+
   // 0c. Internal reminders — the studio's own people, not vendors or clients.
   //     A task that has gone past its due date gets its owner nudged; if the
   //     nudge has already been sent and the task is still sitting there, the
@@ -165,13 +213,13 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
   const today = todayIso();
   const { data: liveTasks } = await supabaseAdmin
     .from('tasks')
-    .select('id, title, kind, status, due_date, created_at, reminded_at, reminder_count, assigned_to, project_id, vendor_id, projects(name), profiles(full_name, email)')
+    .select('id, title, kind, status, due_date, next_step, created_at, reminded_at, reminder_count, assigned_to, project_id, vendor_id, projects(name), profiles(full_name, email)')
     .eq('org_id', orgId)
     .in('status', ['open', 'in_progress', 'blocked']);
 
   for (const row of liveTasks ?? []) {
     const t = row as unknown as {
-      id: string; title: string; status: string; due_date: string | null; created_at: string;
+      id: string; title: string; status: string; due_date: string | null; next_step: string | null; created_at: string;
       reminded_at: string | null; reminder_count: number; assigned_to: string | null;
       project_id: string | null; vendor_id: string | null;
       projects: { name: string } | null;
@@ -185,7 +233,51 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
       (t.due_date !== null && t.due_date < today) ||
       t.status === 'blocked' ||
       (t.due_date === null && ageDays >= sla.task_reminder_days + sla.quote_response_days);
-    if (!overdue) continue;
+    // Respect the cadence for hygiene too, so nothing is nudged nightly.
+    const withinCadence = (() => {
+      if (!t.reminded_at) return true;
+      const sinceDays = Math.floor((Date.now() - new Date(t.reminded_at).getTime()) / 86400_000);
+      return sinceDays >= sla.reminder_repeat_days;
+    })();
+
+    if (!overdue) {
+      // Not late — but is it even a task? The SOP wants one owner, a due
+      // date and a next step. Give the ingest a day to fill them in before
+      // chasing, or every message would nudge the moment it arrived.
+      if (!withinCadence) continue;
+      if (ageDays < sla.task_reminder_days) continue;
+
+      const gaps = HYGIENE.filter(({ type }) =>
+        type === 'task_unowned'
+          ? !t.assigned_to
+          : type === 'task_no_next_step'
+            ? !(t.next_step ?? '').trim()
+            : !t.due_date,
+      );
+      if (!gaps.length) continue;
+
+      // One nudge naming everything missing, not one per gap: the seat owns
+      // "pushing tasks so each has ONE owner, a due date and a next step",
+      // which is a single push. The most important gap names the type.
+      const missing = gaps.map((g) => g.missing);
+      const where = t.projects?.name ? ` on ${t.projects.name}` : '';
+      triggers.push({
+        type: gaps[0].type,
+        projectId: t.project_id,
+        vendorId: t.vendor_id,
+        // The owner if there is one; otherwise the seat that owns hygiene.
+        target: t.profiles?.email ?? hygieneEmail,
+        reason:
+          missing.length === 1
+            ? `This has been open ${ageDays} days and ${missing[0]}.`
+            : `This has been open ${ageDays} days and ${missing.slice(0, -1).join(', ')} and ${missing[missing.length - 1]}.`,
+        context: `${t.title}${where}`,
+        taskId: t.id,
+        // Being told a task is incomplete is not being chased for lateness.
+        countsAsReminder: false,
+      });
+      continue;
+    }
 
     // Respect the cadence: no second nudge until the repeat window passes.
     if (t.reminded_at) {
@@ -312,7 +404,7 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
     let resolved: Recipient | null = null;
     // Internal reminders go to the teammate on t.target; never resolve them
     // against a vendor thread, or a nudge would be addressed to the vendor.
-    if (t.type === 'task_overdue' || t.type === 'task_escalation') {
+    if (INTERNAL_TYPES.includes(t.type)) {
       resolved = null;
     } else if (t.type === 'vendor_silence' || t.type === 'date_slipping') {
       resolved = await resolveRecipient(orgId, { vendorId: t.vendorId });
@@ -359,20 +451,19 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
     });
 
     // Stamp the task so the next run waits out the repeat window instead of
-    // nudging the same person every night.
+    // nudging the same person every night. The count only moves for a real
+    // reminder, because it is what decides when to escalate.
     if (t.taskId) {
-      const { data: cur } = await supabaseAdmin!
-        .from('tasks')
-        .select('reminder_count')
-        .eq('id', t.taskId)
-        .maybeSingle();
-      await supabaseAdmin!
-        .from('tasks')
-        .update({
-          reminded_at: new Date().toISOString(),
-          reminder_count: ((cur as { reminder_count?: number } | null)?.reminder_count ?? 0) + 1,
-        })
-        .eq('id', t.taskId);
+      const patch: Record<string, unknown> = { reminded_at: new Date().toISOString() };
+      if (t.countsAsReminder !== false) {
+        const { data: cur } = await supabaseAdmin!
+          .from('tasks')
+          .select('reminder_count')
+          .eq('id', t.taskId)
+          .maybeSingle();
+        patch.reminder_count = ((cur as { reminder_count?: number } | null)?.reminder_count ?? 0) + 1;
+      }
+      await supabaseAdmin!.from('tasks').update(patch).eq('id', t.taskId);
     }
     raised++;
   }

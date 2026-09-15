@@ -64,16 +64,20 @@ export function StatTile({
   hint?: string;
   tone?: Tone;
 }) {
+  // Fills its grid cell rather than shrinking to its own content: labels
+  // and hints wrap to different numbers of lines, so content-sized tiles
+  // came out at different heights along the same row. The hint is pushed to
+  // the bottom so the figures line up across the row whatever the wrapping.
   return (
-    <Card className="p-5">
+    <Card className="flex h-full flex-col p-5">
       <div className="flex items-center gap-2">
-        <span className={`h-2 w-2 rounded-full ${toneDot[tone]}`} aria-hidden="true" />
+        <span className={`mt-0.5 h-2 w-2 shrink-0 rounded-full ${toneDot[tone]}`} aria-hidden="true" />
         <div className="text-[12.5px] font-medium text-ink-soft">{label}</div>
       </div>
       <div className={`mt-2.5 text-[30px] font-bold leading-none tracking-[-0.02em] tabular-nums ${toneText[tone]}`}>
         {value}
       </div>
-      {hint && <div className="mt-2 text-[12.5px] text-ink-faint">{hint}</div>}
+      {hint && <div className="mt-auto pt-2 text-[12.5px] text-ink-faint">{hint}</div>}
     </Card>
   );
 }

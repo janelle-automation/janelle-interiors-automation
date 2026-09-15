@@ -128,6 +128,11 @@ table,
   .input {
     @apply focusable w-full rounded-lg border border-line bg-surface px-3.5 py-2.5 text-[14px] text-ink placeholder:text-ink-faint transition-colors hover:border-ink-faint focus:border-brass;
   }
+
+  /* Board cards put two controls side by side in a narrow column. */
+  .input-sm {
+    @apply px-2 py-1 text-[11.5px];
+  }
 }
 
 /* Floating sidebar collapse toggle: nudges on hover, springs on click */

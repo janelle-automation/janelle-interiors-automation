@@ -6,6 +6,8 @@ export interface DriveFile {
   name: string;
   mimeType: string;
   modifiedTime: string;
+  /** Bytes, as Drive reports them; 0 when the file did not say. */
+  size: number;
 }
 
 /** Drive client acting as the given user, or null if not connected. */
@@ -29,7 +31,7 @@ export async function listPdfs(
     q: clauses.join(' and '),
     orderBy: 'modifiedTime desc',
     pageSize: opts.max ?? 25,
-    fields: 'files(id,name,mimeType,modifiedTime)',
+    fields: 'files(id,name,mimeType,modifiedTime,size)',
     // Include shared drives, where studios usually keep quote PDFs.
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
@@ -40,6 +42,8 @@ export async function listPdfs(
     name: f.name ?? 'untitled.pdf',
     mimeType: f.mimeType ?? 'application/pdf',
     modifiedTime: f.modifiedTime ?? '',
+    // Drive sends this as a string; 0 for anything that did not report one.
+    size: Number(f.size ?? 0) || 0,
   }));
 }
 
