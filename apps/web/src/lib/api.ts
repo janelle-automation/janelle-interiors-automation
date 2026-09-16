@@ -60,6 +60,76 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 /**
+ * POST and read the reply as newline-delimited JSON events, as they arrive.
+ *
+ * For work that reports progress before it finishes. Every line is handed
+ * to `onEvent`; the promise settles when the stream ends. A non-2xx status
+ * throws with the server's message, like `api()`; no response at all throws
+ * NetworkError; an abort throws the browser's AbortError, which callers
+ * treat as the person changing their mind rather than as a failure.
+ */
+export async function apiStream(
+  path: string,
+  body: unknown,
+  onEvent: (event: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'application/x-ndjson' });
+  if (supabase) {
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}/api${path}`, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') throw err;
+    throw new NetworkError(err);
+  }
+
+  if (!res.ok) {
+    const failure = await res.json().catch(() => ({}));
+    throw new Error((failure as { error?: string }).error ?? `Request failed (${res.status})`);
+  }
+
+  // A browser without streamable bodies still gets every event, at the end.
+  if (!res.body) {
+    for (const raw of (await res.text()).split('\n')) {
+      if (raw.trim()) onEvent(JSON.parse(raw));
+    }
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = '';
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      buffered += decoder.decode(value, { stream: !done });
+      // Only whole lines are parsed; a line split across two chunks waits
+      // for the rest of itself.
+      let nl: number;
+      while ((nl = buffered.indexOf('\n')) >= 0) {
+        const raw = buffered.slice(0, nl).trim();
+        buffered = buffered.slice(nl + 1);
+        if (raw) onEvent(JSON.parse(raw));
+      }
+      if (done) break;
+    }
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') throw err;
+    // The connection dropped mid-answer: the server may have finished, but
+    // nothing more is coming, which to the person is the same as unreachable.
+    if (err instanceof TypeError) throw new NetworkError(err);
+    throw err;
+  }
+  if (buffered.trim()) onEvent(JSON.parse(buffered));
+}
+
+/**
  * Fetch an endpoint that deliberately has no session: the token in the URL
  * is the credential. Used by the shared AI usage report, which is opened by
  * people who have no account here.
@@ -92,4 +162,32 @@ export async function apiBlob(path: string): Promise<Blob> {
     throw new Error((body as { error?: string }).error ?? `Request failed (${res.status})`);
   }
   return res.blob();
+}
+
+/**
+ * Send a file as the raw request body, and read back the usual `{ data }`.
+ *
+ * Raw rather than JSON or a form: base64 makes a file a third larger, and a
+ * serverless request body has a hard size cap that a PDF reaches quickly.
+ */
+export async function apiUpload<T>(path: string, file: Blob, signal?: AbortSignal): Promise<T> {
+  const headers = new Headers({ 'Content-Type': file.type || 'application/octet-stream' });
+  if (supabase) {
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+  }
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}/api${path}`, { method: 'POST', headers, body: file, signal });
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') throw err;
+    throw new NetworkError(err);
+  }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    if (res.status === 413 && !(body as { error?: string }).error) throw new Error('That file is too large.');
+    throw new Error((body as { error?: string }).error ?? `Upload failed (${res.status})`);
+  }
+  return (body as { data: T }).data;
 }

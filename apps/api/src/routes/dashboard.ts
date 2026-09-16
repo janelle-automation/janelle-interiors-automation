@@ -4,12 +4,16 @@ import {
   ROLE_DASHBOARD,
   SEATS,
   SEAT_KEYS,
+  seatPeople,
   type DashboardCardKey,
   type DashboardSummary,
   type Seat,
 } from '@janelle/shared';
 import { requireAuth } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
+import { profileColumns } from '../lib/columns.js';
+import { STUDIO_TEAM, isStudioMailbox } from '../lib/studioTeam.js';
+import { matchPerson } from '../services/proposals.js';
 
 export const dashboardRouter = Router();
 dashboardRouter.use(requireAuth);
@@ -45,7 +49,7 @@ dashboardRouter.get(
           .from('tasks')
           .select('id, status, assigned_to, due_date, next_step')
           .in('status', LIVE),
-        db.from('profiles').select('full_name'),
+        db.from('profiles').select(await profileColumns('id, full_name, email')),
       ]);
 
     const projectRows = (projects.data ?? []) as { stage: string; status: string }[];
@@ -88,19 +92,26 @@ dashboardRouter.get(
     // A seat with nobody in it silently swallows work: resolveBySeat falls
     // back to the role, and if that role is empty too the task lands
     // unassigned. Worth saying out loud on the dashboard.
-    const names = new Set(
-      ((profiles.data ?? []) as { full_name: string | null }[])
-        .map((p) => p.full_name?.toLowerCase().trim())
-        .filter((n): n is string => !!n),
-    );
+    //
+    // Filled means an account holds it: given the seat on Team & roles, or
+    // belonging to one of the people the roles document names for it — by
+    // their address, or by name. A shared inbox holds nothing.
+    const accounts = ((profiles.data ?? []) as unknown as {
+      id: string; full_name: string | null; email: string | null; seat?: Seat | null;
+    }[]).filter((p) => !isStudioMailbox(p.email));
+    const named = accounts.filter((p) => p.full_name) as { id: string; full_name: string; email: string | null }[];
     const vacantSeats = SEAT_KEYS.filter((seat) => {
-      const person = SEATS[seat].person;
-      if (!person) return true; // the document's own vacancy, the COO
-      // "Brianna / Amanda" share a seat — either name fills it.
-      return !person
-        .split('/')
-        .map((p) => p.trim().toLowerCase())
-        .some((p) => [...names].some((n) => n === p || n.startsWith(`${p} `)));
+      if (accounts.some((p) => p.seat === seat)) return false;
+      // "Brianna Johnson / Amanda Neubecker" share a seat — either fills it.
+      return !seatPeople(seat).some((name) => {
+        const email = STUDIO_TEAM.find((p) => p.name === name)?.email;
+        // An account made with only a first name still counts, unless that
+        // first name is shared.
+        return (
+          (email && accounts.some((p) => p.email?.toLowerCase() === email)) ||
+          [name, name.split(' ')[0]].some((said) => matchPerson(said, named).status === 'found')
+        );
+      });
     }).map((seat: Seat) => ({
       seat,
       label: SEATS[seat].label,

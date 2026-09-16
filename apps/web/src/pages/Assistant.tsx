@@ -1,247 +1,133 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState, type SVGProps } from 'react';
 import { ASSISTANT_NAME } from '@janelle/shared';
 import { PageHeading, Card } from '../components/ui';
-import { IconMic, IconSend, IconStop } from '../components/icons';
-import {
-  useAsk,
-  useConfirmAction,
-  type AssistantTurn,
-  type ProposedAction,
-} from '../lib/queries';
-import { listenOnce, speak, speechInputSupported, speechOutputSupported, stopSpeaking } from '../lib/speech';
+import { AssistantChat } from '../components/AssistantChat';
+import { AssistantGuide } from '../components/AssistantGuide';
+import { AssistantHistory } from '../components/AssistantHistory';
+import { IconTalk, SHORTCUT_LABEL } from '../components/AssistantPanel';
+import { useAssistant } from '../context/AssistantContext';
 
-interface Message extends AssistantTurn {
-  proposed?: ProposedAction[];
-  /** Proposals already committed, so the button does not offer twice. */
-  done?: string[];
+type IconProps = SVGProps<SVGSVGElement>;
+const stroke = {
+  width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+  strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const,
+};
+const IconList = (p: IconProps) => <svg {...stroke} {...p}><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg>;
+const IconSpark = (p: IconProps) => (
+  <svg {...stroke} {...p}><path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9Z" /><path d="M19 17v4M17 19h4" /></svg>
+);
+const IconClose = (p: IconProps) => <svg {...stroke} {...p}><path d="M18 6 6 18M6 6l12 12" /></svg>;
+
+/** A sheet over the page, closed by Escape, the backdrop or its button. */
+function Sheet({ side, title, onClose, children }: { side: 'left' | 'right'; title: string; onClose: () => void; children: React.ReactNode }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label={title}>
+      <button type="button" aria-label="Close" onClick={onClose} className="absolute inset-0 bg-black/50" />
+      <div
+        className={`absolute inset-y-0 ${side === 'left' ? 'left-0 border-r' : 'right-0 border-l'} flex w-full max-w-[26rem] flex-col border-line bg-surface shadow-pop ${
+          side === 'right' ? 'sm:max-w-[40rem]' : ''
+        }`}
+      >
+        <div className="flex items-center justify-between border-b border-line px-4 py-3">
+          <h2 className="text-[15px] font-semibold text-ink">{title}</h2>
+          <button type="button" onClick={onClose} aria-label="Close" className="focusable grid h-8 w-8 place-items-center rounded-lg text-ink-soft hover:bg-sunk hover:text-ink">
+            <IconClose width={18} height={18} />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
 }
 
-const SUGGESTIONS = [
-  'What needs me today?',
-  'How is the Harborview hotel going?',
-  'What is overdue and who owns it?',
-  'Who is carrying the most work right now?',
-];
-
+/**
+ * Jenny with the whole screen to herself.
+ *
+ * The same conversation as the side panel — not a second one — for when an
+ * answer is a long table, or a spoken conversation deserves the room. Past
+ * conversations sit beside it, and what she can do is a click away.
+ */
 export default function Assistant() {
-  const ask = useAsk();
-  const confirm = useConfirmAction();
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState('');
-  const [listening, setListening] = useState(false);
-  const [voiceReplies, setVoiceReplies] = useState(false);
-  const [micError, setMicError] = useState<string | null>(null);
-  const stopRef = useRef<(() => void) | null>(null);
-  const endRef = useRef<HTMLDivElement>(null);
-
-  const canListen = speechInputSupported();
-  const canSpeak = speechOutputSupported();
-
-  // Block body on purpose: an effect that implicitly returns whatever its
-  // last expression evaluates to is how "destroy is not a function" happens.
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, ask.isPending]);
-
-  // Stop the microphone and any speech if the page goes away mid-sentence.
-  useEffect(() => {
-    return () => {
-      stopRef.current?.();
-      stopSpeaking();
-    };
-  }, []);
-
-  function send(text: string) {
-    const message = text.trim();
-    if (!message || ask.isPending) return;
-
-    const history = messages.map((m) => ({ role: m.role, content: m.content }));
-    setMessages((prev) => [...prev, { role: 'user', content: message }]);
-    setInput('');
-
-    ask.mutate(
-      { message, history },
-      {
-        onSuccess: (r) => {
-          setMessages((prev) => [...prev, { role: 'assistant', content: r.reply, proposed: r.proposed, done: [] }]);
-          if (voiceReplies) speak(r.reply);
-        },
-        onError: (e) => {
-          setMessages((prev) => [...prev, { role: 'assistant', content: `Something went wrong: ${(e as Error).message}` }]);
-        },
-      },
-    );
-  }
-
-  function toggleMic() {
-    if (listening) {
-      stopRef.current?.();
-      return;
-    }
-    setMicError(null);
-    setListening(true);
-    stopRef.current = listenOnce(
-      (text) => send(text),
-      (msg) => setMicError(msg),
-      () => setListening(false),
-    );
-  }
+  const { handsFree, setHandsFree, canListen, canSpeak, speakReplies, setSpeakReplies, conversations } = useAssistant();
+  const [guide, setGuide] = useState(false);
+  const [history, setHistory] = useState(false);
 
   return (
     <>
       <PageHeading
         title={ASSISTANT_NAME}
-        sub={`Ask ${ASSISTANT_NAME} where things stand, or say what you need done. Answers come from the studio's live data, and she says so when she cannot check something.`}
+        sub={`Your assistant for the studio's work — projects, tasks, orders, email and files. She briefs you each day, follows you around the app (${SHORTCUT_LABEL} from anywhere), reads the files you attach, and says so when she cannot check something.`}
         action={
-          canSpeak ? (
-            <button
-              onClick={() => {
-                stopSpeaking();
-                setVoiceReplies((v) => !v);
-              }}
-              className="btn-secondary btn-sm"
-            >
-              {voiceReplies ? 'Spoken replies on' : 'Spoken replies off'}
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={() => setHistory(true)} className="btn-secondary btn-sm lg:hidden">
+              <IconList />
+              Conversations{conversations.length ? ` (${conversations.length})` : ''}
             </button>
-          ) : undefined
+            <button type="button" onClick={() => setGuide(true)} className="btn-secondary btn-sm">
+              <IconSpark />
+              What {ASSISTANT_NAME} can do
+            </button>
+            {canSpeak && !handsFree && (
+              <button
+                type="button"
+                onClick={() => setSpeakReplies(!speakReplies)}
+                aria-pressed={speakReplies}
+                className="btn-secondary btn-sm"
+              >
+                {speakReplies ? 'Reading answers aloud' : 'Read answers aloud'}
+              </button>
+            )}
+            {canListen && (
+              <button
+                type="button"
+                onClick={() => setHandsFree(!handsFree)}
+                aria-pressed={handsFree}
+                className={handsFree ? 'btn-primary btn-sm' : 'btn-secondary btn-sm'}
+              >
+                <IconTalk width={15} height={15} />
+                {handsFree ? 'End conversation' : 'Talk hands-free'}
+              </button>
+            )}
+          </div>
         }
       />
 
-      <Card className="flex h-[calc(100vh-16rem)] min-h-[26rem] flex-col">
-        <div className="flex-1 space-y-4 overflow-y-auto px-5 py-5">
-          {messages.length === 0 && (
-            <div className="py-6">
-              <p className="mb-4 text-center text-[13px] text-ink-faint">
-                Ask anything about the studio's work.
-              </p>
-              <div className="mx-auto flex max-w-lg flex-wrap justify-center gap-2">
-                {SUGGESTIONS.map((s) => (
-                  <button
-                    key={s}
-                    onClick={() => send(s)}
-                    className="focusable rounded-full border border-line px-3 py-1.5 text-[12.5px] text-ink-soft transition-colors hover:bg-sunk"
-                  >
-                    {s}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {messages.map((m, i) => (
-            <div key={i} className={m.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
-              <div
-                className={`max-w-[85%] rounded-xl px-4 py-2.5 text-[14px] leading-relaxed ${
-                  m.role === 'user' ? 'bg-brass/10 text-ink' : 'bg-sunk text-ink'
-                }`}
-              >
-                <p className="whitespace-pre-line">{m.content}</p>
-
-                {m.proposed && m.proposed.length > 0 && (
-                  <div className="mt-3 space-y-2 border-t border-line-soft pt-3">
-                    {m.proposed.map((p, j) => {
-                      const key = `${i}-${j}`;
-                      const committed = m.done?.includes(key);
-                      return (
-                        <div key={key} className="flex flex-wrap items-center gap-2">
-                          <span className="text-[13px] text-ink-soft">{p.summary}</span>
-                          {committed ? (
-                            <span className="text-[12.5px] font-semibold text-good">Created</span>
-                          ) : (
-                            <button
-                              className="btn-primary btn-sm"
-                              disabled={confirm.isPending}
-                              onClick={() =>
-                                confirm.mutate(
-                                  { input: p.input },
-                                  {
-                                    onSuccess: () =>
-                                      setMessages((prev) =>
-                                        prev.map((msg, idx) =>
-                                          idx === i ? { ...msg, done: [...(msg.done ?? []), key] } : msg,
-                                        ),
-                                      ),
-                                  },
-                                )
-                              }
-                            >
-                              Confirm
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-
-          {ask.isPending && (
-            <div className="flex justify-start">
-              <div className="rounded-xl bg-sunk px-4 py-2.5 text-[13px] text-ink-faint">Checking…</div>
-            </div>
-          )}
-          <div ref={endRef} />
-        </div>
-
-        {(micError || confirm.isError) && (
-          <div className="border-t border-line-soft px-5 py-2 text-[12.5px] text-crit">
-            {micError ?? (confirm.error as Error)?.message}
+      <div className="grid gap-4 lg:grid-cols-[17.5rem_minmax(0,1fr)] 2xl:grid-cols-[20rem_minmax(0,1fr)]">
+        <Card className="hidden h-[calc(100vh-15rem)] min-h-[28rem] flex-col overflow-hidden lg:flex">
+          <div className="border-b border-line px-4 py-3">
+            <h2 className="text-[13.5px] font-semibold text-ink">Conversations</h2>
+            <p className="text-[11.5px] text-ink-faint">Kept in this browser</p>
           </div>
-        )}
+          <AssistantHistory />
+        </Card>
 
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            send(input);
-          }}
-          className="relative flex items-center gap-2 border-t border-line-soft px-5 py-3"
-        >
-          {canListen && (
-            <button
-              type="button"
-              onClick={toggleMic}
-              aria-label={listening ? 'Stop listening' : 'Speak instead of typing'}
-              aria-pressed={listening}
-              title={listening ? 'Stop listening' : 'Speak instead of typing'}
-              className={`focusable grid h-9 w-9 shrink-0 place-items-center rounded-lg border transition-colors ${
-                listening
-                  ? 'border-crit bg-crit/10 text-crit'
-                  : 'border-line text-ink-soft hover:bg-sunk hover:text-ink'
-              }`}
-            >
-              {/* The icon carries the state: a stop square while listening,
-                  so the control never reads as "speak" mid-recording. */}
-              {listening ? <IconStop /> : <IconMic />}
-              {listening && (
-                <span className="absolute h-9 w-9 animate-ping rounded-lg bg-crit/20" aria-hidden="true" />
-              )}
-            </button>
-          )}
-          <input
-            className="input flex-1"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={listening ? 'Listening…' : 'Ask about a project, or say what you need done'}
-            disabled={ask.isPending}
-          />
-          <button
-            type="submit"
-            aria-label="Send"
-            title="Send"
-            disabled={ask.isPending || !input.trim()}
-            className="focusable grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brass text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <IconSend />
-          </button>
-        </form>
-      </Card>
+        <Card className="flex h-[calc(100vh-15rem)] min-h-[28rem] flex-col overflow-hidden">
+          <AssistantChat />
+        </Card>
+      </div>
 
       <p className="mt-3 text-[12.5px] text-ink-faint">
-        The assistant never creates or reassigns work on its own; anything it prepares waits for your confirmation.
-        {!canListen && ' Voice input is not available in this browser.'}
+        {ASSISTANT_NAME} never sends email or changes records on her own — anything she prepares waits for you to confirm.
+        {!canListen && ' Voice is not available in this browser; Chrome, Edge and Safari support it.'}
       </p>
+
+      {history && (
+        <Sheet side="left" title="Conversations" onClose={() => setHistory(false)}>
+          <AssistantHistory onOpened={() => setHistory(false)} onNew={() => setHistory(false)} />
+        </Sheet>
+      )}
+      {guide && (
+        <Sheet side="right" title={`What ${ASSISTANT_NAME} can do`} onClose={() => setGuide(false)}>
+          <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            <AssistantGuide onDone={() => setGuide(false)} />
+          </div>
+        </Sheet>
+      )}
     </>
   );
 }

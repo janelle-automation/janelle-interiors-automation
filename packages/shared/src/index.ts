@@ -214,7 +214,11 @@ export type Seat =
   | 'design';
 
 export interface SeatBrief {
-  /** The person holding it today; null where the document says HIRE. */
+  /**
+   * The person holding it today, by full name; null where the document says
+   * HIRE. Two people sharing a seat are separated by " / " — read them with
+   * seatPeople() rather than splitting by hand.
+   */
   person: string | null;
   label: string;
   role: UserRole;
@@ -226,7 +230,7 @@ export interface SeatBrief {
 
 export const SEATS: Record<Seat, SeatBrief> = {
   owner: {
-    person: 'Janelle',
+    person: 'Janelle Kandziora',
     label: 'Owner',
     role: 'principal',
     owns: 'vision, brand, new-client close, hotel relationship at principal level, hire/fire, approving money leaving the bank, checks and wires, live-project renames',
@@ -240,35 +244,37 @@ export const SEATS: Record<Seat, SeatBrief> = {
     notOwns: 'design intent, drawing, vendor negotiation, writing POs, being the day-to-day contact for the hotel client',
   },
   operations: {
-    person: 'Carissa',
+    person: 'Carissa Kolbeck',
     label: 'Operations + Finance',
     role: 'coordinator',
     owns: 'Houzz data standard and hygiene, RFI numbering and the M/W/F digest, due dates, QuickBooks COGS/AR/AP, purchase orders from complete specs, card payment after approval, the weekly ops pack',
     notOwns: 'aesthetic decisions, issued-set version control, being default designer, approving spend',
   },
   pm_support: {
-    person: 'Joanna',
+    person: 'Joanna Ramos',
     label: 'Operations Support / PM assistant',
     role: 'assistant',
     owns: 'pushing tasks so each has ONE owner, a due date and a next step, chasing overdue and unassigned tasks, scanning proposals for ones with no next step',
     notOwns: 'answering design RFIs, inventing specs, rewriting the data standard, being a second Operations seat',
   },
   technical_production: {
-    person: 'Victoria',
+    person: 'Victoria Manayan',
     label: 'Technical production',
     role: 'assistant',
     owns: 'Canva finish schedules built from the current Drive set, matching Canva to Drive, logging disagreements as RFIs, Houzz record cleanup and folder hygiene',
     notOwns: 'client email, purchase orders, renaming live projects, design intent, being Lead Designer or PM',
   },
   hotel_ffe: {
-    person: 'Adelaide',
+    // The roles document spells her "Adelaide"; her account is Adeleigh.
+    // The misspelling matched nobody, so hotel work never reached her.
+    person: 'Adeleigh McGee',
     label: 'Hotel FF&E / Procurement',
     role: 'procurement',
     owns: 'hotel buying, order tracking, receiving and damage claims, vendor follow-up, flagging delays within 24 hours, hotel order status',
     notOwns: 'finding the next hotel client, residential design boards, approving spend',
   },
   design: {
-    person: 'Brianna / Amanda',
+    person: 'Brianna Johnson / Amanda Neubecker',
     label: 'Lead / Technical Designer',
     role: 'designer',
     owns: 'design intent and issued sets on assigned projects, elevations and drawings, complete specs with no TBD rows, client design email',
@@ -279,6 +285,14 @@ export const SEATS: Record<Seat, SeatBrief> = {
 export const SEAT_KEYS: Seat[] = [
   'owner', 'coo', 'operations', 'pm_support', 'technical_production', 'hotel_ffe', 'design',
 ];
+
+/** The people holding a seat, one full name each; [] for a vacant seat. */
+export function seatPeople(seat: Seat): string[] {
+  return (SEATS[seat]?.person ?? '')
+    .split('/')
+    .map((name) => name.trim())
+    .filter(Boolean);
+}
 
 export type EmailClass =
   | 'vendor_quote'
@@ -629,11 +643,12 @@ export type AiFeature =
   | 'digest.summary'
   | 'report.narrative'
   | 'prompt.run'
-  | 'assistant.answer';
+  | 'assistant.answer'
+  | 'document.read';
 
 export const AI_FEATURES: AiFeature[] = [
   'email.extract', 'task.extract', 'document.extract', 'followup.draft',
-  'reply.draft', 'digest.summary', 'report.narrative', 'prompt.run', 'assistant.answer',
+  'reply.draft', 'digest.summary', 'report.narrative', 'prompt.run', 'assistant.answer', 'document.read',
 ];
 
 export const AI_FEATURE_LABELS: Record<AiFeature, string> = {
@@ -646,6 +661,7 @@ export const AI_FEATURE_LABELS: Record<AiFeature, string> = {
   'report.narrative': 'Weekly report',
   'prompt.run': 'Prompt Studio',
   'assistant.answer': 'Assistant answers',
+  'document.read': 'Reading documents on request',
 };
 
 /** Whether the spend was the agent working, or a person pressing a button. */
@@ -659,6 +675,7 @@ export const AI_FEATURE_TRIGGER: Record<AiFeature, 'agent' | 'person'> = {
   'report.narrative': 'agent',
   'prompt.run': 'person',
   'assistant.answer': 'person',
+  'document.read': 'person',
 };
 
 /**
@@ -877,6 +894,190 @@ export interface DashboardSummary {
  * general, so she needs a name people can ask for by name.
  */
 export const ASSISTANT_NAME = 'Jenny';
+
+/**
+ * What an answer is made of.
+ *
+ * The assistant used to hand back one string, which meant every answer was
+ * a paragraph: eight late orders arrived as eight clauses, and the reader
+ * had to parse prose to find the one that mattered. Worse, the reply named
+ * records the app already has screens for — a task, a project, an order —
+ * with no way to get to them, so "chase PO-1042" ended in a search box.
+ *
+ * So an answer is now a lead sentence plus the rows behind it. The lead is
+ * still the answer; the items are what it is about, each one linkable. The
+ * model fills these in by calling the `answer` tool, which is also what
+ * ends its turn — see services/assistant.ts.
+ */
+export type AssistantItemKind =
+  | 'task'
+  | 'project'
+  | 'purchase_order'
+  | 'vendor'
+  | 'email'
+  | 'document'
+  | 'draft'
+  | 'follow_up'
+  | 'person'
+  | 'report'
+  /** A file that can be handed over: an email attachment or a Drive file. */
+  | 'file'
+  /** A bare URL worth pulling out of the prose — a Canva board, a tracker. */
+  | 'link'
+  /** A line that is not a record: a figure, a step, an observation. */
+  | 'note';
+
+/** How urgently a row reads. Drives one colour, nothing else. */
+export type AssistantTone = 'neutral' | 'good' | 'warn' | 'crit';
+
+/** One labelled value on a row — a column, when rows share their labels. */
+export interface AssistantField {
+  label: string;
+  value: string;
+}
+
+/**
+ * A file the assistant found and can hand over.
+ *
+ * Carries no Gmail or Drive id. `token` is an encrypted, org-bound,
+ * expiring grant minted by the server at the moment the file was surfaced
+ * to someone allowed to see it; the download endpoint trusts that and
+ * nothing the browser could compose for itself.
+ */
+export interface AssistantFile {
+  name: string;
+  mimeType: string;
+  /** Bytes; 0 when the source did not say. */
+  size: number;
+  /** Where it lives: the studio's Gmail or Drive, or uploaded by a person into a conversation. */
+  source: 'gmail' | 'drive' | 'upload';
+  /** Opaque download grant, for GET /api/assistant/file?token=… */
+  token: string;
+  /**
+   * False when the file is too large for the API to relay (a serverless
+   * response has a hard size cap). `webUrl` is the way in instead.
+   */
+  downloadable: boolean;
+  /** The file where it lives — the Gmail message or the Drive file. */
+  webUrl: string | null;
+}
+
+export interface AssistantItem {
+  kind: AssistantItemKind;
+  /** The row's own id, exactly as a tool returned it, so the UI can link. */
+  id?: string | null;
+  title: string;
+  /** One short line under the title: the owner, the project, the amount. */
+  detail?: string | null;
+  /** The right-hand fact — "12 days late", "$4,200", "due Friday". */
+  meta?: string | null;
+  /** An external URL: a document, a Canva board, a tracking page. */
+  url?: string | null;
+  tone?: AssistantTone;
+  /**
+   * The row's facts, labelled. Filled by the server from the record itself,
+   * never transcribed by the model, so a list of twenty projects shows the
+   * database's figures rather than a retelling of them.
+   */
+  fields?: AssistantField[];
+  /** Set on `file` rows: what to download, and how. */
+  file?: AssistantFile | null;
+  /**
+   * Show the file itself, not just its name: the pages of a PDF, or an
+   * image. For a PDF the grant serves only the pages that matter, and
+   * `pages` says which pages of the original they are.
+   */
+  preview?: 'pdf' | 'image' | null;
+  pages?: number[] | null;
+}
+
+export interface AssistantAnswer {
+  /** The answer itself, in a sentence or two. Never empty. */
+  lead: string;
+  items: AssistantItem[];
+  /** How many more exist beyond `items`; 0 when the list is complete. */
+  more: number;
+  /** One clause about anything that could not be checked. */
+  caveat?: string | null;
+  /**
+   * The same answer as plain prose, for reading aloud.
+   *
+   * Kept separate because the two mediums want opposite things: a screen
+   * wants eight scannable rows, and a speaker wants one sentence naming
+   * the worst of them. Making either serve both makes both worse.
+   */
+  speech: string;
+  /** Which parts of the studio's records the answer came from. */
+  sources: string[];
+  /**
+   * What the person is likely to ask next, phrased as they would say it.
+   *
+   * An assistant that only answers leaves the person to think of the next
+   * question; a good one already has it ready. Shown as tap-to-ask chips
+   * under the latest answer. At most three.
+   */
+  suggestions?: string[];
+}
+
+/**
+ * Where the person is in the app when they ask.
+ *
+ * Sent with every question so "what is late on this one?" means the
+ * project on screen. Only the path travels: the server looks up what it
+ * names with the caller's own permissions, so a crafted path can never
+ * reveal a record the person could not already open.
+ */
+export interface AssistantPageContext {
+  path: string;
+}
+
+/** Every item kind that has somewhere to go, and where. */
+const ITEM_ROUTES: Record<AssistantItemKind, string | null> = {
+  task: '/tasks',
+  project: '/projects',
+  purchase_order: '/vendors',
+  vendor: '/vendors',
+  email: '/inbox',
+  document: '/documents',
+  draft: '/drafts',
+  follow_up: '/follow-ups',
+  person: '/team',
+  report: '/reports',
+  // A file row is its buttons — download, open — not a link to a screen.
+  file: null,
+  link: null,
+  note: null,
+};
+
+/** A uuid, so a hallucinated id never becomes a broken deep link. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Where an answer item lives in the app, or null when it has nowhere.
+ *
+ * An id is only used when it really is one: the model is asked to pass the
+ * row's id and mostly does, but a made-up "PO-1042" in that field would
+ * otherwise become a link to a page that cannot exist. Without a usable id
+ * the row still links to the screen its kind belongs on, which is always
+ * better than a dead end.
+ */
+export function assistantItemHref(item: AssistantItem): string | null {
+  if (item.kind === 'file') return null;
+  if (item.kind === 'link' || item.url) return item.url ?? null;
+
+  const base = ITEM_ROUTES[item.kind];
+  if (!base) return null;
+
+  const id = typeof item.id === 'string' && UUID.test(item.id) ? item.id : null;
+  if (!id) return base;
+
+  // Only these two can open one record: a project has its own route, and
+  // the task board opens a detail panel from ?task=. The rest land on the
+  // screen that holds them.
+  if (item.kind === 'project') return `/projects/${id}`;
+  if (item.kind === 'task') return `/tasks?task=${id}`;
+  return base;
+}
 
 // ── AI configuration ────────────────────────────────────────
 

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
-import { backfillEmailBodies, runIngest } from '../services/ingest.js';
+import { backfillEmailBodies, refileFromAttachments, runIngest } from '../services/ingest.js';
 import { autoMergeDuplicates, promoteAll, removeVendorProjects } from '../services/promote.js';
 import { importHouzzProjects } from '../services/houzz.js';
 import { runFollowUps } from '../services/followups.js';
@@ -124,6 +124,17 @@ opsRouter.post(
     const csv = typeof req.body?.csv === 'string' ? req.body.csv : '';
     if (!csv.trim()) return res.status(400).json({ error: 'No CSV content was sent' });
     res.json({ data: await importHouzzProjects(req.auth!.orgId, csv) });
+  }),
+);
+
+// File email that has no project using what its attachments already said.
+// No Claude calls; runs after every complete reading pass as well.
+opsRouter.post(
+  '/refile-emails',
+  requireRole('principal', 'coordinator'),
+  asyncHandler(async (req, res) => {
+    if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await refileFromAttachments(req.auth!.orgId) });
   }),
 );
 

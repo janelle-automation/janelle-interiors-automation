@@ -1,19 +1,69 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import {
   TASK_KINDS,
-  TASK_KIND_LABELS,
   TASK_KIND_ROLE,
-  can,
   canSupervise,
   type TaskKind,
   type UserRole,
 } from '@janelle/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { AI_FEATURE_LABELS, ASSISTANT_NAME, DEFAULT_SLA } from '@janelle/shared';
+import {
+  AI_FEATURE_LABELS,
+  ASSISTANT_NAME,
+  DEFAULT_SLA,
+  ROLE_LABELS,
+  STAGE_LABELS,
+  SEATS,
+  canManageTasks,
+  canWith,
+  type AssistantAnswer,
+  type AssistantField,
+  type AssistantItem,
+  type AssistantItemKind,
+  type AssistantPageContext,
+  type AssistantTone,
+  type PermissionOverrides,
+  type ProjectStage,
+  type Seat,
+} from '@janelle/shared';
+import type { drive_v3, gmail_v1 } from 'googleapis';
 import { createMessage, isAiReady } from './anthropic.js';
-import { hasColumn } from '../lib/columns.js';
+import {
+  ProposalError,
+  commitProposal,
+  friendlyDay,
+  matchPerson,
+  matchProject,
+  peopleOf,
+  projectsOf,
+  teamOf,
+} from './proposals.js';
+import { hasColumn, profileColumns } from '../lib/columns.js';
+import { STUDIO_TEAM, isStudioMailbox, seatRole, studioPerson } from '../lib/studioTeam.js';
 import { bodyColumnsReady, readStoredText } from '../lib/emailStore.js';
 import { env } from '../env.js';
+import { isGoogleAuthFailure, orgSourceUserId } from '../lib/tokens.js';
+import { MAX_RELAY_BYTES, openFileGrant, sealFileGrant, type FileGrant } from '../lib/fileTokens.js';
+import { FileFetchError, fetchGrantedFile } from './files.js';
+import { readDocument } from './documentReader.js';
+import {
+  addressOf,
+  getMessageWithAttachments,
+  gmailFor,
+  gmailMessageUrl,
+  linksIn,
+  searchMessages,
+} from './gmail.js';
+import {
+  downloadShape,
+  driveFor,
+  findFolderId,
+  getDriveFile,
+  readDriveText,
+  searchDriveFiles,
+  type DriveHit,
+  type DriveKind,
+} from './drive.js';
 
 export interface AssistantTurn {
   role: 'user' | 'assistant';
@@ -26,12 +76,41 @@ export interface ProposedAction {
   input: Record<string, unknown>;
 }
 
+/** A proposal shown earlier and not yet answered — the browser's own key for it. */
+export interface PendingProposal extends ProposedAction {
+  key: string;
+}
+
+/** What became of a pending proposal during this question. */
+export interface SettledProposal {
+  key: string;
+  decision: 'confirmed' | 'cancelled';
+  /** The saved row, when confirmed. */
+  id?: string | null;
+  kind?: 'task' | 'draft' | 'task_update';
+}
+
 export interface AssistantResult {
+  /**
+   * The answer as one block of text.
+   *
+   * Kept alongside the structured answer because the conversation history
+   * is a list of strings — the next question needs to know what was said,
+   * not how it was laid out — and because an error path has prose and
+   * nothing else.
+   */
   reply: string;
+  /** The same answer, laid out: a lead, the rows behind it, what it cost to find. */
+  answer: AssistantAnswer;
   /** Writes the assistant wants to make, awaiting the person's confirmation. */
   proposed: ProposedAction[];
   /** Tools actually consulted, so the UI can show its working. */
   used: string[];
+  /**
+   * Earlier proposals the person answered in words — "yes", "cancel that" —
+   * and what became of them, so the browser can mark them done.
+   */
+  settled: SettledProposal[];
 }
 
 export interface AssistantContext {
@@ -39,10 +118,134 @@ export interface AssistantContext {
   userId: string;
   orgId: string | null;
   role: UserRole | null;
+  /** The person's own name, as the studio knows them — "my tasks" depends on it. */
   name: string;
+  /** Their named seat, where one is held: finer than the role. */
+  seat?: Seat | null;
+  /** The screen they are on when they ask, so "this one" has a meaning. */
+  page?: AssistantPageContext | null;
+  /** The studio's edits to the permission matrix, applied to anything saved. */
+  permissions?: PermissionOverrides | null;
+  /** Proposals shown earlier that are still waiting for an answer. */
+  pending?: PendingProposal[];
+  /**
+   * Set when the question was spoken: every way the browser heard it, best
+   * first. Speech recognition mishears — names most of all — and the model
+   * reads the question better knowing that, and knowing the other hearings.
+   */
+  spoken?: { alternatives: string[] } | null;
+  /**
+   * Files Jenny handed over earlier in this conversation, as grants the
+   * server has already opened — so "from this PDF" can mean the one she just
+   * gave them, though a reference like F1 only lives for one question.
+   */
+  recentFiles?: { token: string; grant: FileGrant }[];
+  /** Files the person attached to this very question — their own uploads. */
+  attached?: { token: string; grant: FileGrant }[];
+}
+
+/** Where a granted file lives outside this app, when it lives anywhere else. */
+function grantWebUrl(grant: FileGrant): string | null {
+  if (grant.source === 'gmail') return gmailMessageUrl(grant.messageId);
+  if (grant.source === 'drive') return `https://drive.google.com/file/d/${grant.fileId}/view`;
+  return null;
+}
+
+/** "2.1 MB", "340 KB" — a size as it is said. */
+function sizeLabel(bytes: number): string {
+  if (!bytes) return '';
+  return bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+/** Hooks a caller can use to watch the assistant work. */
+export interface AskOptions {
+  /**
+   * Called as the work moves along — "Searching Gmail", "Putting it
+   * together" — so a person waiting sees what is happening rather than
+   * a spinner that could mean anything.
+   */
+  onStatus?: (text: string) => void;
 }
 
 const LIVE = ['open', 'in_progress', 'blocked'];
+
+// ── Per-question state ──────────────────────────────────────
+
+/**
+ * Rows the tools have shown the model, each under a short reference.
+ *
+ * When someone asks for the project list, the list has to come back as
+ * rows with every figure right. Asking the model to copy twenty projects
+ * into its answer gets neither: output is the slowest thing a model does,
+ * and a retyped uuid or a transposed amount is exactly the error nobody
+ * spots. So every row a tool returns is registered here, fully formatted,
+ * and the tool hands the model a reference — `P3`, `E1`, `F2`. The answer
+ * lists references; the server swaps each for the row it stands for.
+ */
+class RefRegistry {
+  private readonly items = new Map<string, AssistantItem>();
+  private readonly counters = new Map<string, number>();
+
+  /** Register a row and get the reference the model should use for it. */
+  add(prefix: string, item: AssistantItem): string {
+    const n = (this.counters.get(prefix) ?? 0) + 1;
+    this.counters.set(prefix, n);
+    const ref = `${prefix}${n}`;
+    this.items.set(ref, item);
+    return ref;
+  }
+
+  get(ref: string): AssistantItem | undefined {
+    return this.items.get(ref.trim().toUpperCase());
+  }
+}
+
+/**
+ * The studio's Google account, opened at most once per question.
+ *
+ * Every live tool needs a Gmail or Drive client, and building one reads and
+ * decrypts the stored grant. A question that searches, then reads, then
+ * fetches attachments would otherwise do that three times.
+ */
+class GoogleAccess {
+  private userId: Promise<string | null> | null = null;
+  private gmailClient: Promise<gmail_v1.Gmail | null> | null = null;
+  private driveClient: Promise<drive_v3.Drive | null> | null = null;
+
+  constructor(private readonly orgId: string | null) {}
+
+  private source(): Promise<string | null> {
+    this.userId ??= this.orgId ? orgSourceUserId(this.orgId) : Promise.resolve(null);
+    return this.userId;
+  }
+
+  /** Gmail, or a ToolDataError saying why not — never a silent null. */
+  async gmail(): Promise<gmail_v1.Gmail> {
+    this.gmailClient ??= this.source().then((id) => (id ? gmailFor(id) : null));
+    const client = await this.gmailClient;
+    if (!client) {
+      throw new ToolDataError('Gmail is not connected for the studio — the principal connects it in Settings → Integrations');
+    }
+    return client;
+  }
+
+  async drive(): Promise<drive_v3.Drive> {
+    this.driveClient ??= this.source().then((id) => (id ? driveFor(id) : null));
+    const client = await this.driveClient;
+    if (!client) {
+      throw new ToolDataError('Google Drive is not connected for the studio — the principal connects it in Settings → Integrations');
+    }
+    return client;
+  }
+}
+
+/** Everything a tool may touch beyond the database. */
+interface ToolSession {
+  proposed: ProposedAction[];
+  refs: RefRegistry;
+  google: GoogleAccess;
+  settled: SettledProposal[];
+}
 
 /**
  * How long one question may take before the assistant must answer with
@@ -57,6 +260,95 @@ const ASSISTANT_BUDGET_MS = Number(process.env.ASSISTANT_BUDGET_MS || 40_000);
 // invent a status. Write tools never execute here — they come back as
 // proposals a person confirms, because this is driven by voice and a
 // misheard sentence must not silently reassign someone's work.
+
+/**
+ * The tool that delivers the answer, and by delivering it ends the turn.
+ *
+ * Declared apart from the read tools because it is also offered ON ITS OWN
+ * when the clock runs out (see finalAnswer) — the one path where the shape
+ * of the answer has to be guaranteed rather than asked for.
+ */
+export const ANSWER_TOOL: Anthropic.Tool = {
+  name: 'answer',
+  description:
+    'Give your final answer. This ENDS your turn — call it exactly once, on its own, after every lookup you need is done, and never alongside another tool. Do not also write the answer as ordinary text: whatever you put here is what the person sees and hears.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      lead: {
+        type: 'string',
+        description:
+          'The answer itself, in one or two sentences of plain prose. Lead with it — never with what you checked or could not do. No markdown, no headings, no bullet characters; the rows go in items.',
+      },
+      items: {
+        type: 'array',
+        description:
+          'The records the answer is about, one entry each — the projects, the late orders, the overdue tasks, the files. Leave it empty when the answer is simply a sentence. At most 25; put the count of the rest in `more`.',
+        items: {
+          type: 'object',
+          properties: {
+            ref: {
+              type: 'string',
+              description:
+                'The `ref` a tool gave this row ("P3", "F1"). PREFER THIS: a ref alone is a complete row — the server fills in the title, every figure and, for a file, the download — so send { "ref": "P3" } and add only meta or tone if you have judgement to add. Only write out kind and title for something no tool gave a ref.',
+            },
+            kind: {
+              type: 'string',
+              enum: [
+                'task', 'project', 'purchase_order', 'vendor', 'email', 'document',
+                'draft', 'follow_up', 'person', 'report', 'file', 'link', 'note',
+              ],
+              description:
+                "What this row IS, so it can be linked to its screen. Not needed with a ref. Use 'link' for a bare URL and 'note' only for a line that is not a record at all.",
+            },
+            id: {
+              type: 'string',
+              description:
+                'The row id EXACTLY as the tool returned it. This is what makes the row openable — pass it whenever you have it, and omit it rather than inventing one.',
+            },
+            title: { type: 'string', description: 'What it is, in a few words. No trailing punctuation.' },
+            detail: { type: 'string', description: 'One short line: the owner, the project, the amount.' },
+            meta: {
+              type: 'string',
+              description: 'The single fact that matters most — "12 days late", "$4,200", "due Friday". Keep it under 30 characters.',
+            },
+            url: { type: 'string', description: 'The URL, when this row is a link or a document that can be opened.' },
+            tone: {
+              type: 'string',
+              enum: ['neutral', 'good', 'warn', 'crit'],
+              description: "How it reads: 'crit' for a client left waiting or a real breach, 'warn' for slipping, 'good' for settled.",
+            },
+          },
+          // Nothing is required: a row is EITHER a ref, or a kind and a
+          // title. JSON Schema cannot say "one of" in a way every model
+          // honours, so toItem() enforces it instead.
+          required: [],
+        },
+      },
+      more: {
+        type: 'number',
+        description: 'How many further rows exist beyond the ones listed. 0 when the list is complete.',
+      },
+      caveat: {
+        type: 'string',
+        description:
+          'One clause about anything you could not check, and only when something genuinely failed. Never use it to hedge an answer you do have.',
+      },
+      speech: {
+        type: 'string',
+        description:
+          'The same answer as one or two sentences to be read ALOUD. No lists, no ids, no URLs — name the worst one or two and say how many others there are. This is what a person hears when they are driving. Write only words a person would say: no dashes, slashes, bullets, brackets, quotation marks, hashes or asterisks, and nothing abbreviated that would be read letter by letter.',
+      },
+      suggestions: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'Up to three things the person is likely to want next, written as THEY would say them — "Draft a chase to Ashcroft Mill", "Which of these is the client waiting on?". Each must be something you can actually do with your tools, and specific to this answer, not generic. Under 60 characters each.',
+      },
+    },
+    required: ['lead', 'speech'],
+  },
+};
 
 const TOOLS: Anthropic.Tool[] = [
   {
@@ -104,7 +396,7 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'list_team',
-    description: 'The people in the studio and their roles, with how many live tasks each is carrying.',
+    description: 'The people in the studio: seat, role, email and how many live tasks each is carrying — including teammates who have no account yet, and which inboxes are shared rather than a person.',
     input_schema: { type: 'object', properties: {} },
   },
   {
@@ -128,6 +420,10 @@ const TOOLS: Anthropic.Tool[] = [
           description: 'Limit to one kind of email.',
         },
         days: { type: 'number', description: 'Only messages received in the last N days.' },
+        without_task: {
+          type: 'boolean',
+          description: 'Only email that has NO task yet — for "which new emails still need a task?", or to find the one they want a task raised from.',
+        },
       },
     },
   },
@@ -150,13 +446,17 @@ const TOOLS: Anthropic.Tool[] = [
     input_schema: {
       type: 'object',
       properties: {
-        project: { type: 'string', description: 'Limit to one project by name (substring).' },
-        vendor: { type: 'string', description: 'Limit to documents from one vendor (substring).' },
+        project: { type: 'string', description: 'Limit to one project by name. Only when you KNOW it is a project.' },
+        vendor: { type: 'string', description: 'Limit to documents from one vendor. Only when you KNOW it is a vendor.' },
         type: {
           type: 'string',
           enum: ['quote', 'purchase_order', 'order_confirmation', 'other'],
         },
-        search: { type: 'string', description: 'Match a PO number or vendor name.' },
+        search: {
+          type: 'string',
+          description:
+            'Words to match against the vendor, PO number, client, project and kind of document — every word must match somewhere. Use THIS for a name when you are not sure whether it is a vendor, a client or a project.',
+        },
       },
     },
   },
@@ -264,21 +564,692 @@ const TOOLS: Anthropic.Tool[] = [
   {
     name: 'propose_task',
     description:
-      'Propose creating a new task. Does NOT create it — the person confirms first. Use when the user asks for something to be done or delegated.',
+      'Prepare a new task for the Tasks board of this system — the task list, the task module, "the board". Does NOT save it: the person confirms by saying yes or pressing Confirm, and respond_to_proposal saves it. Use when asked for something to be done, added to the list, or delegated. Names are matched to the team for you; if the person cannot be matched you are told to ask.',
     input_schema: {
       type: 'object',
       properties: {
         title: { type: 'string', description: 'Imperative, names the counterparty. Max 80 chars.' },
         detail: { type: 'string' },
         kind: { type: 'string', enum: [...TASK_KINDS] },
-        assignee_name: { type: 'string', description: 'Who should own it. Omit to assign by role.' },
+        assignee_name: { type: 'string', description: 'Who should own it, as said — spelling slips are matched. Omit to route it by role.' },
         project: { type: 'string' },
-        due_date: { type: 'string', description: 'ISO date YYYY-MM-DD.' },
+        due_date: { type: 'string', description: 'ISO date YYYY-MM-DD, worked out from what they said ("Friday", "end of next week").' },
+        email_id: {
+          type: 'string',
+          description:
+            'When the task comes from an email, the id of that email from search_email or read_email. It links the task to the email and brings its project and vendor with it.',
+        },
+        next_step: { type: 'string', description: 'The single concrete next action, in a few words.' },
       },
       required: ['title', 'kind'],
     },
   },
+
+  // ── Live Gmail and Drive ──────────────────────────────────
+  // The tools above read what ingestion stored: the last few days of mail,
+  // classified and linked to projects. These read the studio's Google
+  // account itself — any message, any attachment, any file, however old.
+  {
+    name: 'find_attachments',
+    description:
+      'Find email attachments in the studio\'s LIVE Gmail and hand them over as files. Use this whenever someone asks for an attachment, a file someone sent, "the PDF from X", "the drawings Brianna emailed", "the photos the client sent". One call searches and returns every matching file, each with a ref — put those refs in your answer and the person gets Download and Open buttons. Searches the whole mailbox, not just recent mail.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        search: {
+          type: 'string',
+          description: 'Words to match: a project, a subject, what the file is. Gmail search operators work too.',
+        },
+        from: { type: 'string', description: 'Sender name or address.' },
+        filename: { type: 'string', description: 'Part of the file name, or a type such as "pdf", "xlsx", "jpg".' },
+        days: { type: 'number', description: 'Only mail from the last N days.' },
+      },
+    },
+  },
+  {
+    name: 'gmail_search',
+    description:
+      'Search the studio\'s LIVE Gmail — the whole mailbox, including old mail and anything never ingested. Use when search_email (stored mail only) finds nothing, or the question is about older mail, sent mail, or a specific thread. Returns message summaries with a message_id for gmail_read.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description:
+            'Gmail search syntax: from:, to:, subject:, has:attachment, filename:, newer_than:7d, older_than:, in:sent, "exact phrase". Plain words work too.',
+        },
+        max: { type: 'number', description: 'At most this many messages (default 10, max 20).' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'gmail_read',
+    description:
+      'Read one message from LIVE Gmail in full: the text, every link, and EVERY attachment of any type, each returned as a file with a ref. Pass a message_id from gmail_search.',
+    input_schema: {
+      type: 'object',
+      properties: { message_id: { type: 'string', description: 'The message_id from gmail_search.' } },
+      required: ['message_id'],
+    },
+  },
+  {
+    name: 'drive_search',
+    description:
+      'Search the studio\'s Google Drive — any file, by name AND by what is written inside it. Use for drawings, finish schedules, spreadsheets, proposals, photos, contracts: "the Harborview floor plan", "our latest price list". Every file comes back with a ref for handing it over.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        search: { type: 'string', description: 'Words in the file name or its contents.' },
+        kind: {
+          type: 'string',
+          enum: ['pdf', 'image', 'document', 'spreadsheet', 'presentation', 'folder'],
+          description: 'Only files of this kind.',
+        },
+        folder: { type: 'string', description: 'Only inside the folder with this name.' },
+        max: { type: 'number', description: 'At most this many files (default 10, max 25).' },
+      },
+    },
+  },
+  {
+    name: 'drive_read',
+    description:
+      'Read what a Drive file SAYS — a Google Doc, a Sheet (as CSV) or a text file — to answer questions about its contents. Pass a file_id from drive_search. A PDF or image cannot be read this way; hand it over as a file instead.',
+    input_schema: {
+      type: 'object',
+      properties: { file_id: { type: 'string', description: 'The file_id from drive_search.' } },
+      required: ['file_id'],
+    },
+  },
+  {
+    name: 'propose_draft',
+    description:
+      'Prepare an email for someone to send. Does NOT send it, and does not save it until the person confirms — it then lands in Drafts, where they review it and open it in Gmail. Use when asked to write, reply to or draft an email.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: 'Recipient address(es), comma-separated.' },
+        cc: { type: 'string', description: 'Cc address(es), comma-separated.' },
+        subject: { type: 'string' },
+        body: { type: 'string', description: 'The message itself, in plain text, signed off as the studio.' },
+      },
+      required: ['subject', 'body'],
+    },
+  },
+  {
+    name: 'respond_to_proposal',
+    description:
+      'Save or drop something you prepared EARLIER, now that the person has answered it. When their message agrees — "yes", "confirmed", "go ahead", "add it", "do it", "yes and add it to the list", typed or spoken — call this with decision "confirm" FIRST, before anything else they asked. When they decline — "no", "cancel", "leave it" — use "cancel". If they want it changed ("yes but make it Monday"), do not confirm: prepare it again with the change and cancel the old one. Only the proposals listed as waiting can be answered; one prepared in this same reply cannot, because the person has not seen it.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        proposal: { type: 'string', description: 'Which waiting proposal: "#1", "#2"…' },
+        decision: { type: 'string', enum: ['confirm', 'cancel'] },
+      },
+      required: ['proposal', 'decision'],
+    },
+  },
+  {
+    name: 'read_document',
+    description:
+      'Read what a PDF or an image SAYS and SHOWS, to answer a question about its contents — "from this PDF give me the living room furniture and decor", "what finishes are in the Lemon proposal", "what does page 4 show". Pass the file ref (F1, F2…) of a file already in the conversation or one you just found with find_attachments, search_documents, read_email or drive_search. Returns the answer, the individual findings, and a ref that shows the relevant pages themselves as images — put that ref in items.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', description: 'The file ref, e.g. "F1".' },
+        question: { type: 'string', description: 'What to find in it, in the person’s own terms.' },
+      },
+      required: ['file', 'question'],
+    },
+  },
+  {
+    name: 'propose_task_update',
+    description:
+      'Prepare a change to a task ALREADY on the board: give it an owner, set or move its due date, change its status, or set its next step. Like propose_task it saves nothing until the person says yes or presses Confirm. Use it for "assign that to Denish", "make it due Friday", "mark it done" — and when an email they want a task for already has one.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'The task id, from list_tasks, search_email or read_email.' },
+        assignee_name: { type: 'string', description: 'The new owner, as said — spelling slips are matched.' },
+        due_date: { type: 'string', description: 'The new due date, ISO YYYY-MM-DD.' },
+        status: { type: 'string', enum: ['open', 'in_progress', 'blocked', 'done', 'cancelled'] },
+        next_step: { type: 'string' },
+      },
+      required: ['task_id'],
+    },
+  },
+  ANSWER_TOOL,
 ];
+
+/**
+ * Tools that act as the studio's Google account rather than as the person
+ * asking.
+ *
+ * Everything else runs on the caller's own database client, so row-level
+ * security decides what they see. These cannot: Gmail and Drive see the
+ * whole account — the principal's own — which holds far more than studio
+ * work, and reads in this system are open to every role by design. So the
+ * live tools are held to the roles that already read the full audit trail.
+ * Everyone else still gets attachments from mail and documents they can
+ * already see, through read_email and search_documents.
+ */
+const LIVE_GOOGLE_TOOLS = ['find_attachments', 'gmail_search', 'gmail_read', 'drive_search', 'drive_read'];
+
+/** What each tool reads, in the studio's words, for "Checked:" under an answer. */
+const TOOL_SOURCES: Record<string, string> = {
+  list_projects: 'projects',
+  get_project_status: 'projects',
+  list_tasks: 'tasks',
+  propose_task: 'tasks',
+  respond_to_proposal: 'tasks',
+  propose_task_update: 'tasks',
+  read_document: 'the document',
+  list_team: 'the team',
+  get_today: "today's digest",
+  search_email: 'email',
+  read_email: 'email',
+  search_documents: 'documents',
+  list_vendors: 'vendors',
+  list_purchase_orders: 'purchase orders',
+  list_follow_ups: 'follow-ups',
+  list_drafts: 'drafts',
+  list_spec_gaps: 'spec gaps',
+  get_weekly_report: 'the weekly report',
+  get_studio_rules: "the studio's rules",
+  get_recent_activity: 'the audit log',
+  get_ai_spend: 'AI spend',
+  find_attachments: 'Gmail',
+  gmail_search: 'Gmail',
+  gmail_read: 'Gmail',
+  drive_search: 'Google Drive',
+  drive_read: 'Google Drive',
+  propose_draft: 'drafts',
+};
+
+/** What each tool is doing, said the way a person would say it while they work. */
+const TOOL_STATUS: Record<string, string> = {
+  list_projects: 'Looking through the projects',
+  get_project_status: 'Pulling up the project',
+  list_tasks: 'Checking the task board',
+  list_team: 'Checking who is carrying what',
+  get_today: "Reading this morning's digest",
+  search_email: 'Looking through the stored email',
+  read_email: 'Reading the email',
+  search_documents: 'Looking through the documents',
+  list_vendors: 'Checking the vendors',
+  list_purchase_orders: 'Checking the purchase orders',
+  list_follow_ups: 'Checking the follow-ups',
+  list_drafts: 'Checking the drafts',
+  list_spec_gaps: 'Checking the spec gaps',
+  get_weekly_report: 'Reading the weekly report',
+  get_studio_rules: "Checking the studio's rules",
+  get_recent_activity: 'Reading the audit log',
+  get_ai_spend: 'Adding up the AI spend',
+  find_attachments: 'Searching Gmail for attachments',
+  gmail_search: 'Searching Gmail',
+  gmail_read: 'Reading the message in Gmail',
+  drive_search: 'Searching Google Drive',
+  drive_read: 'Reading the file in Drive',
+  propose_task: 'Preparing the task',
+  respond_to_proposal: 'Saving it',
+  propose_task_update: 'Preparing the change',
+  read_document: 'Reading the document',
+  propose_draft: 'Writing the draft',
+};
+
+// ── Shaping the answer ──────────────────────────────────────
+
+const ITEM_KINDS: AssistantItemKind[] = [
+  'task', 'project', 'purchase_order', 'vendor', 'email', 'document',
+  'draft', 'follow_up', 'person', 'report', 'file', 'link', 'note',
+];
+const TONES: AssistantTone[] = ['neutral', 'good', 'warn', 'crit'];
+
+/**
+ * At most this many rows reach the screen; the rest are counted in `more`.
+ *
+ * Enough for a studio's whole project list in one answer. It used to be
+ * eight, when every row was typed out by the model and each one cost
+ * seconds; a ref costs a handful of tokens, so the list can be the list.
+ */
+const MAX_ITEMS = 25;
+
+const text = (v: unknown, max: number): string =>
+  typeof v === 'string' ? v.trim().replace(/\s+/g, ' ').slice(0, max) : '';
+
+/** Optional text: empty becomes null, so the UI can test one thing. */
+const maybe = (v: unknown, max: number): string | null => text(v, max) || null;
+
+/**
+ * Only a real, absolute web address.
+ *
+ * A URL is the one field here that gets clicked, so a `javascript:` or
+ * `data:` string reaching the page would be an injection through whatever
+ * an email happened to contain. Anything that is not plainly http(s) is
+ * dropped rather than rendered.
+ */
+function safeUrl(v: unknown): string | null {
+  const raw = text(v, 2000);
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One row of an answer, clamped to what the layout can actually hold.
+ *
+ * A row with a known `ref` is the registered record, exactly: its title,
+ * its figures, its file. The model may add judgement on top — a `meta`
+ * like "worst", a tone — but never replaces the facts, because the facts
+ * are the reason the ref exists. A ref the registry has never seen is
+ * dropped rather than rendered as a row of nothing: it was invented.
+ */
+function toItem(raw: unknown, refs?: RefRegistry): AssistantItem | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+
+  const tone = TONES.includes(r.tone as AssistantTone) ? (r.tone as AssistantTone) : undefined;
+
+  const ref = text(r.ref, 16);
+  if (ref) {
+    const known = refs?.get(ref);
+    if (!known) return null;
+    return {
+      ...known,
+      detail: maybe(r.detail, 160) ?? known.detail ?? null,
+      meta: maybe(r.meta, 40) ?? known.meta ?? null,
+      tone: tone ?? known.tone ?? 'neutral',
+    };
+  }
+
+  const title = text(r.title, 120);
+  if (!title) return null;
+
+  const kind = ITEM_KINDS.includes(r.kind as AssistantItemKind)
+    ? (r.kind as AssistantItemKind)
+    : 'note';
+
+  // A file with no ref has no grant behind it, so it cannot be downloaded;
+  // it is shown as what it is — a named thing — rather than as a broken
+  // button.
+  return {
+    kind: kind === 'file' ? 'note' : kind,
+    id: maybe(r.id, 64),
+    title,
+    detail: maybe(r.detail, 160),
+    meta: maybe(r.meta, 40),
+    url: safeUrl(r.url),
+    tone: tone ?? 'neutral',
+  };
+}
+
+/**
+ * Turn what the model passed to `answer` into the answer the app renders.
+ *
+ * Everything here is defensive on purpose: this is the one place a tool
+ * input becomes a screen, and a missing `lead` or a forty-row list would
+ * otherwise be the person's problem rather than ours.
+ */
+function toAnswer(input: Record<string, unknown>, used: string[], refs?: RefRegistry): AssistantAnswer {
+  const all = Array.isArray(input.items)
+    ? input.items.map((i) => toItem(i, refs)).filter((i): i is AssistantItem => i !== null)
+    : [];
+  const items = all.slice(0, MAX_ITEMS);
+
+  // Trust the model's own count only as far as it goes past what we cut.
+  // It reports what it left out; we also left some out, and the reader
+  // needs the total of both.
+  const claimed = Number(input.more);
+  const dropped = all.length - items.length;
+  const more = Math.max(0, dropped + (Number.isFinite(claimed) && claimed > 0 ? Math.floor(claimed) : 0));
+
+  const lead = text(input.lead, 800) || 'I could not put that into words — ask me again?';
+  // Falling back to the lead is right: an answer that is never spoken is
+  // better than one that is spoken as an empty string.
+  const speech = text(input.speech, 900) || lead;
+
+  return {
+    lead,
+    items,
+    more,
+    caveat: maybe(input.caveat, 240),
+    speech,
+    sources: sourcesOf(used),
+    suggestions: cleanSuggestions(input.suggestions),
+  };
+}
+
+/** At most three distinct, short, plain questions. */
+function cleanSuggestions(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of raw) {
+    const q = text(s, 80).replace(/^[-•*\d.)\s]+/, '');
+    const key = q.toLowerCase();
+    if (!q || seen.has(key)) continue;
+    seen.add(key);
+    out.push(q);
+    if (out.length === 3) break;
+  }
+  return out;
+}
+
+/** The distinct records consulted, in the order they were first read. */
+function sourcesOf(used: string[]): string[] {
+  const out: string[] = [];
+  for (const name of used) {
+    const label = TOOL_SOURCES[name];
+    if (label && !out.includes(label)) out.push(label);
+  }
+  return out;
+}
+
+/**
+ * An answer built from ordinary text, for when the model replies without
+ * calling `answer`.
+ *
+ * It still happens — a one-word greeting, a clarifying question — and the
+ * UI must never be handed a half-empty answer. Lines that were written as
+ * a list become rows, so even the fallback is laid out rather than run
+ * together as a paragraph.
+ */
+function answerFromText(reply: string, used: string[]): AssistantAnswer {
+  const lines = reply.split('\n').map((l) => l.trim()).filter(Boolean);
+  const bullet = /^[-*•]\s+/;
+
+  const lead = lines.filter((l) => !bullet.test(l)).join(' ');
+  const items = lines
+    .filter((l) => bullet.test(l))
+    .slice(0, MAX_ITEMS)
+    .map((l) => {
+      const body = l.replace(bullet, '');
+      const url = body.match(/https?:\/\/\S+/)?.[0] ?? null;
+      return toItem({
+        kind: url ? 'link' : 'note',
+        title: url ? body.replace(url, '').replace(/[—–-]\s*$/, '').trim() || url : body,
+        url,
+      });
+    })
+    .filter((i): i is AssistantItem => i !== null);
+
+  // Three fallbacks deep, because an empty bubble is the one outcome the
+  // screen cannot render: the prose without its list, then the whole
+  // thing, then something rather than nothing.
+  const headline = text(lead, 800) || text(reply, 800) || 'I do not have an answer for that one.';
+  const spoken = lines.map((l) => l.replace(bullet, '')).join('. ');
+
+  return {
+    lead: headline,
+    items,
+    more: 0,
+    caveat: null,
+    speech: text(spoken, 900) || headline,
+    sources: sourcesOf(used),
+  };
+}
+
+/** The answer, flattened back to the one string the history stores. */
+function answerToText(answer: AssistantAnswer): string {
+  const rows = answer.items.map((i) => {
+    const right = [i.detail, i.meta].filter(Boolean).join(' · ');
+    return `- ${i.title}${right ? ` — ${right}` : ''}${i.url ? `\n  ${i.url}` : ''}`;
+  });
+  if (answer.more > 0) rows.push(`- …and ${answer.more} more`);
+
+  return [answer.lead, rows.join('\n'), answer.caveat].filter(Boolean).join('\n\n');
+}
+
+// ── Rows, formatted once ────────────────────────────────────
+// Each record type is laid out in exactly one place, so a project reads the
+// same whether it came from "list our projects" or "what is on order", and
+// a list of them lines up as a table because every row carries the same
+// labels in the same order.
+
+const usd = (n: number | null | undefined) =>
+  n === null || n === undefined || !Number.isFinite(Number(n))
+    ? '—'
+    : `$${Math.round(Number(n)).toLocaleString('en-US')}`;
+
+/** "Sep 12", or "Sep 12, 2025" when it is not this year. */
+function day(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  // A bare date is a calendar day, not an instant: read at noon UTC so no
+  // timezone can move it to the day before.
+  const d = new Date(iso.length === 10 ? `${iso}T12:00:00Z` : iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  const sameYear = d.getUTCFullYear() === new Date().getUTCFullYear();
+  return d.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    ...(sameYear ? {} : { year: 'numeric' }),
+    timeZone: 'UTC',
+  });
+}
+
+function bytes(n: number): string {
+  if (!n) return '—';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+const daysSince = (isoDay: string) =>
+  Math.floor((Date.now() - new Date(`${isoDay}T12:00:00Z`).getTime()) / 86400_000);
+
+const field = (label: string, value: string | null | undefined): AssistantField => ({
+  label,
+  value: value && String(value).trim() ? String(value) : '—',
+});
+
+/** What a file is, in the words a person uses for it. */
+function fileKind(name: string, mimeType: string): string {
+  const native: Record<string, string> = {
+    'application/vnd.google-apps.document': 'Google Doc',
+    'application/vnd.google-apps.spreadsheet': 'Google Sheet',
+    'application/vnd.google-apps.presentation': 'Google Slides',
+    'application/vnd.google-apps.drawing': 'Google Drawing',
+    'application/vnd.google-apps.folder': 'Folder',
+  };
+  if (native[mimeType]) return native[mimeType];
+  const ext = name.match(/\.([a-z0-9]{1,5})$/i)?.[1];
+  if (ext) return ext.toUpperCase();
+  return mimeType.split('/')[1]?.toUpperCase() ?? 'File';
+}
+
+function projectRow(p: {
+  id: string; name: string; client_name: string | null; stage: string; status: string;
+  target_install: string | null; on_order: number; open_pos: number; spec_gaps: number;
+}): AssistantItem {
+  return {
+    kind: 'project',
+    id: p.id,
+    title: p.name,
+    fields: [
+      field('Client', p.client_name),
+      field('Stage', STAGE_LABELS[p.stage as ProjectStage] ?? p.stage),
+      field('Install', day(p.target_install)),
+      field('On order', p.on_order ? usd(p.on_order) : '—'),
+      // "Open orders", not "Open POs": column labels are set in capitals, and
+      // "OPEN POS" reads as a word that is not there.
+      field('Open orders', String(p.open_pos)),
+    ],
+    // Only when it says something: an active project is the normal case.
+    meta: p.status === 'on_hold' ? 'On hold' : p.status === 'archived' ? 'Archived' : null,
+    tone: p.spec_gaps > 0 ? 'warn' : 'neutral',
+  };
+}
+
+export function taskRow(t: {
+  id: string; title: string; status: string; due_date: string | null;
+  owner: string; project: string | null;
+}): AssistantItem {
+  const today = new Date().toISOString().slice(0, 10);
+  const late = Boolean(t.due_date && t.due_date < today && LIVE.includes(t.status));
+  return {
+    kind: 'task',
+    id: t.id,
+    title: t.title,
+    fields: [
+      field('Owner', t.owner),
+      field('Project', t.project),
+      field('Due', day(t.due_date)),
+      field('Status', t.status.replace(/_/g, ' ')),
+    ],
+    meta: late && t.due_date ? `${daysSince(t.due_date)}d late` : null,
+    tone: t.status === 'blocked' ? 'crit' : late ? 'warn' : 'neutral',
+  };
+}
+
+export function purchaseOrderRow(p: {
+  id: string; po: string | null; vendor: string; project: string; amount: number | null;
+  expected: string | null; status: string; late: boolean;
+}): AssistantItem {
+  return {
+    kind: 'purchase_order',
+    id: p.id,
+    title: p.po ?? 'PO without a number',
+    fields: [
+      field('Vendor', p.vendor),
+      field('Project', p.project),
+      field('Amount', usd(p.amount)),
+      field('ETA', day(p.expected)),
+      field('Status', p.status.replace(/_/g, ' ')),
+    ],
+    meta: p.late && p.expected ? `${daysSince(p.expected)}d late` : null,
+    tone: p.late ? 'warn' : p.status === 'received' ? 'good' : 'neutral',
+  };
+}
+
+function personRow(p: {
+  id: string | null; name: string; email: string | null; role: UserRole | null;
+  seat: Seat | null; live_tasks: number; has_account: boolean;
+}): AssistantItem {
+  return {
+    kind: 'person',
+    ...(p.id ? { id: p.id } : {}),
+    title: p.name,
+    ...(p.has_account ? {} : { meta: 'No account yet', tone: 'warn' as const }),
+    fields: [
+      field('Seat', p.seat ? SEATS[p.seat].label : null),
+      field('Role', p.role ? ROLE_LABELS[p.role] : null),
+      field('Email', p.email),
+      field('Live tasks', p.has_account ? String(p.live_tasks) : null),
+    ],
+  };
+}
+
+function vendorRow(v: {
+  id: string; name: string; category: string | null; contacts: unknown;
+  open_orders: number; on_order: number;
+}): AssistantItem {
+  const first = Array.isArray(v.contacts) ? (v.contacts[0] as { email?: string; name?: string } | undefined) : undefined;
+  return {
+    kind: 'vendor',
+    id: v.id,
+    title: v.name,
+    fields: [
+      field('Category', v.category),
+      field('Contact', first?.email ?? first?.name ?? null),
+      field('Open orders', String(v.open_orders)),
+      field('On order', v.on_order ? usd(v.on_order) : '—'),
+    ],
+  };
+}
+
+/**
+ * A download grant, or null when one cannot be minted.
+ *
+ * Minting needs TOKEN_ENCRYPTION_KEY. Without it the row is still shown,
+ * with its link to Gmail or Drive — a missing key is a setup gap, and it
+ * should cost the button, not the answer.
+ */
+function grant(seal: () => string): string | null {
+  try {
+    return seal();
+  } catch (err) {
+    console.error('[assistant] could not mint a file grant:', (err as Error).message);
+    return null;
+  }
+}
+
+/** An email attachment, ready to hand over. */
+function gmailFileRow(
+  orgId: string,
+  messageId: string,
+  att: { filename: string; mimeType: string; attachmentId: string; size: number },
+  context: { from?: string | null; subject?: string | null; receivedAt?: string | null },
+): AssistantItem {
+  const token = grant(() =>
+    sealFileGrant({
+      source: 'gmail',
+      orgId,
+      messageId,
+      attachmentId: att.attachmentId,
+      name: att.filename,
+      mimeType: att.mimeType,
+    }),
+  );
+  const webUrl = gmailMessageUrl(messageId);
+  const sender = context.from ? addressOf(context.from) : null;
+  return {
+    kind: 'file',
+    title: att.filename,
+    detail: [sender && `From ${sender}`, context.subject].filter(Boolean).join(' · ') || null,
+    fields: [
+      field('Type', fileKind(att.filename, att.mimeType)),
+      field('Size', bytes(att.size)),
+      field('Received', day(context.receivedAt)),
+    ],
+    file: token
+      ? {
+          name: att.filename,
+          mimeType: att.mimeType,
+          size: att.size,
+          source: 'gmail',
+          token,
+          downloadable: !att.size || att.size <= MAX_RELAY_BYTES,
+          webUrl,
+        }
+      : null,
+    url: token ? null : webUrl,
+  };
+}
+
+/** A Drive file, ready to hand over — exported first if it is a Google Doc or Sheet. */
+function driveFileRow(orgId: string, hit: DriveHit): AssistantItem {
+  const shape = downloadShape(hit.name, hit.mimeType);
+  const token = grant(() =>
+    sealFileGrant({ source: 'drive', orgId, fileId: hit.id, mimeType: hit.mimeType, name: hit.name }),
+  );
+  return {
+    kind: 'file',
+    title: hit.name,
+    fields: [
+      field('Type', fileKind(hit.name, hit.mimeType)),
+      field('Size', bytes(hit.size)),
+      field('Modified', day(hit.modifiedTime)),
+    ],
+    file: token
+      ? {
+          name: shape.name,
+          mimeType: shape.mimeType,
+          size: hit.size,
+          source: 'drive',
+          token,
+          // An export has no size until it is made; let it try, and the
+          // endpoint says so if it turns out too large.
+          downloadable: shape.exported || !hit.size || hit.size <= MAX_RELAY_BYTES,
+          webUrl: hit.webViewLink,
+        }
+      : null,
+    url: token ? null : hit.webViewLink,
+  };
+}
 
 // ── Tool implementations ────────────────────────────────────
 
@@ -299,6 +1270,18 @@ const ilike = (s: string) => `%${s.replace(/[%_]/g, '')}%`;
  * Capped at four words so one rambling question cannot build a query of
  * unbounded size.
  */
+/**
+ * Words a request for a document is wrapped in, which say nothing about
+ * WHICH document. "Send me the PDF attachment of the quote from Ashcroft"
+ * is about Ashcroft and a quote; the rest would fail every match.
+ */
+const DOCUMENT_FILLER = new Set([
+  'the', 'a', 'an', 'of', 'for', 'from', 'to', 'on', 'by', 'me', 'my', 'our', 'us', 'please',
+  'send', 'get', 'find', 'show', 'give', 'copy', 'latest', 'last', 'recent', 'new',
+  'file', 'files', 'pdf', 'pdfs', 'document', 'documents', 'doc', 'docs',
+  'attachment', 'attachments', 'attached', 'email', 'emailed',
+]);
+
 function searchWords(phrase: string): string[] {
   return phrase
     .split(/\s+/)
@@ -333,6 +1316,33 @@ function matchPhrase<T>(query: T, phrase: string, columns: string[]): T {
  */
 class ToolDataError extends Error {}
 
+/**
+ * A call to Google, with every failure made into one the model must report.
+ *
+ * Google fails in ways a database does not — a revoked grant, a message
+ * deleted since it was listed, a shared drive someone lost access to — and
+ * each of those, left to throw, reaches the model as "Error: …" that it is
+ * free to read as "nothing found". Worded here as what happened and what
+ * fixes it.
+ */
+async function googleCall<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err instanceof ToolDataError) throw err;
+    if (isGoogleAuthFailure(err)) {
+      throw new ToolDataError(
+        "Google needs reconnecting — the studio's grant was revoked or has expired, and the principal reconnects it in Settings → Integrations",
+      );
+    }
+    const e = err as { code?: number | string; status?: number; message?: string };
+    const status = Number(e.code ?? e.status);
+    if (status === 404) throw new ToolDataError('That message or file no longer exists in Google');
+    if (status === 403) throw new ToolDataError(`Google refused access (${e.message ?? 'permission denied'})`);
+    throw new ToolDataError(`Could not reach Google (${e.message ?? 'unknown error'})`);
+  }
+}
+
 async function rows<T = Record<string, unknown>>(
   q: PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
   what: string,
@@ -351,13 +1361,199 @@ async function maybeRow<T = Record<string, unknown>>(
   return data;
 }
 
+/** The task each email raised, if any — by email id. */
+async function tasksForEmails(
+  db: SupabaseClient,
+  ids: string[],
+): Promise<Map<string, { task_id: string; title: string; owner: string; due: string | null; status: string }>> {
+  const out = new Map<string, { task_id: string; title: string; owner: string; due: string | null; status: string }>();
+  if (!ids.length) return out;
+  const { data } = await db
+    .from('tasks')
+    .select('id, title, status, due_date, source_email_id, profiles(full_name)')
+    .in('source_email_id', ids.slice(0, 100));
+  for (const row of (data ?? []) as unknown as {
+    id: string; title: string; status: string; due_date: string | null; source_email_id: string;
+    profiles: { full_name: string | null } | null;
+  }[]) {
+    out.set(row.source_email_id, {
+      task_id: row.id,
+      title: row.title,
+      owner: row.profiles?.full_name ?? 'nobody',
+      due: row.due_date,
+      status: row.status,
+    });
+  }
+  return out;
+}
+
+/**
+ * Documents already in the system — parsed quotes and order confirmations,
+ * from Drive and from email attachments — each handed over as a file.
+ *
+ * Runs on the caller's own database client, so it is open to every role
+ * that can see documents, and it needs no live Google search to FIND a file.
+ * That is why find_attachments falls back to it: a Gmail grant that needs
+ * reconnecting should cost the search of old mail, not the quote that is
+ * already sitting here.
+ */
+async function findStoredDocuments(
+  ctx: AssistantContext,
+  refs: RefRegistry,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const { db } = ctx;
+    let q = db
+      .from('documents')
+      .select('id, type, parsed_json, confidence, created_at, drive_file_id, projects(name)')
+      .order('created_at', { ascending: false })
+      .limit(40);
+    if (input.type) q = q.eq('type', String(input.type));
+
+    let list = (await rows(q, 'documents')) as unknown as {
+      id: string; type: string; confidence: number | null; created_at: string;
+      drive_file_id: string | null;
+      parsed_json: {
+        vendor?: string | null; po_number?: string | null; total?: number | null;
+        client?: string | null; eta?: string | null; order_date?: string | null;
+        line_items?: { description: string; qty: number; unit_price: number | null }[];
+      } | null;
+      projects: { name: string } | null;
+    }[];
+
+    // Matched word by word, not as one phrase. The phrase had to appear
+    // whole inside the vendor name or PO number, so "Ashcroft Mill quote"
+    // — the way anyone actually asks — found nothing, because "quote" is
+    // not part of the vendor's name. The assistant then said the vendor
+    // did not exist. Every meaningful word must appear somewhere in what
+    // the document is; the words people wrap a request in are ignored.
+    // Filler goes BEFORE the cap: capped first, "send me the Ashcroft Mill
+    // quote" kept send, me, the, ashcroft and threw the useful words away.
+    const wordsOf = (v: unknown) =>
+      String(v ?? '')
+        .toLowerCase()
+        .split(/\s+/)
+        .map((w) => w.replace(/[,.?!;:"()]/g, ''))
+        .filter((w) => w.length >= 2 && !DOCUMENT_FILLER.has(w))
+        .slice(0, 6);
+
+    // "quotes" should find a quote, and "Ashcroft Mills" the Ashcroft Mill.
+    const hasWord = (hay: string, w: string) =>
+      hay.includes(w) || (w.length > 3 && w.endsWith('s') && hay.includes(w.slice(0, -1)));
+
+    const matchesAll = (hay: string, needle: unknown) => wordsOf(needle).every((w) => hasWord(hay, w));
+
+    const haystack = (d: (typeof list)[number]) =>
+      [
+        d.parsed_json?.vendor,
+        d.parsed_json?.po_number,
+        d.parsed_json?.client,
+        d.projects?.name,
+        d.type.replace(/_/g, ' '),
+        d.drive_file_id?.startsWith('gmail:') ? 'email attachment' : 'drive',
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+
+    const everything = list;
+    if (input.project) list = list.filter((d) => matchesAll((d.projects?.name ?? '').toLowerCase(), input.project));
+    if (input.vendor) list = list.filter((d) => matchesAll((d.parsed_json?.vendor ?? '').toLowerCase(), input.vendor));
+    if (input.search) list = list.filter((d) => matchesAll(haystack(d), input.search));
+
+    // A name is often put in the wrong field — "Ashcroft Mill" asked for as
+    // a project when it is the vendor. The field-exact filters then find
+    // nothing and the assistant says the thing does not exist, which is
+    // the worst answer it can give. So when they come up empty, the same
+    // words are tried against everything the document is, and the result
+    // says it was widened.
+    let widened: string | null = null;
+    if (!list.length && (input.project || input.vendor)) {
+      const terms = [input.project, input.vendor, input.search].filter(Boolean).join(' ');
+      const loose = everything.filter((d) => matchesAll(haystack(d), terms));
+      if (loose.length) {
+        list = loose;
+        widened = `Nothing matched "${terms}" in the field you gave, but these match it elsewhere — as the vendor, client, PO number or project. Hand them over if they are what was asked for.`;
+      }
+    }
+
+    return {
+      note: [
+        widened,
+        'Amounts are US dollars. Each document has a ref: answer with it to hand the file itself over, with Download and Open buttons.',
+      ]
+        .filter(Boolean)
+        .join(' '),
+      total: list.length,
+      documents: list.slice(0, 12).map((d) => {
+        const source = d.drive_file_id ?? '';
+        const p = d.parsed_json ?? {};
+
+        // The original, as a file the person can take. Drive files carry a
+        // bare file id; email attachments are stored as
+        // "gmail:<messageId>:<attachmentId>". Only parsed PDFs are ever
+        // stored here, and no filename was kept, so one is made from what
+        // the document turned out to be.
+        const filename = `${d.type.replace(/_/g, ' ')}${p.vendor ? ` - ${p.vendor}` : ''}${p.po_number ? ` ${p.po_number}` : ''}.pdf`;
+        let fileRef: string | null = null;
+        let link: string | null = null;
+        if (source.startsWith('gmail:') && ctx.orgId) {
+          const [messageId, ...rest] = source.slice('gmail:'.length).split(':');
+          const attachmentId = rest.join(':');
+          link = gmailMessageUrl(messageId);
+          if (messageId && attachmentId) {
+            const row = gmailFileRow(
+              ctx.orgId,
+              messageId,
+              { filename, mimeType: 'application/pdf', attachmentId, size: 0 },
+              { receivedAt: d.created_at },
+            );
+            row.detail = [d.projects?.name, p.total != null ? usd(p.total) : null].filter(Boolean).join(' · ') || null;
+            fileRef = refs.add('F', row);
+          }
+        } else if (source && ctx.orgId) {
+          link = `https://drive.google.com/file/d/${source}/view`;
+          const row = driveFileRow(ctx.orgId, {
+            id: source, name: filename, mimeType: 'application/pdf',
+            modifiedTime: d.created_at, size: 0, webViewLink: link,
+          });
+          row.detail = [d.projects?.name, p.total != null ? usd(p.total) : null].filter(Boolean).join(' · ') || null;
+          fileRef = refs.add('F', row);
+        }
+
+        return {
+          ref: fileRef,
+          type: d.type,
+          vendor: p.vendor ?? null,
+          po_number: p.po_number ?? null,
+          total: p.total ?? null,
+          eta: p.eta ?? null,
+          project: d.projects?.name ?? null,
+          source: source.startsWith('gmail:') ? 'email attachment' : 'drive',
+          parsed_at: d.created_at,
+          line_item_count: p.line_items?.length ?? 0,
+          link,
+        };
+      }),
+    };
+}
+
 async function runTool(
   name: string,
   input: Record<string, unknown>,
   ctx: AssistantContext,
-  proposed: ProposedAction[],
+  session: ToolSession,
 ): Promise<ToolOutput> {
   const { db } = ctx;
+  const { proposed, refs } = session;
+
+  if (LIVE_GOOGLE_TOOLS.includes(name) && !canSupervise(ctx.role)) {
+    return {
+      refused: true,
+      reason:
+        "Searching the studio's live Gmail and Drive is limited to the principal and coordinator. Mail and documents already in the system are still available through search_email, read_email and search_documents — try those, and hand over any attachments they return.",
+    };
+  }
 
   switch (name) {
     case 'list_projects': {
@@ -407,8 +1603,12 @@ async function runTool(
 
       if (input.limit) list = list.slice(0, Math.max(1, Number(input.limit)));
       return {
-        note: 'All amounts are US dollars. on_order is the total value of the project\'s purchase orders; budget is the separately recorded budget figure and is often not set.',
-        projects: list,
+        note: 'All amounts are US dollars. on_order is the total value of the project\'s purchase orders; budget is the separately recorded budget figure and is often not set. To show projects, answer with their refs.',
+        total: list.length,
+        projects: list.map((p) => {
+          const row = p as unknown as Parameters<typeof projectRow>[0];
+          return { ref: refs.add('P', projectRow(row)), ...p };
+        }),
       };
     }
 
@@ -425,7 +1625,7 @@ async function runTool(
       if (input.overdue_only) q = q.lt('due_date', new Date().toISOString().slice(0, 10));
 
       let list = (await rows(q, 'tasks')) as unknown as {
-        title: string; kind: string; status: string; due_date: string | null;
+        id: string; title: string; kind: string; status: string; due_date: string | null;
         projects: { name: string } | null; profiles: { full_name: string | null } | null;
       }[];
       // Name filters are applied here rather than in SQL: the joins are
@@ -438,14 +1638,17 @@ async function runTool(
         const needle = String(input.project).toLowerCase();
         list = list.filter((r) => (r.projects?.name ?? '').toLowerCase().includes(needle));
       }
-      return list.map((r) => ({
-        title: r.title,
-        kind: r.kind,
-        status: r.status,
-        due_date: r.due_date,
-        owner: r.profiles?.full_name ?? 'Unassigned',
-        project: r.projects?.name ?? null,
-      }));
+      return list.map((r) => {
+        const task = {
+          id: r.id,
+          title: r.title,
+          status: r.status,
+          due_date: r.due_date,
+          owner: r.profiles?.full_name ?? 'Unassigned',
+          project: r.projects?.name ?? null,
+        };
+        return { ref: refs.add('T', taskRow(task)), ...task, kind: r.kind };
+      });
     }
 
     case 'get_project_status': {
@@ -482,7 +1685,7 @@ async function runTool(
 
     case 'list_team': {
       const [people, tasks] = await Promise.all([
-        rows(db.from('profiles').select('id, full_name, role'), 'the team'),
+        rows(db.from('profiles').select(await profileColumns('id, full_name, email, role')), 'the team'),
         rows(db.from('tasks').select('assigned_to').in('status', LIVE), 'tasks'),
       ]);
       const load = new Map<string, number>();
@@ -490,10 +1693,40 @@ async function runTool(
         const id = (t as { assigned_to: string | null }).assigned_to;
         if (id) load.set(id, (load.get(id) ?? 0) + 1);
       }
-      return people.map((p) => {
-        const r = p as { id: string; full_name: string | null; role: string };
-        return { name: r.full_name ?? 'Unnamed', role: r.role, live_tasks: load.get(r.id) ?? 0 };
+      type Profile = { id: string; full_name: string | null; email: string | null; role: UserRole; seat?: Seat | null };
+      const accounts = people as unknown as Profile[];
+
+      // A shared inbox signs in, but it is the studio, not a colleague.
+      const inboxes = accounts.filter((p) => isStudioMailbox(p.email));
+      const members = accounts.filter((p) => !isStudioMailbox(p.email)).map((p) => {
+        const known = studioPerson({ email: p.email, name: p.full_name });
+        const seat = p.seat ?? known?.seat ?? null;
+        const live = load.get(p.id) ?? 0;
+        return {
+          ref: refs.add('M', personRow({
+            id: p.id, name: p.full_name ?? known?.name ?? p.email ?? 'Unnamed', email: p.email,
+            role: p.role, seat, live_tasks: live, has_account: true,
+          })),
+          name: p.full_name ?? known?.name ?? 'Unnamed', email: p.email, role: p.role,
+          seat: seat ? SEATS[seat].label : null, live_tasks: live,
+        };
       });
+      // Teammates the studio lists who have no account yet: still the team,
+      // but nothing can be assigned to them until they do.
+      const withoutAccount = STUDIO_TEAM.filter(
+        (t) => !accounts.some((p) => p.email?.toLowerCase() === t.email || studioPerson({ name: p.full_name })?.email === t.email),
+      ).map((t) => ({
+        ref: refs.add('M', personRow({
+          id: null, name: t.name, email: t.email, role: seatRole(t), seat: t.seat, live_tasks: 0, has_account: false,
+        })),
+        name: t.name, email: t.email, seat: t.seat ? SEATS[t.seat].label : null, has_account: false,
+      }));
+      return {
+        note: 'Answer with the refs. People without an account cannot be given tasks until someone adds them on Team & roles.',
+        members,
+        ...(withoutAccount.length ? { without_account: withoutAccount } : {}),
+        ...(inboxes.length ? { shared_inboxes: inboxes.map((p) => p.email) } : {}),
+      };
     }
 
     case 'get_today': {
@@ -565,6 +1798,11 @@ async function runTool(
         list = list.filter((r) => (r.projects?.name ?? '').toLowerCase().includes(needle));
       }
 
+      // Which of these already raised a task, so "create a task from that
+      // email" can see when one exists and update it instead.
+      const taskByEmail = await tasksForEmails(db, list.map((e) => e.id));
+      if (input.without_task) list = list.filter((e) => !taskByEmail.has(e.id));
+
       const by_type: Record<string, number> = {};
       for (const e of list) by_type[e.class] = (by_type[e.class] ?? 0) + 1;
 
@@ -572,9 +1810,21 @@ async function runTool(
         total: list.length,
         by_type,
         messages: list.slice(0, 15).map((e) => ({
+          ref: refs.add('E', {
+            kind: 'email',
+            id: e.id,
+            title: e.subject || '(no subject)',
+            detail: e.extracted_json?.summary ?? e.snippet ?? null,
+            fields: [
+              field('From', e.from_addr ? addressOf(e.from_addr) : null),
+              field('Received', day(e.received_at)),
+              field('Project', e.projects?.name),
+            ],
+          }),
           // So a follow-up question can ask for this exact message's body
           // instead of searching again.
           id: e.id,
+          task: taskByEmail.get(e.id) ?? null,
           subject: e.subject,
           from: e.from_addr,
           // Links are short and are what people ask for by name. Carried
@@ -640,25 +1890,66 @@ async function runTool(
       const { data: gmailIdRow } = await db.from('emails').select('gmail_id').eq('id', e.id).maybeSingle();
       const gmailId = (gmailIdRow as { gmail_id?: string | null } | null)?.gmail_id ?? null;
       const attachments: Record<string, unknown>[] = [];
+      let attachmentNote: string | null = null;
       if (gmailId) {
+        // What was parsed, keyed by attachment id, so the file rows below can
+        // carry the vendor and total the extraction already found.
         const { data: attached } = await db
           .from('documents')
           .select('id, type, parsed_json, drive_file_id')
           .like('drive_file_id', `gmail:${gmailId}:%`);
+        const parsedByAttachment = new Map<string, { type: string; parsed_json: Record<string, unknown> | null }>();
         for (const row of attached ?? []) {
-          const d = row as { type: string; parsed_json: Record<string, unknown> | null };
-          const pj = (d.parsed_json ?? {}) as {
-            vendor?: string; po_number?: string; total?: number; line_items?: unknown[];
-          };
-          attachments.push({
-            type: d.type,
-            vendor: pj.vendor ?? null,
-            po_number: pj.po_number ?? null,
-            total: pj.total ?? null,
-            line_item_count: pj.line_items?.length ?? 0,
-            // Attachments open in the thread; Gmail has no per-file URL.
-            link: `https://mail.google.com/mail/u/0/#all/${gmailId}`,
-          });
+          const d = row as { type: string; parsed_json: Record<string, unknown> | null; drive_file_id: string };
+          parsedByAttachment.set(d.drive_file_id.slice(`gmail:${gmailId}:`.length), d);
+        }
+
+        const parsedFacts = (attachmentId: string) => {
+          const d = parsedByAttachment.get(attachmentId);
+          if (!d) return {};
+          const pj = (d.parsed_json ?? {}) as { vendor?: string; po_number?: string; total?: number };
+          return { parsed_as: d.type, vendor: pj.vendor ?? null, po_number: pj.po_number ?? null, total: pj.total ?? null };
+        };
+
+        // The person can read this email, so they may have what came with
+        // it. Listed from Gmail itself where possible: ingestion only kept
+        // PDFs, and the drawing or the photo is as often what is wanted.
+        let live: Awaited<ReturnType<typeof getMessageWithAttachments>> | null = null;
+        try {
+          live = ctx.orgId ? await getMessageWithAttachments(await session.google.gmail(), gmailId) : null;
+        } catch (err) {
+          attachmentNote = isGoogleAuthFailure(err)
+            ? 'Google needs reconnecting, so only the attachments that were parsed at ingest are listed.'
+            : err instanceof ToolDataError
+              ? `${err.message}; only the attachments that were parsed at ingest are listed.`
+              : 'Gmail could not be reached, so only the attachments that were parsed at ingest are listed.';
+        }
+
+        if (live && ctx.orgId) {
+          for (const att of live.files) {
+            const row = gmailFileRow(ctx.orgId, gmailId, att, {
+              from: e.from_addr, subject: e.subject, receivedAt: e.received_at,
+            });
+            attachments.push({
+              ref: refs.add('F', row),
+              filename: att.filename,
+              type: fileKind(att.filename, att.mimeType),
+              size: bytes(att.size),
+              ...parsedFacts(att.attachmentId),
+            });
+          }
+        } else if (ctx.orgId) {
+          for (const [attachmentId, d] of parsedByAttachment) {
+            const pj = (d.parsed_json ?? {}) as { vendor?: string; po_number?: string };
+            const filename = `${d.type.replace(/_/g, ' ')}${pj.vendor ? ` - ${pj.vendor}` : ''}.pdf`;
+            const row = gmailFileRow(
+              ctx.orgId,
+              gmailId,
+              { filename, mimeType: 'application/pdf', attachmentId, size: 0 },
+              { from: e.from_addr, subject: e.subject, receivedAt: e.received_at },
+            );
+            attachments.push({ ref: refs.add('F', row), filename, type: 'PDF', ...parsedFacts(attachmentId) });
+          }
         }
       }
 
@@ -679,6 +1970,8 @@ async function runTool(
         links: stored.links.map((l) => ({ url: l.url, host: l.host })),
         attachments,
         attachment_count: attachments.length,
+        attachment_note: attachmentNote,
+        task: (await tasksForEmails(db, [e.id])).get(e.id) ?? null,
         // Capped: the assistant needs what was said, not a whole thread.
         body: body ? body.slice(0, 4000) : null,
         body_available: Boolean(body),
@@ -688,67 +1981,8 @@ async function runTool(
       };
     }
 
-    case 'search_documents': {
-      let q = db
-        .from('documents')
-        .select('id, type, parsed_json, confidence, created_at, drive_file_id, projects(name)')
-        .order('created_at', { ascending: false })
-        .limit(40);
-      if (input.type) q = q.eq('type', String(input.type));
-
-      let list = (await rows(q, 'documents')) as unknown as {
-        id: string; type: string; confidence: number | null; created_at: string;
-        drive_file_id: string | null;
-        parsed_json: {
-          vendor?: string | null; po_number?: string | null; total?: number | null;
-          client?: string | null; eta?: string | null; order_date?: string | null;
-          line_items?: { description: string; qty: number; unit_price: number | null }[];
-        } | null;
-        projects: { name: string } | null;
-      }[];
-
-      const match = (hay: string | null | undefined, needle: unknown) =>
-        !needle || (hay ?? '').toLowerCase().includes(String(needle).toLowerCase());
-
-      if (input.project) list = list.filter((d) => match(d.projects?.name, input.project));
-      if (input.vendor) list = list.filter((d) => match(d.parsed_json?.vendor, input.vendor));
-      if (input.search) {
-        const n = String(input.search).toLowerCase();
-        list = list.filter(
-          (d) =>
-            (d.parsed_json?.po_number ?? '').toLowerCase().includes(n) ||
-            (d.parsed_json?.vendor ?? '').toLowerCase().includes(n),
-        );
-      }
-
-      return {
-        note: 'Amounts are US dollars. `link` opens the original file; documents that arrived as email attachments link to the Gmail message instead of a file.',
-        total: list.length,
-        documents: list.slice(0, 12).map((d) => {
-          const ref = d.drive_file_id ?? '';
-          // Drive files carry a bare file id; email attachments are stored as
-          // "gmail:<messageId>:<attachmentId>" and open in the thread.
-          const link = ref.startsWith('gmail:')
-            ? `https://mail.google.com/mail/u/0/#all/${ref.slice(6).split(':')[0]}`
-            : ref
-              ? `https://drive.google.com/file/d/${ref}/view`
-              : null;
-          const p = d.parsed_json ?? {};
-          return {
-            type: d.type,
-            vendor: p.vendor ?? null,
-            po_number: p.po_number ?? null,
-            total: p.total ?? null,
-            eta: p.eta ?? null,
-            project: d.projects?.name ?? null,
-            source: ref.startsWith('gmail:') ? 'email attachment' : 'drive',
-            parsed_at: d.created_at,
-            line_item_count: p.line_items?.length ?? 0,
-            link,
-          };
-        }),
-      };
-    }
+    case 'search_documents':
+      return findStoredDocuments(ctx, refs, input);
 
     case 'list_vendors': {
       const search = typeof input.search === 'string' ? input.search : null;
@@ -767,14 +2001,15 @@ async function runTool(
       return vendors.map((v) => {
         const mine = pos.filter((p) => p.vendor_id === v.id);
         const open = mine.filter((p) => !['received', 'cancelled'].includes(p.status));
-        return {
+        const vendor = {
+          id: v.id,
           name: v.name,
           category: v.category,
           contacts: v.contacts,
-          notes: v.notes,
           open_orders: open.length,
           on_order: open.reduce((sum, p) => sum + (p.amount ?? 0), 0),
         };
+        return { ref: refs.add('V', vendorRow(vendor)), ...vendor, notes: v.notes };
       });
     }
 
@@ -784,14 +2019,14 @@ async function runTool(
 
       let q = db
         .from('purchase_orders')
-        .select('po_number, status, amount, eta, vendors(name), projects(name)')
+        .select('id, po_number, status, amount, eta, vendors(name), projects(name)')
         .order('eta', { ascending: true });
 
       if (status !== 'all' && status !== 'open') q = q.eq('status', status);
       if (status === 'open') q = q.not('status', 'in', '("received","cancelled")');
 
       const list = (await rows(q, 'purchase orders')) as unknown as {
-        po_number: string | null; status: string; amount: number | null; eta: string | null;
+        id: string; po_number: string | null; status: string; amount: number | null; eta: string | null;
         vendors: { name: string } | null; projects: { name: string } | null;
       }[];
 
@@ -802,15 +2037,19 @@ async function runTool(
         .filter((p) => !vendor || (p.vendors?.name ?? '').toLowerCase().includes(vendor))
         .filter((p) => !project || (p.projects?.name ?? '').toLowerCase().includes(project))
         .filter((p) => !input.late_only || (p.eta != null && p.eta < today))
-        .map((p) => ({
-          po: p.po_number,
-          vendor: p.vendors?.name ?? 'Unknown vendor',
-          project: p.projects?.name ?? 'Unassigned',
-          amount: p.amount,
-          status: p.status,
-          expected: p.eta,
-          late: Boolean(p.eta && p.eta < today && !['received', 'cancelled'].includes(p.status)),
-        }));
+        .map((p) => {
+          const order = {
+            id: p.id,
+            po: p.po_number,
+            vendor: p.vendors?.name ?? 'Unknown vendor',
+            project: p.projects?.name ?? 'Unassigned',
+            amount: p.amount,
+            status: p.status,
+            expected: p.eta,
+            late: Boolean(p.eta && p.eta < today && !['received', 'cancelled'].includes(p.status)),
+          };
+          return { ref: refs.add('O', purchaseOrderRow(order)), ...order };
+        });
     }
 
     case 'list_follow_ups': {
@@ -989,19 +2228,551 @@ async function runTool(
     }
 
     case 'propose_task': {
-      if (!can(ctx.role, 'tasks', 'create')) {
+      if (!canWith(ctx.permissions, ctx.role, 'tasks', 'create')) {
         return { refused: true, reason: 'Your role cannot create tasks.' };
       }
       const kind = (TASK_KINDS.includes(input.kind as TaskKind) ? input.kind : 'admin') as TaskKind;
-      const wantsOther = Boolean(input.assignee_name);
-      if (wantsOther && !canSupervise(ctx.role)) {
-        return { refused: true, reason: 'Only a principal or coordinator can assign work to other people.' };
+      const title = text(input.title, 200);
+      if (!title) return { refused: true, reason: 'A task needs a title.' };
+
+      // From an email: the email has to exist, and has to have no task yet —
+      // one task per email is enforced by the database, so when it already
+      // has one, the answer is to change that task rather than raise another.
+      const emailId = text(input.email_id, 64);
+      type EmailForTask = {
+        id: string; subject: string | null; from_addr: string | null; project_id: string | null;
+        projects: { name: string } | null;
+      };
+      let fromEmail: EmailForTask | null = null;
+      if (emailId) {
+        const { data } = await db
+          .from('emails')
+          .select('id, subject, from_addr, project_id, projects(name)')
+          .eq('id', emailId)
+          .maybeSingle();
+        fromEmail = (data as unknown as EmailForTask | null) ?? null;
+        if (!fromEmail) return { proposed: false, needs: 'No stored email has that id. Find it with search_email first.' };
+
+        const { data: existing } = await db
+          .from('tasks')
+          .select('id, title, status, due_date, profiles(full_name)')
+          .eq('source_email_id', emailId)
+          .limit(1);
+        const has = existing?.[0] as unknown as
+          | { id: string; title: string; status: string; due_date: string | null; profiles: { full_name: string | null } | null }
+          | undefined;
+        if (has) {
+          return {
+            proposed: false,
+            exists: {
+              task_id: has.id,
+              title: has.title,
+              owner: has.profiles?.full_name ?? 'nobody',
+              due: has.due_date ? friendlyDay(has.due_date) : 'no date',
+              status: has.status,
+            },
+            note: 'That email already has a task. To give it the owner or date they asked for, call propose_task_update with this task_id. Do not raise a second task.',
+          };
+        }
       }
-      const summary = `Create "${input.title}" (${TASK_KIND_LABELS[kind]})${
-        input.assignee_name ? ` for ${input.assignee_name}` : ` — routed to ${TASK_KIND_ROLE[kind]}`
-      }${input.due_date ? `, due ${input.due_date}` : ''}`;
-      proposed.push({ tool: 'propose_task', summary, input: { ...input, kind } });
-      return { proposed: true, summary, note: 'Awaiting the user\'s confirmation. Do not claim it is done.' };
+
+      // Who and where are matched NOW, while the person is still here to be
+      // asked — not at confirmation, when a misheard "Danish" for "Denish"
+      // used to match nobody and save the task with no owner at all.
+      const said = text(input.assignee_name, 80);
+      let assignee: { id: string; full_name: string } | null = null;
+      if (said) {
+        const team = await teamOf(db);
+        const found = matchPerson(said, team);
+        if (found.status === 'none') {
+          return { proposed: false, needs: `No one called "${said}" is on the team. The team is: ${peopleOf(team).map((p) => p.full_name).join(', ')}. Ask which of them — do not guess.` };
+        }
+        if (found.status === 'ambiguous') {
+          return { proposed: false, needs: `"${said}" could be ${found.rows.map((p) => p.full_name).join(' or ')}. Ask which.` };
+        }
+        assignee = found.row;
+        if (assignee.id !== ctx.userId && !canManageTasks(ctx.role, ctx.seat ?? null)) {
+          return { refused: true, reason: 'Only someone who runs the task board can assign work to other people. Offer to add it for them instead.' };
+        }
+      }
+
+      const projectSaid = text(input.project, 120);
+      let project: { id: string; name: string } | null = null;
+      if (projectSaid) {
+        const found = matchProject(projectSaid, await projectsOf(db));
+        if (found.status === 'ambiguous') {
+          return { proposed: false, needs: `"${projectSaid}" could be ${found.rows.map((p) => p.name).join(' or ')}. Ask which.` };
+        }
+        // No project is not worth stopping for: the task still stands, and
+        // saying which project it went on shows the gap.
+        if (found.status === 'found') project = found.row;
+      }
+      // Nothing said about the project: the email's own filing stands.
+      if (!project && !projectSaid && fromEmail?.project_id && fromEmail.projects?.name) {
+        project = { id: fromEmail.project_id, name: fromEmail.projects.name };
+      }
+
+      const due = typeof input.due_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(input.due_date) ? input.due_date : null;
+      const summary = [
+        `New task: “${title}”`,
+        assignee ? `for ${assignee.full_name}` : `routed to ${TASK_KIND_ROLE[kind]}`,
+        due ? `due ${friendlyDay(due)}` : null,
+        project ? `on ${project.name}` : null,
+        fromEmail ? `from the email “${(fromEmail.subject ?? 'no subject').slice(0, 60)}”` : null,
+      ]
+        .filter(Boolean)
+        .join(' · ');
+
+      proposed.push({
+        tool: 'propose_task',
+        summary,
+        input: {
+          title,
+          detail: input.detail ?? null,
+          kind,
+          assignee_id: assignee?.id ?? null,
+          assignee_name: assignee?.full_name ?? null,
+          project_id: project?.id ?? null,
+          project: project?.name ?? null,
+          due_date: due,
+          email_id: fromEmail?.id ?? null,
+          next_step: text(input.next_step, 300) || null,
+        },
+      });
+      return {
+        proposed: true,
+        summary,
+        ...(projectSaid && !project ? { warning: `No project matched "${projectSaid}", so it will be saved without one.` } : {}),
+        note: "Prepared, NOT saved. Tell them what it is and that they can say yes or press Confirm. It does not exist until respond_to_proposal saves it — never say it was created or added. Do not put it in items: it is shown beneath your answer with its Confirm button, and a row would look like a task that already exists.",
+      };
+    }
+
+    case 'read_document': {
+      if (!ctx.orgId) return { read: false, note: 'No studio is attached to this account.' };
+      const item = refs.get(text(input.file, 16));
+      if (!item?.file?.token) {
+        return {
+          read: false,
+          note: 'That is not a file ref. Find the file first — find_attachments, search_documents, read_email or drive_search — and pass the ref (F1, F2…) it gives.',
+        };
+      }
+      const opened = openFileGrant(item.file.token, ctx.orgId);
+      if (!opened.ok) {
+        return { read: false, note: 'The link to that file has expired. Find the file again, then read it.' };
+      }
+      const question = text(input.question, 600) || 'Summarise what this document contains.';
+
+      let fetched: Awaited<ReturnType<typeof fetchGrantedFile>>;
+      try {
+        fetched = await fetchGrantedFile({ ...opened.grant, pages: undefined });
+      } catch (err) {
+        if (err instanceof FileFetchError) throw new ToolDataError(err.message);
+        throw new ToolDataError(`Could not fetch the file (${(err as Error).message})`);
+      }
+
+      const reading = await readDocument(fetched, question, {
+        feature: 'document.read',
+        orgId: ctx.orgId,
+        actor: ctx.userId,
+        entity: 'files',
+      });
+      if (!reading.read) return reading;
+      const { pages } = reading;
+
+      // The pages themselves, as their own grant: only these pages travel to
+      // the browser, which is what lets a big deck be shown at all.
+      let previewRef: string | null = null;
+      if (reading.kind === 'pdf' && pages.length) {
+        const token = sealFileGrant({ ...opened.grant, pages });
+        const label = pages.length === 1 ? `page ${pages[0]}` : `pages ${pages.join(', ')}`;
+        previewRef = refs.add('F', {
+          kind: 'file',
+          title: `${fetched.name.replace(/\.pdf$/i, '')} — ${label}`,
+          detail: question,
+          file: {
+            name: `${fetched.name.replace(/\.pdf$/i, '')} (${label}).pdf`,
+            mimeType: 'application/pdf',
+            size: 0,
+            source: opened.grant.source,
+            token,
+            downloadable: true,
+            webUrl: fetched.webUrl,
+          },
+          preview: 'pdf',
+          pages,
+        });
+      } else if (reading.kind === 'image') {
+        previewRef = refs.add('F', { ...item, preview: 'image' });
+      }
+
+      return {
+        read: true,
+        answer: reading.answer,
+        findings: reading.findings,
+        pages,
+        preview_ref: previewRef,
+        ...(reading.scope ? { scope: reading.scope } : {}),
+        note: previewRef
+          ? 'Answer from this: the lead gives the answer; the findings can be note rows naming their page. Put preview_ref in items so they see the pages themselves.'
+          : 'Answer from this. Nothing in the document shows it as a page, so say so if that is what they wanted.',
+      };
+    }
+
+    case 'propose_task_update': {
+      if (!canWith(ctx.permissions, ctx.role, 'tasks', 'update')) {
+        return { refused: true, reason: 'Your role cannot change tasks.' };
+      }
+      const taskId = text(input.task_id, 64);
+      const { data: row } = await db
+        .from('tasks')
+        .select('id, title, status, due_date, assigned_to, profiles(full_name)')
+        .eq('id', taskId)
+        .maybeSingle();
+      const task = row as unknown as
+        | { id: string; title: string; status: string; due_date: string | null; assigned_to: string | null; profiles: { full_name: string | null } | null }
+        | null;
+      if (!task) return { proposed: false, needs: 'No task has that id. Find it with list_tasks, search_email or read_email first.' };
+
+      // The board's own rule: your own queue is yours; anyone else's is for
+      // whoever runs the board.
+      const runsBoard = canManageTasks(ctx.role, ctx.seat ?? null);
+      if (!runsBoard && task.assigned_to && task.assigned_to !== ctx.userId) {
+        return { refused: true, reason: `"${task.title}" belongs to ${task.profiles?.full_name ?? 'someone else'}; only someone who runs the task board can change it.` };
+      }
+
+      const changes: string[] = [];
+      const change: Record<string, unknown> = { task_id: task.id };
+
+      const said = text(input.assignee_name, 80);
+      if (said) {
+        const team = await teamOf(db);
+        const found = matchPerson(said, team);
+        if (found.status === 'none') {
+          return { proposed: false, needs: `No one called "${said}" is on the team. The team is: ${peopleOf(team).map((p) => p.full_name).join(', ')}. Ask which — do not guess.` };
+        }
+        if (found.status === 'ambiguous') {
+          return { proposed: false, needs: `"${said}" could be ${found.rows.map((p) => p.full_name).join(' or ')}. Ask which.` };
+        }
+        if (found.row.id !== ctx.userId && !runsBoard) {
+          return { refused: true, reason: 'Only someone who runs the task board can give work to other people.' };
+        }
+        change.assignee_id = found.row.id;
+        change.assignee_name = found.row.full_name;
+        changes.push(`owner → ${found.row.full_name}`);
+      }
+      if (typeof input.due_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(input.due_date)) {
+        change.due_date = input.due_date;
+        changes.push(`due → ${friendlyDay(input.due_date)}`);
+      }
+      const statuses = ['open', 'in_progress', 'blocked', 'done', 'cancelled'];
+      if (typeof input.status === 'string' && statuses.includes(input.status)) {
+        change.status = input.status;
+        changes.push(`status → ${input.status.replace(/_/g, ' ')}`);
+      }
+      const nextStep = text(input.next_step, 300);
+      if (nextStep) {
+        change.next_step = nextStep;
+        changes.push(`next step → “${nextStep}”`);
+      }
+      if (!changes.length) {
+        return { proposed: false, needs: 'Nothing to change was given — an owner, a due date, a status or a next step.' };
+      }
+
+      const summary = `Update “${task.title}” · ${changes.join(' · ')}`;
+      proposed.push({ tool: 'propose_task_update', summary, input: change });
+      return {
+        proposed: true,
+        summary,
+        note: "Prepared, NOT saved. Tell them what will change and that they can say yes or press Confirm. Never say it was changed until respond_to_proposal saves it. Do not put the task in items; it is shown beneath your answer with its Confirm button.",
+      };
+    }
+
+    case 'respond_to_proposal': {
+      const pending = ctx.pending ?? [];
+      const n = Number(String(input.proposal ?? '').replace(/\D/g, ''));
+      const target = Number.isInteger(n) && n >= 1 ? pending[n - 1] : undefined;
+      if (!target) {
+        return {
+          done: false,
+          note: pending.length
+            ? `There is no proposal ${input.proposal}. The waiting ones are ${pending.map((_, i) => `#${i + 1}`).join(', ')}.`
+            : 'Nothing is waiting for an answer. If they want something done, prepare it with propose_task or propose_draft.',
+        };
+      }
+      if (session.settled.some((s) => s.key === target.key)) {
+        return { done: true, note: 'That one is already settled in this conversation.' };
+      }
+
+      if (input.decision === 'cancel') {
+        session.settled.push({ key: target.key, decision: 'cancelled' });
+        return { cancelled: true, what: target.summary, note: 'Dropped — nothing was saved. Say so in a few words.' };
+      }
+      if (input.decision !== 'confirm') {
+        return { done: false, note: 'decision must be "confirm" or "cancel".' };
+      }
+
+      try {
+        const saved = await commitProposal(ctx, target.tool, target.input, 'conversation');
+        session.settled.push({ key: target.key, decision: 'confirmed', id: saved.id, kind: saved.kind });
+        if (saved.kind === 'task') {
+          const ref = refs.add('T', {
+            ...taskRow({
+              id: saved.id,
+              title: saved.title,
+              status: 'open',
+              due_date: saved.due_date,
+              owner: saved.assignee ?? 'Unassigned',
+              project: saved.project,
+            }),
+            tone: 'good',
+          });
+          return {
+            saved: true,
+            ref,
+            ...(saved.duplicate ? { note_duplicate: 'It had already been saved a moment ago; that task is the one shown.' } : {}),
+            note: 'It is now on the Tasks board. Say it is done, and give the task as a row with this ref so they can open it.',
+          };
+        }
+        if (saved.kind === 'task_update') {
+          const ref = refs.add('T', {
+            ...taskRow({
+              id: saved.id,
+              title: saved.title,
+              status: saved.status,
+              due_date: saved.due_date,
+              owner: saved.assignee ?? 'Unassigned',
+              project: null,
+            }),
+            tone: 'good',
+          });
+          return { saved: true, ref, note: 'The task is updated on the board. Say what changed, with the row for this ref.' };
+        }
+        const ref = refs.add('D', { kind: 'draft', title: saved.subject, detail: saved.to ? `To ${saved.to}` : null, tone: 'good' });
+        return { saved: true, ref, note: 'It is saved in Drafts, NOT sent. Say so, with the row for this ref.' };
+      } catch (err) {
+        if (err instanceof ProposalError) return { saved: false, reason: err.message, note: 'Nothing was saved. Say why, in their words.' };
+        throw err;
+      }
+    }
+
+    // ── Live Gmail ────────────────────────────────────────────
+
+    case 'find_attachments': {
+      if (!ctx.orgId) return { found: 0, note: 'No studio is attached to this account.' };
+
+      // Built from the parts rather than trusted as one string, so "the
+      // drawings from Brianna" becomes a query Gmail can actually match.
+      const terms = ['has:attachment'];
+      if (input.from) terms.push(`from:(${String(input.from)})`);
+      if (input.filename) terms.push(`filename:${String(input.filename).replace(/\s+/g, '-')}`);
+      if (input.days) terms.push(`newer_than:${Math.max(1, Math.floor(Number(input.days)))}d`);
+      if (input.search) terms.push(String(input.search));
+      const query = terms.join(' ');
+
+      let gmail: gmail_v1.Gmail;
+      let messages: Awaited<ReturnType<typeof getMessageWithAttachments>>[];
+      try {
+        gmail = await session.google.gmail();
+        const ids = (await googleCall(() => searchMessages(gmail, query, 8))).map((m) => m.gmailId);
+        messages = await googleCall(() => Promise.all(ids.map((id) => getMessageWithAttachments(gmail, id))));
+      } catch (err) {
+        if (!(err instanceof ToolDataError)) throw err;
+        // Live Gmail is out of reach — not connected, or the grant needs
+        // renewing. Left to the model, whether it then thought to look in
+        // the stored documents varied from one run to the next, and when it
+        // did not, the person was told the file could not be got while it
+        // sat in the system. So the fallback happens here, every time.
+        const stored = await findStoredDocuments(ctx, refs, {
+          search: [input.search, input.from, input.filename].filter(Boolean).join(' '),
+        });
+        const count = Number(stored.total ?? 0);
+        return {
+          ...stored,
+          live_gmail: `unavailable: ${err.message}`,
+          note: count
+            ? `Live Gmail could not be searched (${err.message}), but these attachments are already stored in the system. Hand them over with their refs; mention in the caveat that older mail could not be searched.`
+            : `Live Gmail could not be searched (${err.message}), and no stored attachment matches either. Say both plainly, and name the fix.`,
+        };
+      }
+
+      const wantedName = input.filename ? String(input.filename).toLowerCase() : null;
+      const files: Record<string, unknown>[] = [];
+      for (const m of messages) {
+        for (const att of m.files) {
+          // Gmail matched the message; the name filter picks the file on it,
+          // so a thread with a PDF and six photos returns the PDF.
+          if (wantedName && !att.filename.toLowerCase().includes(wantedName.replace(/^\./, ''))) continue;
+          const row = gmailFileRow(ctx.orgId, m.gmailId, att, {
+            from: m.from, subject: m.subject, receivedAt: m.receivedAt,
+          });
+          files.push({
+            ref: refs.add('F', row),
+            filename: att.filename,
+            type: fileKind(att.filename, att.mimeType),
+            size: bytes(att.size),
+            from: m.from,
+            subject: m.subject,
+            received: m.receivedAt,
+          });
+          if (files.length >= 25) break;
+        }
+      }
+
+      return {
+        query,
+        found: files.length,
+        files,
+        note: files.length
+          ? 'Answer with these refs to hand the files over — each gets Download and Open buttons.'
+          : 'No attachment in the mailbox matched. Say so plainly, and say what was searched for.',
+      };
+    }
+
+    case 'gmail_search': {
+      const gmail = await session.google.gmail();
+      const max = Math.min(Math.max(Number(input.max) || 10, 1), 20);
+      const found = await googleCall(() => searchMessages(gmail, String(input.query ?? ''), max));
+      return {
+        total: found.length,
+        messages: found.map((m) => ({
+          ref: refs.add('E', {
+            kind: 'email',
+            title: m.subject || '(no subject)',
+            detail: m.snippet || null,
+            url: gmailMessageUrl(m.gmailId),
+            fields: [field('From', addressOf(m.from)), field('Received', day(m.receivedAt))],
+          }),
+          message_id: m.gmailId,
+          from: m.from,
+          to: m.to,
+          subject: m.subject,
+          snippet: m.snippet,
+          received_at: m.receivedAt,
+        })),
+      };
+    }
+
+    case 'gmail_read': {
+      if (!ctx.orgId) return { found: false, note: 'No studio is attached to this account.' };
+      const gmail = await session.google.gmail();
+      const id = String(input.message_id ?? '').trim();
+      if (!id) return { found: false, note: 'A message_id from gmail_search is needed.' };
+
+      const m = await googleCall(() => getMessageWithAttachments(gmail, id));
+      const orgId = ctx.orgId;
+      return {
+        found: true,
+        message_id: m.gmailId,
+        from: m.from,
+        to: m.to,
+        cc: m.cc,
+        subject: m.subject,
+        received_at: m.receivedAt,
+        body: m.body.slice(0, 4000),
+        links: linksIn(m.body).map((l) => l.url),
+        attachments: m.files.map((att) => ({
+          ref: refs.add('F', gmailFileRow(orgId, m.gmailId, att, {
+            from: m.from, subject: m.subject, receivedAt: m.receivedAt,
+          })),
+          filename: att.filename,
+          type: fileKind(att.filename, att.mimeType),
+          size: bytes(att.size),
+        })),
+      };
+    }
+
+    // ── Live Drive ────────────────────────────────────────────
+
+    case 'drive_search': {
+      if (!ctx.orgId) return { found: 0, note: 'No studio is attached to this account.' };
+      const drive = await session.google.drive();
+      const orgId = ctx.orgId;
+
+      let folderId: string | undefined;
+      if (input.folder) {
+        folderId = (await googleCall(() => findFolderId(drive, String(input.folder)))) ?? undefined;
+        if (!folderId) return { found: 0, note: `No folder named like "${input.folder}" was found in Drive.` };
+      }
+      const kinds: DriveKind[] = ['pdf', 'image', 'document', 'spreadsheet', 'presentation', 'folder'];
+      const kind = kinds.includes(input.kind as DriveKind) ? (input.kind as DriveKind) : undefined;
+
+      const hits = await googleCall(() =>
+        searchDriveFiles(drive, {
+          search: typeof input.search === 'string' ? input.search : undefined,
+          kind,
+          folderId,
+          max: Number(input.max) || 10,
+        }),
+      );
+
+      return {
+        found: hits.length,
+        files: hits.map((h) => ({
+          // A folder cannot be downloaded; it is shown as a link to open.
+          ref:
+            h.mimeType === 'application/vnd.google-apps.folder'
+              ? refs.add('L', { kind: 'link', title: h.name, url: h.webViewLink, fields: [field('Type', 'Folder')] })
+              : refs.add('F', driveFileRow(orgId, h)),
+          file_id: h.id,
+          name: h.name,
+          type: fileKind(h.name, h.mimeType),
+          size: bytes(h.size),
+          modified: h.modifiedTime,
+        })),
+        note: hits.length
+          ? 'Answer with these refs to hand the files over. Use drive_read with a file_id to read what a Doc or Sheet says.'
+          : 'Nothing in Drive matched. Say so plainly, and say what was searched for.',
+      };
+    }
+
+    case 'drive_read': {
+      if (!ctx.orgId) return { found: false, note: 'No studio is attached to this account.' };
+      const drive = await session.google.drive();
+      const fileId = String(input.file_id ?? '').trim();
+      if (!fileId) return { found: false, note: 'A file_id from drive_search is needed.' };
+
+      const file = await googleCall(() => getDriveFile(drive, fileId));
+      const content = await googleCall(() => readDriveText(drive, file));
+      return {
+        found: true,
+        ref: refs.add('F', driveFileRow(ctx.orgId, file)),
+        name: file.name,
+        type: fileKind(file.name, file.mimeType),
+        text: content,
+        note: content === null
+          ? 'This kind of file cannot be read as text. Hand it over with its ref instead of describing it.'
+          : content.length >= 6000
+            ? 'Only the first part of the file is shown.'
+            : null,
+      };
+    }
+
+    case 'propose_draft': {
+      if (!canWith(ctx.permissions, ctx.role, 'drafts', 'create')) {
+        return { refused: true, reason: 'Your role cannot create drafts.' };
+      }
+      const subject = text(input.subject, 200);
+      const body = typeof input.body === 'string' ? input.body.trim().slice(0, 10_000) : '';
+      if (!subject || !body) return { refused: true, reason: 'A draft needs a subject and a body.' };
+
+      // Addresses only — a display name or stray words here would end up in
+      // a To: line that Gmail then refuses.
+      const addresses = (v: unknown) =>
+        String(v ?? '')
+          .split(/[,;]/)
+          .map((a) => addressOf(a))
+          .filter((a) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a))
+          .join(', ');
+      const to = addresses(input.to);
+      const cc = addresses(input.cc);
+
+      const summary = `Draft "${subject}"${to ? ` to ${to}` : ''}`;
+      proposed.push({ tool: 'propose_draft', summary, input: { to, cc, subject, body } });
+      return {
+        proposed: true,
+        summary,
+        note: "Awaiting the user's confirmation; once confirmed it is saved to Drafts, NOT sent. Say you have prepared it — never that it was sent or saved.",
+      };
     }
 
     default:
@@ -1084,10 +2855,137 @@ dates, amounts, or anything not listed here. A number shown as "unknown" could n
 read: say you could not check it rather than guessing.`;
 }
 
-function systemPrompt(ctx: AssistantContext, snapshot: string): string {
-  return `You are ${ASSISTANT_NAME}, the operations assistant for Janelle Interiors, a small
+/** The screens a person can ask from, as they would name them. */
+const SCREENS: Record<string, string> = {
+  '/': 'the Dashboard',
+  '/projects': 'the Projects list',
+  '/vendors': 'the Vendors & purchase orders screen',
+  '/inbox': 'the Inbox',
+  '/documents': 'the Documents screen',
+  '/prompts': 'Prompt Studio',
+  '/tasks': 'the task board',
+  '/follow-ups': 'the Follow-ups screen',
+  '/drafts': 'the Drafts screen',
+  '/reports': 'the Reports screen',
+  '/activity': 'the Audit Log',
+  '/team': 'Team & Roles',
+  '/permissions': 'the Permissions screen',
+  '/settings': 'Settings',
+};
+
+/** One line of the studio's own data, safe to set inside the prompt. */
+const inline = (s: string | null | undefined) => (s ?? '').replace(/[\r\n"]+/g, ' ').trim().slice(0, 120);
+
+/**
+ * What the person is looking at, in a sentence for the prompt — or null.
+ *
+ * A personal assistant beside you can see your screen; "is this one late?"
+ * needs no project name. The browser sends only the path, and a project it
+ * names is read with the caller's own client, so the answer is never a
+ * record they could not have opened themselves.
+ */
+async function describePage(ctx: AssistantContext): Promise<string | null> {
+  const path = ctx.page?.path;
+  if (typeof path !== 'string' || !path.startsWith('/') || path.length > 300) return null;
+  const clean = path.split(/[?#]/)[0];
+
+  const project = clean.match(/^\/projects\/([0-9a-f-]{36})$/i);
+  if (project) {
+    try {
+      const { data } = await ctx.db
+        .from('projects')
+        .select('id, name, client_name, stage')
+        .eq('id', project[1])
+        .maybeSingle();
+      const p = data as { id: string; name: string; client_name: string | null; stage: string } | null;
+      if (p) {
+        return `They are looking at the project "${inline(p.name)}"${p.client_name ? ` for ${inline(p.client_name)}` : ''} (project id ${p.id}). When they say "this project", "this one", "here" or "it" without naming anything, they mean this project — do not ask which.`;
+      }
+    } catch {
+      // Unreadable context is no context; the question still gets answered.
+    }
+    return null;
+  }
+
+  const screen = SCREENS[`/${clean.split('/')[1]}`];
+  return screen ? `They are on ${screen}, so "these" or "here" most likely means what that screen shows.` : null;
+}
+
+/**
+ * What is waiting on the person, stated as fact at the top of the prompt.
+ *
+ * The conversation reaches the model as text, and text cannot say whether a
+ * Confirm button was pressed. So the model read its own "I've prepared a
+ * task" as the task existing, told the person it had been created, and —
+ * when they typed "yes confirmed" — had no way to act on it. Now it is told
+ * exactly what is unsaved, and holds the one tool that saves it.
+ */
+function pendingSection(ctx: AssistantContext): string {
+  const pending = ctx.pending ?? [];
+  if (!pending.length) return '';
+  const lines = pending.map((p, i) => `  #${i + 1}  ${p.summary}`).join('\n');
+  return `
+Prepared earlier and NOT saved — waiting for ${ctx.name.split(/[\s@]/)[0]} to answer:
+${lines}
+If their message agrees to one of these, call respond_to_proposal with decision "confirm" before anything
+else, then answer. If it declines one, "cancel". If it changes one, prepare it again and cancel the old.
+None of these exists yet: never say any of them was created, added or saved until respond_to_proposal
+says it was.
+`;
+}
+
+/**
+ * A spoken question, flagged as one.
+ *
+ * The browser's recogniser hears "Danish" for Denish and "Casa Lair" for
+ * Casa Elar, and a model that takes the transcript at its word goes looking
+ * for people and projects that do not exist. Told the question was spoken,
+ * and given the other ways it was heard, it reads for what was meant.
+ */
+function spokenSection(ctx: AssistantContext): string {
+  const heard = ctx.spoken?.alternatives ?? [];
+  if (!heard.length) return '';
+  const others = heard.slice(1);
+  const otherLine = others.length ? `The other ways it was heard: ${others.map((a) => `"${a}"`).join('; ')}.` : '';
+  return [
+    '',
+    'This message was SPOKEN and turned into text by the browser, which mishears — names above all.',
+    otherLine,
+    'Read it for what they most likely meant. Match any name against the team, the projects, the clients and',
+    'the vendors before deciding someone or something does not exist, and never repeat a misheard word back as',
+    'though it were right — use the real name.',
+    '',
+  ]
+    .filter((line, i, all) => line || i === 0 || i === all.length - 1)
+    .join('\n');
+}
+
+function systemPrompt(ctx: AssistantContext, snapshot: string, page: string | null = null): string {
+  const first = ctx.name.split(/[\s@]/)[0] || ctx.name;
+  const seat = ctx.seat ? SEATS[ctx.seat] : null;
+  return `You are ${ASSISTANT_NAME}, the personal assistant to everyone at Janelle Interiors, a small
 interior design studio. When someone greets you or asks who you are, say you are ${ASSISTANT_NAME}.
-You are speaking with ${ctx.name} (role: ${ctx.role ?? 'unknown'}). Today is ${new Date().toISOString().slice(0, 10)}.
+You are speaking with ${ctx.name} (role: ${ctx.role ?? 'unknown'}${seat ? `; seat: ${seat.label}, which owns ${seat.owns}` : ''}).
+Call them ${first}. Today is ${new Date().toISOString().slice(0, 10)}.
+${page ? `\nWhere they are right now: ${page}\n` : ''}${pendingSection(ctx)}${spokenSection(ctx)}
+Being their assistant, not a search box:
+- "My", "me" and "I" mean ${ctx.name}. "My tasks" are the ones assigned to ${ctx.name} — filter by
+  that name rather than asking whose.
+- Think one step ahead. If the answer shows a problem, the useful thing is usually the next action
+  — a chase drafted, a task prepared. Offer those as suggestions; do the reading yourself.
+- Warm and brief, like someone who works with them every day. Use their first name only
+  occasionally, never in every reply.
+- Remember the conversation: "the first one", "that vendor", "send it to her" refer to what was
+  just discussed. Resolve them from the conversation before searching again.
+- Every answer carries up to three suggestions: the next things ${first} would plausibly ask, specific
+  to what you just said, each something your tools can actually do.
+
+${studioRules(ctx, snapshot)}`;
+}
+
+/** What the studio is, what can be seen, and how every answer is shaped. */
+function studioRules(ctx: AssistantContext, snapshot: string): string {
+  return `
 
 You exist because the founder is the bottleneck: she is in client meetings all day and needs to know
 where things stand without digging through the system, and to delegate by simply saying what she needs.
@@ -1108,7 +3006,27 @@ What you can see — the whole system, through the tools:
 - The team and their roles, the morning digest, the weekly report.
 - The studio’s own rules (how long before chasing) and the audit trail of what has happened.
 - What the studio is spending on you.
+- The studio's LIVE Gmail and Google Drive${canSupervise(ctx.role) ? '' : ' — but NOT for this person: their role cannot search the live mailbox or Drive, so use the stored-mail and document tools, which still hand over attachments'}:
+  every message however old, every attachment of any type, every file in Drive, and what a Doc or
+  Sheet says. find_attachments is the fastest way to a file someone emailed; drive_search finds
+  anything kept in Drive.
 If a question touches any of that, there is a tool for it. Use it before saying you do not know.
+
+Handing things over:
+- When someone asks for a file — an attachment, a drawing, a quote, a photo, a spreadsheet — GIVE THEM
+  THE FILE. Find it, then put its ref in items; the row becomes Download and Open buttons. Never
+  describe a file you could hand over, and never send someone to Gmail or Drive to fetch it
+  themselves.
+- Stored mail first when it is recent and about a project (read_email lists its attachments as
+  files); find_attachments or gmail_search when it is older, or not found there.
+- If several files match, hand over all of them rather than asking which one.
+- To answer from what a PDF or an image SAYS or SHOWS — "from this PDF give me the living room furniture
+  and decor", "what finishes are in the proposal", "show me the dining room board" — call read_document
+  with the file's ref. Give the answer in the lead, the pieces as rows, and ALWAYS include the preview ref
+  it returns, so they see the pages themselves. Never say you cannot open or see a PDF or an image.
+- You cannot send email, and you cannot change anything in Drive. To get an email written, use
+  propose_draft: the person confirms, it goes to Drafts, and they send it themselves from there.
+  Say it is prepared — never that it was sent.
 
 ${snapshot}
 
@@ -1140,13 +3058,6 @@ How to behave:
 - When something is missing, name the one action that fixes it. Never ask the person to narrow the
   question down instead.
 - Lead with the answer, then the reason. Name people and projects plainly.
-- Answers are often spoken aloud, so keep them short — usually two or three sentences of plain
-  conversational prose. No headings, no markdown, no emoji, no bold.
-- Structure ONLY when the answer is genuinely a list of things — several tasks, orders, emails or
-  links. Then use one short line per item, starting with "- ", and nothing else. Three or four items
-  at most; say how many more there are rather than listing them all.
-- A URL always goes on its own line, bare, with nothing wrapped around it — that way it can be
-  copied. Say what it is on the line before.
 - Never pad. No preamble, no "I checked the system and".
 - End on the answer. Do NOT close with an offer or a question — no "would you like me to…",
   no "let me know if…", no "shall I…". If a further lookup would obviously help, just do it in
@@ -1154,13 +3065,58 @@ How to behave:
 - If part of an answer is unavailable, give the part that IS available first and keep the caveat
   to one clause. Never lead with what you could not do.
 - Flag anything a client is waiting on: that is the studio's sorest point.
-- When asked to get something done, call propose_task. A proposal is NOT a completed action — say you
-  have prepared it and that it needs confirming. Never say a task was created.
+- When asked to get something done, call propose_task. A proposal is NOT a completed action — say it
+  is ready and that they can say yes or press Confirm. Something exists only once respond_to_proposal
+  or the Confirm button has saved it; until then never say it was created, added or saved.
+- The studio's task list — "the task list", "the tasks", "the board", "the task module", "my to-do
+  list" — is the Tasks board in THIS system. list_tasks reads it and propose_task adds to it. It is
+  never a document in Drive, and you never need to ask whether they mean one.
+- To raise a task from an email — "make a task from Brianna's email for Denish, due Friday": find the
+  email (search_email; without_task: true lists mail that has no task yet), then call propose_task with
+  its email_id and the owner and date they asked for. Write the title from what the email actually asks,
+  naming the job by the project it is filed under — never "X's project".
+- If that email already has a task, never raise a second one: call propose_task_update on the task it
+  has, with the owner and date they asked for.
+- To change a task already on the board — who owns it, when it is due, its status, its next step —
+  call propose_task_update. Relative dates ("Friday", "end of next week") are worked out from today.
+- When asked whether something was done — "has it been added?", "did that save?", "check the task
+  list" — look: list_tasks for a task, list_drafts for a draft. Answer from what is there, never from
+  what the conversation says should have happened.
+- When a message could mean this system or something outside it, it means this system. Do not ask.
+- Ask the person a question only when you truly cannot go on — a name that matches nobody, two
+  equally likely records. Choices you could offer belong in suggestions; the lead never ends with
+  "Would you like me to…".
 - If a tool refuses on permissions, say so plainly and name who can do it instead.
 - All money is US dollars. Never use another currency symbol.
-- When a tool gives you a document link, include the URL in your answer so the person can open the
-  file. Say what the document is first, then the link.
-- If you genuinely cannot tell, say so. Do not fill the gap with something plausible.`;
+- If you genuinely cannot tell, say so. Do not fill the gap with something plausible.
+
+How to answer — the shape, not the words:
+- EVERY answer is delivered by calling the answer tool. Never reply with ordinary text; text is not
+  shown to the person. Call it once, on its own, after the last lookup.
+- lead is the answer in one or two sentences. It is read first and on its own, so it must stand up
+  without the rows: "Three orders are late, the worst by twelve days" — not "Here is what I found".
+- items are the records the answer is ABOUT, one row each, and they are what makes an answer useful:
+  each row opens straight through to that project, task, order or email, and a file row is the file
+  itself. So whenever an answer names records — the projects, the overdue tasks, the late orders, the
+  attachments — put them in items rather than listing them in the lead.
+  · Every row a tool returns has a ref ("P3", "T1", "F2"). Answer with { "ref": "P3" } — that is a
+    complete row: the server lays out its name, every figure as a formatted column, and for a file
+    the download. Do NOT copy titles, amounts or dates out of the tool result into a row.
+  · Add meta or tone to a ref only when you have judgement to add: "worst", "client waiting". A row
+    already shows its client, stage, dates, amounts and counts as columns — meta must never repeat
+    any of them. When in doubt, leave meta out.
+  · Only for something no tool gave a ref, write the row out: kind, title, detail, meta.
+  · tone: crit for a client left waiting or a real breach, warn for slipping, good for settled.
+  · Up to 25 rows. Asked for a list — "our projects", "all open orders" — give the WHOLE list up to
+    25, in a sensible order, and put the count of the rest in more. Never truncate silently.
+- Do NOT repeat the rows inside the lead. Say how many and how bad; the rows say which. For a list
+  someone asked for, the lead is the count plus at most ONE thing worth noticing — "Four projects,
+  one of them on hold." — and never a walk through the rows, however few there are.
+- A URL belongs in a row's url, never typed into the prose. A document, a Canva board, a tracking
+  page: give it a row of its own with what it is as the title.
+- speech is the same answer for someone who is driving: one or two sentences, no lists, no ids, no
+  URLs. Name the worst one or two and say how many others there are.
+- caveat is for something that genuinely failed to load, in one clause. It is not for hedging.`;
 }
 
 /**
@@ -1171,20 +3127,97 @@ export async function ask(
   message: string,
   history: AssistantTurn[],
   ctx: AssistantContext,
+  opts: AskOptions = {},
 ): Promise<AssistantResult> {
   if (!(await isAiReady(ctx.orgId))) {
     throw new Error('Claude is not set up yet — add an API key in Settings.');
   }
 
+  // Progress is a courtesy: a listener that throws must never cost the answer.
+  const status = (text: string) => {
+    try {
+      opts.onStatus?.(text);
+    } catch {
+      /* the answer matters more than the progress line */
+    }
+  };
+
   const proposed: ProposedAction[] = [];
   const used: string[] = [];
+  const session: ToolSession = {
+    proposed,
+    refs: new RefRegistry(),
+    google: new GoogleAccess(ctx.orgId),
+    settled: [],
+  };
+  const settled = session.settled;
+
+  const fileRef = (token: string, grant: FileGrant) => {
+    const pages = grant.pages?.length ? grant.pages : null;
+    const image = grant.mimeType.startsWith('image/');
+    return session.refs.add('F', {
+      kind: 'file',
+      title: grant.name,
+      file: {
+        name: grant.name,
+        mimeType: grant.mimeType,
+        size: grant.source === 'upload' ? grant.size : 0,
+        source: grant.source,
+        token,
+        downloadable: true,
+        webUrl: grantWebUrl(grant),
+      },
+      ...(pages ? { preview: 'pdf' as const, pages } : image && grant.source === 'upload' ? { preview: 'image' as const } : {}),
+    });
+  };
+
+  // Files attached to this question. They come first: "this", with a file
+  // just attached, means the file.
+  const attached = (ctx.attached ?? []).map(({ token, grant }) => {
+    const ref = fileRef(token, grant);
+    const kind = grant.mimeType === 'application/pdf' ? 'PDF' : 'image';
+    const size = grant.source === 'upload' ? sizeLabel(grant.size) : '';
+    return `  ${ref}  “${grant.name}” (${kind}${size ? `, ${size}` : ''})`;
+  });
+
+  // Files handed over earlier in the conversation, under refs this question
+  // can use — "from this PDF" means one of these.
+  const attachedTokens = new Set((ctx.attached ?? []).map((f) => f.token));
+  const earlierFiles = (ctx.recentFiles ?? [])
+    .filter(({ token }) => !attachedTokens.has(token))
+    .map(({ token, grant }) => {
+      const ref = fileRef(token, grant);
+      const pages = grant.pages?.length ? grant.pages : null;
+      const who = grant.source === 'upload' ? ' (attached by the person earlier)' : '';
+      return `  ${ref}  “${grant.name}”${who}${pages ? ` (pages ${pages.join(', ')} shown)` : ''}`;
+    });
 
   const messages: Anthropic.MessageParam[] = [
     ...history.slice(-8).map((t) => ({ role: t.role, content: t.content })),
     { role: 'user' as const, content: message },
   ];
 
-  const system = systemPrompt(ctx, await studioSnapshot(ctx));
+  status('Thinking');
+  const [snapshot, page] = await Promise.all([studioSnapshot(ctx), describePage(ctx)]);
+  const filesNote = [
+    ...(attached.length
+      ? [
+          '',
+          '',
+          'The person ATTACHED these files to this question. "This", "it", "the file" and "the plan" mean them. Read them with read_document, passing the ref and what they asked, before answering anything about them — never search email or Drive for them, they are right here. When they ask only to look at a file, read it and say what it is and what matters in it.',
+          ...attached,
+        ]
+      : []),
+    ...(earlierFiles.length
+      ? [
+          '',
+          '',
+          'Files already handed over in this conversation — "this PDF", "that file", "the proposal" most likely means the latest of these:',
+          ...earlierFiles,
+        ]
+      : []),
+  ].join('\n');
+  const system = `${systemPrompt(ctx, snapshot, page)}${filesNote}`;
 
   // Six turns of tool use is minutes of work, and the function is killed
   // long before that — the caller then gets no response at all, not even an
@@ -1198,19 +3231,30 @@ export async function ask(
 
   for (let turn = 0; turn < 6; turn++) {
     // Out of time with tool results in hand: spend what is left on an
-    // answer rather than another lookup. Dropping the tools is what forces
-    // one, and it is a cheaper call than a tool turn.
+    // answer rather than another lookup. Dropping every tool but `answer`
+    // is what forces one, and it is a cheaper call than a tool turn.
     if (turn > 0 && timeLeft() <= slowestTurn) {
-      return { reply: await finalAnswer(ctx, system, messages, used), proposed, used };
+      const answer = await finalAnswer(ctx, system, messages, used, session.refs);
+      return { reply: answerToText(answer), answer, proposed, used, settled };
     }
 
+    // After the first turn the model has results in hand; what it does next
+    // is usually the answer, and saying so beats repeating "Thinking".
+    if (turn > 0) status('Putting it together');
     const startedTurn = Date.now();
     const res = await createMessage(
       { feature: 'assistant.answer', orgId: ctx.orgId, actor: ctx.userId },
       {
-        max_tokens: 2048,
+        // Room for a drafted email in propose_draft, which is the one tool
+        // whose input is long prose rather than a few words.
+        max_tokens: 4096,
         system,
         tools: TOOLS,
+        // Every turn is a tool call, and the last is always `answer`. Left
+        // free to reply in plain text, the model sometimes did — and a plain
+        // reply has no rows, no suggestions, and is where "would you like me
+        // to…" questions crept back in.
+        tool_choice: { type: 'any' },
         messages,
       },
     );
@@ -1218,79 +3262,135 @@ export async function ask(
 
     const toolUses = res.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
 
+    // The intended exit: `answer` called on its own, with every lookup done.
+    // Nothing goes back to Claude — this IS the turn ending, and a further
+    // round-trip would only be a chance to change its mind.
+    const answered = toolUses.find((t) => t.name === 'answer');
+    if (answered && toolUses.length === 1) {
+      const answer = toAnswer((answered.input ?? {}) as Record<string, unknown>, used, session.refs);
+      return { reply: answerToText(answer), answer, proposed, used, settled };
+    }
+
     if (toolUses.length === 0 || res.stop_reason !== 'tool_use') {
+      // Answered as plain text instead. Take it — the words are what matter
+      // — and lay them out as best they can be.
       const reply = res.content
         .filter((b): b is Anthropic.TextBlock => b.type === 'text')
         .map((b) => b.text)
         .join('\n')
         .trim();
-      return { reply, proposed, used };
+      return { reply, answer: answerFromText(reply, used), proposed, used, settled };
     }
 
     messages.push({ role: 'assistant', content: res.content });
 
-    const results: Anthropic.ToolResultBlockParam[] = [];
-    for (const tu of toolUses) {
-      used.push(tu.name);
-      try {
-        const out = await runTool(tu.name, (tu.input ?? {}) as Record<string, unknown>, ctx, proposed);
-        results.push({ type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(out) });
-      } catch (err) {
-        const msg =
-          err instanceof ToolDataError
-            ? `${err.message}. Tell the user you could not check this — do NOT say there are none.`
-            : `Error: ${(err as Error).message}`;
-        results.push({ type: 'tool_result', tool_use_id: tu.id, content: msg, is_error: true });
-      }
-    }
+    // Said once per turn, naming everything under way: "Searching Gmail ·
+    // Searching Google Drive" reads as one step, which it is.
+    const doing = [...new Set(toolUses.map((t) => TOOL_STATUS[t.name]).filter(Boolean))];
+    if (doing.length) status(doing.join(' · '));
+
+    // Run side by side. A question that searches Gmail and Drive at once is
+    // two slow network round-trips, and waiting for one before starting the
+    // other spends the time budget on nothing. Promise.all keeps the
+    // results in the order the calls were made.
+    const results: Anthropic.ToolResultBlockParam[] = await Promise.all(
+      toolUses.map(async (tu): Promise<Anthropic.ToolResultBlockParam> => {
+        // `answer` alongside a lookup means it was written before the data
+        // came back. Sending it back as an error costs one turn and saves an
+        // answer composed out of nothing — and every tool_use must carry a
+        // result anyway, or the next call is rejected outright.
+        if (tu.name === 'answer') {
+          return {
+            type: 'tool_result',
+            tool_use_id: tu.id,
+            content:
+              'You called answer in the same turn as a lookup, so it was written before the results arrived. Read the results below, then call answer on its own.',
+            is_error: true,
+          };
+        }
+
+        used.push(tu.name);
+        try {
+          const out = await runTool(tu.name, (tu.input ?? {}) as Record<string, unknown>, ctx, session);
+          return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(out) };
+        } catch (err) {
+          const msg =
+            err instanceof ToolDataError
+              ? `${err.message}. Tell the user you could not check this — do NOT say there are none.`
+              : `Error: ${(err as Error).message}`;
+          return { type: 'tool_result', tool_use_id: tu.id, content: msg, is_error: true };
+        }
+      }),
+    );
     // All results go back in ONE user message, or Claude learns to stop
     // making parallel tool calls.
     messages.push({ role: 'user', content: results });
   }
 
-  return {
-    reply: "I couldn't work that out — could you ask it a different way?",
-    proposed,
-    used,
-  };
+  // Six turns and still no answer. Everything looked up is already in
+  // `messages`, so ask for the answer itself rather than giving up on it.
+  const answer = await finalAnswer(ctx, system, messages, used, session.refs);
+  return { reply: answerToText(answer), answer, proposed, used, settled };
 }
 
 /**
- * One last call with no tools, to turn whatever was looked up into an answer.
+ * One last call to turn whatever was looked up into an answer.
  *
- * Reached when the clock ran out mid-loop. Everything the tools returned is
- * already in `messages`, so this usually answers the question properly; it
- * only falls back to an apology if even this cannot be afforded.
+ * Reached when the clock ran out mid-loop, or when six turns went by
+ * without one. Everything the tools returned is already in `messages`, so
+ * this usually answers the question properly; it only falls back to an
+ * apology if even this cannot be afforded.
+ *
+ * `answer` is the only tool offered and the model is made to call it, so
+ * the shape is guaranteed — the path taken when things are going worst is
+ * not the one that should also have to guess at a format.
  */
 async function finalAnswer(
   ctx: AssistantContext,
   system: string,
   messages: Anthropic.MessageParam[],
   used: string[],
-): Promise<string> {
+  refs: RefRegistry,
+): Promise<AssistantAnswer> {
   try {
     const res = await createMessage(
       { feature: 'assistant.answer', orgId: ctx.orgId, actor: ctx.userId },
       {
-        max_tokens: 1024,
+        max_tokens: 1536,
         system: `${system}
 
-You are out of time to look anything else up. Answer now from what you already have.
-If what you have is not enough, say plainly which part you could not check.`,
+You are out of time to look anything else up. Answer now, with the answer tool, from what you
+already have. If what you have is not enough, say in the caveat which part you could not check.`,
+        // The whole tool list, with `answer` forced. The history is full of
+        // calls to the other tools, and they stay defined so it reads as the
+        // conversation it was; tool_choice is what rules out another lookup.
+        tools: TOOLS,
+        tool_choice: { type: 'tool', name: 'answer' },
         messages,
       },
     );
+
+    const call = res.content.find(
+      (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'answer',
+    );
+    if (call) return toAnswer((call.input ?? {}) as Record<string, unknown>, used, refs);
+
+    // Forced tool use should make this unreachable, but an answer in plain
+    // text is still an answer and must not be thrown away.
     const reply = res.content
       .filter((b): b is Anthropic.TextBlock => b.type === 'text')
       .map((b) => b.text)
       .join('\n')
       .trim();
-    if (reply) return reply;
+    if (reply) return answerFromText(reply, used);
   } catch (err) {
     console.error('[assistant] final answer failed:', (err as Error).message);
   }
 
-  return used.length
-    ? 'That took longer than I have — I checked part of it but could not finish. Ask me again, or ask for one thing at a time.'
-    : 'That took longer than I have. Could you ask me again, or narrow it down a little?';
+  return answerFromText(
+    used.length
+      ? 'That took longer than I have — I checked part of it but could not finish. Ask me again, or ask for one thing at a time.'
+      : 'That took longer than I have. Could you ask me again, or narrow it down a little?',
+    used,
+  );
 }

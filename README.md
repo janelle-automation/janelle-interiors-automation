@@ -5,6 +5,7 @@ live source of truth, drafts follow-ups, and writes a weekly report. The team ke
 Houzz Pro and Gmail; **nothing is auto-sent** — every outbound message is a draft a person approves.
 
 > Full functional spec: [`docs/WORKFLOW-AND-FUNCTIONALITY.md`](docs/WORKFLOW-AND-FUNCTIONALITY.md)
+> How it runs, end to end: [`docs/PROJECT-FLOW.md`](docs/PROJECT-FLOW.md)
 
 ## Stack
 

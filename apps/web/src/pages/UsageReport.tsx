@@ -186,7 +186,7 @@ export default function UsageReport() {
   const agentShare = totals.cost_usd > 0 ? Math.round((agentCost / totals.cost_usd) * 100) : 0;
 
   return (
-    <div className="min-h-screen bg-canvas px-5 py-10 md:px-8">
+    <div className="min-h-screen bg-paper px-5 py-10 md:px-8">
       <div className="mx-auto max-w-5xl space-y-8">
         <header>
           <div className="text-[12px] font-semibold uppercase tracking-wide text-ink-faint">
