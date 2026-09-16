@@ -4,7 +4,8 @@ import {
   gmailFor, getEmail, listMessageIds, downloadAttachment, addressOf, addressesOf, type PdfAttachment,
   getProfileEmail, ignoredSenderQuery, isIgnoredSender, linksIn,
 } from './gmail.js';
-import { driveFor, listPdfs, downloadFile } from './drive.js';
+import { driveFor, listPdfs, downloadFile, type DriveFile } from './drive.js';
+import { listProjectPdfs, loadDriveProjects, syncProjectStatusDoc, syncProjectsFromDrive, type ProjectFolder } from './driveProjects.js';
 import {
   classifyEmail, extractPdf, MAX_PDF_BYTES,
   type AttachmentEvidence, type DocumentExtraction,
@@ -358,6 +359,31 @@ async function ingestInternal(
   let taskCount = 0;
   let skippedCount = 0;
 
+  // ── The studio's projects, from its Drive folders ─────────
+  // First, before any mail: an email can only be filed against a project the
+  // studio has, and the folder list is where the studio says what it has.
+  let drive: Awaited<ReturnType<typeof driveFor>> = null;
+  let driveProjects: Awaited<ReturnType<typeof loadDriveProjects>> = null;
+  let folderProjects = new Map<string, string>();
+  if (useAi && !opts.folderId) {
+    try {
+      drive = await driveFor(userId);
+      driveProjects = drive ? await loadDriveProjects(orgId, drive) : null;
+      if (drive && driveProjects) {
+        folderProjects = (await syncProjectsFromDrive(orgId, driveProjects)).map;
+        try {
+          await syncProjectStatusDoc(orgId, drive, driveProjects, folderProjects);
+        } catch (err) {
+          console.error('[ingest] project status document unread:', (err as Error).message);
+        }
+      }
+    } catch (err) {
+      // Mail is still worth reading without the folder list.
+      console.error('[ingest] project folders unreadable:', isGoogleAuthFailure(err) ? 'Google needs reconnecting' : (err as Error).message);
+      driveProjects = null;
+    }
+  }
+
   // ── Emails ────────────────────────────────────────────────
   // Everything from here to the first message sits OUTSIDE the per-email
   // guard below, so a dead Google grant threw straight out of the request
@@ -677,9 +703,9 @@ async function ingestInternal(
   // Skipped entirely when the mail already used the budget; the next pass
   // finds the same files, minus whatever got stored.
   if (useAi && !roomFor('doc')) done = false;
-  let drive: Awaited<ReturnType<typeof driveFor>> = null;
   try {
-    drive = useAi && roomFor('doc') ? await driveFor(userId) : null;
+    if (!(useAi && roomFor('doc'))) drive = null;
+    else drive ??= await driveFor(userId);
   } catch (err) {
     // The mail is already written; losing Drive as well would be worse than
     // reporting an incomplete pass.
@@ -688,7 +714,40 @@ async function ingestInternal(
     done = false;
   }
   if (drive) {
-    const files = await listPdfs(drive, { folderId: opts.folderId, max: 15 });
+    // The studio's project folders, when it keeps them: projects from the
+    // folder list, and only PDFs filed inside a project folder, each already
+    // knowing its project. Without them, Drive is read as it always was.
+    let files: DriveFile[] = [];
+    const folderOf = new Map<string, { folder: ProjectFolder; projectId: string | null }>();
+    let fromFolders = false;
+    try {
+      const dp = driveProjects;
+      const map = folderProjects;
+      if (dp) {
+        fromFolders = true;
+        const candidates = await listProjectPdfs(drive, dp);
+        // Skip what is already read before taking a batch, or the newest
+        // fifteen — all stored — would stand in front of everything older.
+        const stored = new Set<string>();
+        for (let i = 0; i < candidates.length; i += 200) {
+          const { data } = await supabaseAdmin
+            .from('documents')
+            .select('drive_file_id')
+            .eq('org_id', orgId)
+            .in('drive_file_id', candidates.slice(i, i + 200).map((c) => c.file.id));
+          for (const row of data ?? []) stored.add((row as { drive_file_id: string }).drive_file_id);
+        }
+        for (const c of candidates.filter((x) => !stored.has(x.file.id)).slice(0, 15)) {
+          files.push(c.file);
+          folderOf.set(c.file.id, { folder: c.folder, projectId: map.get(c.folder.folderId) ?? null });
+        }
+      }
+    } catch (err) {
+      if (isGoogleAuthFailure(err)) throw err;
+      console.error('[ingest] project folders unreadable, reading Drive as before:', (err as Error).message);
+    }
+    if (!fromFolders) files = await listPdfs(drive, { folderId: opts.folderId, max: 15 });
+
     for (const [index, file] of files.entries()) {
       if (!roomFor('doc')) {
         done = false;
@@ -711,11 +770,16 @@ async function ingestInternal(
 
         const bytes = await downloadFile(drive, file.id);
         const driveNames = await loadStudioNames(orgId);
-        const extracted = await extractPdf(bytes, file.name, { orgId }, driveNames);
-        const { projectId } = resolveFiling(driveNames, {
-          project: namesAProject(extracted?.project_hint, extracted?.vendor) ? extracted?.project_hint ?? null : null,
-          client: extracted?.client,
-        });
+        const filedIn = folderOf.get(file.id);
+        const extracted = await extractPdf(bytes, filedIn ? `${filedIn.folder.folderName}/${file.name}` : file.name, { orgId }, driveNames);
+        // Where the studio filed it decides the project; what it says only
+        // decides for a file outside the project folders.
+        const projectId =
+          filedIn?.projectId ??
+          resolveFiling(driveNames, {
+            project: namesAProject(extracted?.project_hint, extracted?.vendor) ? extracted?.project_hint ?? null : null,
+            client: extracted?.client,
+          }).projectId;
 
         const { data: docRow } = await supabaseAdmin
           .from('documents')

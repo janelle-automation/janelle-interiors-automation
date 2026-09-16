@@ -1,6 +1,8 @@
 import { supabaseAdmin } from '../lib/supabase.js';
 import { forgetStudioNames } from '../lib/studioNames.js';
-import { isStudioAddress, isStudioName } from '../lib/studioTeam.js';
+import {
+  isAutomatedAddress, isSoftwareService, isStudioAddress, isStudioName, orderedByTeammate,
+} from '../lib/studioTeam.js';
 import { PROJECT_STAGES, type PoStatus, type ProjectStage } from '@janelle/shared';
 
 /** Move a project forward to a signalled stage (never backwards). */
@@ -139,9 +141,32 @@ function sameEntity(a: string, b: string): boolean {
  * the list it was meant to straighten out.
  */
 export function matchProjectId(projects: { id: string; name: string }[], name: string): string | null {
+  return bestEntityMatch(projects, name)?.id ?? null;
+}
+
+/**
+ * The one row a name means: the row named exactly that, else the closest of
+ * the rows it loosely matches — never a pick between two equally close ones.
+ *
+ * "The first loose match" filed "OVIS Cabana" mail under "OVIS Spa Cabana"
+ * whenever that row happened to come first: every word of the shorter name
+ * is in the longer one. Two real projects can share words; the closer name,
+ * the one with fewer words left over, is the one meant.
+ */
+function bestEntityMatch<T extends { id: string; name: string }>(rows: T[], name: string): T | null {
   const norm = normalize(name);
   if (!norm) return null;
-  return projects.find((p) => sameEntity(normalize(p.name), norm))?.id ?? null;
+  const exact = rows.filter((r) => normalize(r.name) === norm);
+  if (exact.length === 1) return exact[0];
+  const loose = rows.filter((r) => sameEntity(normalize(r.name), norm));
+  if (loose.length <= 1) return loose[0] ?? null;
+  const said = keyWords(norm);
+  const extra = (r: T) => {
+    const theirs = keyWords(normalize(r.name));
+    return theirs.filter((w) => !said.some((s) => sameWord(s, w))).length + said.filter((s) => !theirs.some((w) => sameWord(s, w))).length;
+  };
+  const scored = loose.map((r) => ({ r, d: extra(r) })).sort((a, b) => a.d - b.d);
+  return scored[0].d < scored[1].d ? scored[0].r : null;
 }
 
 /**
@@ -157,7 +182,14 @@ export function matchClientProjectId(
 ): string | null {
   const norm = normalize(client);
   if (!norm) return null;
-  const hits = projects.filter((p) => p.client_name && sameEntity(normalize(p.client_name), norm));
+  // The studio is on every job's paperwork; it identifies none of them. A
+  // project wrongly recorded with the studio as its client drew in every
+  // document that named the studio — an Ojai Valley Inn quote was filed
+  // under the Lemon job that way.
+  if (isStudioName(client)) return null;
+  const hits = projects.filter(
+    (p) => p.client_name && !isStudioName(p.client_name) && sameEntity(normalize(p.client_name), norm),
+  );
   return hits.length === 1 ? hits[0].id : null;
 }
 
@@ -169,7 +201,7 @@ export function matchClientProjectId(
  * "Lemon's Project" is the Lemon job, and "the lemon project" is too.
  */
 export function cleanProjectName(raw: string): string {
-  let s = raw
+  let s = orderedByTeammate(raw)
     .trim()
     .replace(/['’]s\b/gi, '')
     .replace(/\b(project|job)\b/gi, ' ')
@@ -205,6 +237,8 @@ export function nameQuality(name: string): number {
   if (/\b\d+\s+\w+\s+(lane|ln|street|st|road|rd|avenue|ave|drive|dr|boulevard|blvd|way|court|ct)\b/i.test(name)) q -= 2;
   if (/\b[A-Z]{2}\s+\d{5}\b/.test(name)) q -= 1;
   if (name.length > 60) q -= 2;
+  // "Carissa 90826/Oak Kit": who placed the order and when, not the job.
+  if (orderedByTeammate(name) !== name || isStudioName(name)) q -= 3;
   return q;
 }
 
@@ -218,6 +252,7 @@ export function nameQuality(name: string): number {
 export function namesAProject(hint?: string | null, vendorHint?: string | null): boolean {
   const norm = normalize(hint ?? '');
   if (norm.length < 4) return false;
+  if (isSoftwareService(hint) || isStudioName(hint)) return false;
   if (words(norm).every((w) => GENERIC_WORDS.has(w))) return false;
   if (vendorHint && sameEntity(norm, normalize(vendorHint))) return false;
   return true;
@@ -230,32 +265,45 @@ export function namesAProject(hint?: string | null, vendorHint?: string | null):
  */
 const MIN_PROJECT_CONFIDENCE = 0.55;
 
-async function upsertVendor(orgId: string, name?: string | null, email?: string | null): Promise<string | null> {
+/** A vendor's person. Only ever the vendor's own — never the client's, never the studio's. */
+export interface VendorContact {
+  name?: string | null;
+  email?: string | null;
+}
+
+async function upsertVendor(orgId: string, name?: string | null, contact: VendorContact = {}): Promise<string | null> {
   if (!supabaseAdmin || !name || name.trim().length < 2) return null;
-  // The studio and its people are never a vendor, and a studio address is
-  // never a vendor's contact — the reply goes to the vendor, not to Brianna.
-  if (isStudioName(name)) return null;
-  if (email && isStudioAddress(email)) email = null;
+  // The studio and its people are never a vendor, nor is the software the
+  // studio runs on — Slack and GitHub write a lot of email.
+  if (isStudioName(name) || isSoftwareService(name)) return null;
+  const email = contact.email?.trim().toLowerCase() || null;
+  // A studio address is never a vendor's contact — the reply goes to the
+  // vendor, not to Brianna — and neither is a no-reply sender.
+  const usable = email && email.includes('@') && !isStudioAddress(email) && !isAutomatedAddress(email) ? email : null;
+  const person = contact.name?.trim() || null;
   const clean = name.trim();
   const norm = normalize(clean);
   if (norm.length < 2) return null;
 
   const { data: all } = await supabaseAdmin.from('vendors').select('id, name, contacts').eq('org_id', orgId);
   const hit = (all ?? []).find((v) => sameEntity(normalize((v as { name: string }).name), norm)) as
-    | { id: string; contacts: { email?: string }[] | null }
+    | { id: string; contacts: { email?: string; name?: string }[] | null }
     | undefined;
 
   if (hit) {
-    if (email) {
+    if (usable) {
       const contacts = Array.isArray(hit.contacts) ? hit.contacts : [];
-      if (!contacts.some((c) => c.email === email)) {
-        await supabaseAdmin.from('vendors').update({ contacts: [...contacts, { email }] }).eq('id', hit.id);
+      if (!contacts.some((c) => c.email?.toLowerCase() === usable)) {
+        await supabaseAdmin
+          .from('vendors')
+          .update({ contacts: [...contacts, { email: usable, ...(person ? { name: person } : {}) }] })
+          .eq('id', hit.id);
       }
     }
     return hit.id;
   }
 
-  const contacts = email ? [{ email }] : [];
+  const contacts = usable ? [{ email: usable, ...(person ? { name: person } : {}) }] : [];
   forgetStudioNames(orgId);
   const { data } = await supabaseAdmin
     .from('vendors')
@@ -276,36 +324,27 @@ async function upsertVendor(orgId: string, name?: string | null, email?: string 
 async function upsertProject(
   orgId: string,
   name?: string | null,
-  opts: { client?: string | null; target?: string | null; create?: boolean } = {},
+  opts: { client?: string | null; target?: string | null; create?: boolean; betterName?: string | null } = {},
 ): Promise<string | null> {
   if (!supabaseAdmin || !name || name.trim().length < 3) return null;
   const clean = cleanProjectName(name);
   const norm = normalize(clean);
   if (norm.length < 3) return null;
   // A teammate is never the job, and never whom the job is for.
-  if (isStudioName(clean)) return null;
-  if (isStudioName(opts.client)) opts = { ...opts, client: null };
+  if (isStudioName(clean) || isSoftwareService(clean)) return null;
+  if (isStudioName(opts.client) || isSoftwareService(opts.client)) opts = { ...opts, client: null };
 
   const { data: all } = await supabaseAdmin
     .from('projects')
     .select('id, name, client_name, target_install')
     .eq('org_id', orgId);
 
-  const hit = (all ?? []).find((p) => sameEntity(normalize((p as { name: string }).name), norm)) as
+  const hit = bestEntityMatch((all ?? []) as { id: string; name: string }[], clean) as
     | { id: string; name: string; client_name: string | null; target_install: string | null }
     | undefined;
 
   if (hit) {
-    const patch: Record<string, unknown> = {};
-    if (opts.client && !hit.client_name) patch.client_name = opts.client;
-    if (opts.target && !hit.target_install) patch.target_install = opts.target;
-    // Only ever a better name. This used to take any shorter one, which is
-    // how "Lemon Residence" became "Lemon's".
-    if (nameQuality(clean) > nameQuality(hit.name)) patch.name = clean;
-    if (Object.keys(patch).length) {
-      await supabaseAdmin.from('projects').update(patch).eq('id', hit.id);
-      forgetStudioNames(orgId);
-    }
+    await improveProject(orgId, hit, { name: clean, betterName: opts.betterName, client: opts.client, target: opts.target });
     return hit.id;
   }
 
@@ -316,7 +355,7 @@ async function upsertProject(
     .from('projects')
     .insert({
       org_id: orgId,
-      name: clean,
+      name: bestName([clean, opts.betterName]) ?? clean,
       stage: 'spec',
       status: 'active',
       client_name: opts.client ?? null,
@@ -327,9 +366,64 @@ async function upsertProject(
   return (data?.id as string) ?? null;
 }
 
+/** The best of some names for one job, or null when none is usable. */
+function bestName(candidates: (string | null | undefined)[]): string | null {
+  const names = candidates
+    .filter((n): n is string => typeof n === 'string' && n.trim().length >= 3)
+    .map(cleanProjectName)
+    .filter((n) => n.length >= 3 && !isStudioName(n) && !isSoftwareService(n));
+  if (!names.length) return null;
+  return names.reduce((best, n) => (nameQuality(n) > nameQuality(best) ? n : best));
+}
+
+/**
+ * Put right what a project was first recorded with, as better evidence arrives.
+ *
+ * A name is only ever replaced by a better one — "Lemon's" by "Lemon
+ * Residence", never the reverse. A client is filled when missing, and
+ * replaced when what was recorded is the studio itself: "Janelle Interiors"
+ * as the client of the Lemon job was both wrong and, worse, drew every
+ * document naming the studio into that project.
+ */
+async function improveProject(
+  orgId: string,
+  project: { id: string; name: string; client_name: string | null; target_install?: string | null },
+  evidence: { name?: string | null; betterName?: string | null; client?: string | null; target?: string | null },
+): Promise<void> {
+  if (!supabaseAdmin) return;
+  const patch: Record<string, unknown> = {};
+  const candidate = bestName([evidence.name, evidence.betterName]);
+  if (candidate && nameQuality(candidate) > nameQuality(project.name)) patch.name = candidate;
+  const client = evidence.client?.trim();
+  if (client && !isStudioName(client) && !isSoftwareService(client)) {
+    if (!project.client_name || isStudioName(project.client_name)) patch.client_name = client;
+  }
+  if (evidence.target && !project.target_install) patch.target_install = evidence.target;
+  if (!Object.keys(patch).length) return;
+  await supabaseAdmin.from('projects').update(patch).eq('id', project.id).eq('org_id', orgId);
+  forgetStudioNames(orgId);
+}
+
+/** improveProject for a project known by id. */
+async function improveProjectById(
+  orgId: string,
+  projectId: string,
+  evidence: { betterName?: string | null; client?: string | null; target?: string | null },
+): Promise<void> {
+  if (!supabaseAdmin) return;
+  const { data } = await supabaseAdmin
+    .from('projects')
+    .select('id, name, client_name, target_install')
+    .eq('id', projectId)
+    .eq('org_id', orgId)
+    .maybeSingle();
+  if (data) await improveProject(orgId, data as { id: string; name: string; client_name: string | null; target_install: string | null }, evidence);
+}
+
 interface ParsedDoc {
   type?: string;
   vendor?: string | null;
+  better_project_name?: string | null;
   po_number?: string | null;
   project_hint?: string | null;
   client?: string | null;
@@ -357,7 +451,9 @@ export async function promoteDocument(
   // A quote or PO is a strong enough signal to open a project, but only if
   // it actually names one — not when the hint is the vendor or "Samples".
   const hint = namesAProject(p.project_hint, p.vendor) ? p.project_hint : null;
-  const projectId = doc.project_id ?? (await upsertProject(orgId, hint, { client: p.client, target: p.eta }));
+  if (doc.project_id) await improveProjectById(orgId, doc.project_id, { betterName: p.better_project_name, client: p.client });
+  const projectId =
+    doc.project_id ?? (await upsertProject(orgId, hint, { client: p.client, target: p.eta, betterName: p.better_project_name }));
 
   // Dedupe by PO number when present, else by vendor + project + amount
   // (so the same quote arriving on several attachments makes one PO).
@@ -436,8 +532,11 @@ export async function promoteEmail(
     project_id: string | null;
     extracted_json: {
       vendor_hint?: string | null;
+      vendor_contact_name?: string | null;
+      vendor_contact_email?: string | null;
       project_hint?: string | null;
-      reply_to_email?: string | null;
+      project_is_existing?: boolean | null;
+      better_project_name?: string | null;
       client_name?: string | null;
       target_date?: string | null;
       stage_signal?: string | null;
@@ -448,21 +547,49 @@ export async function promoteEmail(
   if (!supabaseAdmin) return;
   const ex = email.extracted_json;
   if (!ex) return;
-  if (email.class === 'general' || email.class === 'houzz_notification' || email.class === 'unclassified') return;
+  // Houzz's own notices are filed to a project that exists (by ingest) and
+  // raise nothing; an unreadable email promotes nothing.
+  if (email.class === 'houzz_notification' || email.class === 'unclassified') return;
 
-  const vendorId = email.vendor_id ?? (await upsertVendor(orgId, ex.vendor_hint, ex.reply_to_email));
+  const orderish = email.class === 'vendor_quote' || email.class === 'order_confirmation';
+  const confidence = ex.confidence ?? 1;
+
+  // Most of the studio's mail about suppliers is not a quote: "can you chase
+  // Workshop for the ottoman drawings". It used to be skipped outright, so
+  // the vendor was never recorded and the task never linked to one. A
+  // supplier is recorded from it when the email shows the supplier's own
+  // address — the mark of a real counterparty, which a notification from
+  // Slack or a passing mention does not have. The contact is the vendor's own
+  // person, never the reply-to: that was often the client, which is how a
+  // hotel's address ended up as House of Leon's contact.
+  const contact = { name: ex.vendor_contact_name, email: ex.vendor_contact_email };
+  const knownSupplier = orderish || Boolean(contact.email && !isAutomatedAddress(contact.email));
+  const vendorId =
+    email.vendor_id ?? (knownSupplier && confidence >= MIN_PROJECT_CONFIDENCE ? await upsertVendor(orgId, ex.vendor_hint, contact) : null);
+  if (email.vendor_id && contact.email) await upsertVendor(orgId, ex.vendor_hint, contact);
 
   // Mail that names no project gets no project. Mail that names one but is
   // only guessing may be filed against a project that exists, but may not
   // open a new one — that is where the duplicates came from, one row per
   // email for correspondence that was never about a job in the first place.
+  //
+  // General mail opens a project only when it is plainly a new client job: the
+  // model is sure, says the job is not one on the list, names who it is for,
+  // and the name is a proper one ("Casa Elar Primary Suite", not "Hardware").
   const hint = namesAProject(ex.project_hint, ex.vendor_hint) ? ex.project_hint : null;
+  const clientOk = Boolean(ex.client_name && !isStudioName(ex.client_name) && !isSoftwareService(ex.client_name));
+  const properJob =
+    ex.project_is_existing === false && confidence >= 0.7 && clientOk && nameQuality(cleanProjectName(hint ?? '')) >= 1;
+  if (email.project_id) {
+    await improveProjectById(orgId, email.project_id, { betterName: ex.better_project_name, client: ex.client_name, target: ex.target_date });
+  }
   const projectId =
     email.project_id ??
     (await upsertProject(orgId, hint, {
       client: ex.client_name,
       target: ex.target_date,
-      create: (ex.confidence ?? 1) >= MIN_PROJECT_CONFIDENCE,
+      betterName: ex.better_project_name,
+      create: orderish ? confidence >= MIN_PROJECT_CONFIDENCE : properJob,
     }));
   if (vendorId !== email.vendor_id || projectId !== email.project_id) {
     await supabaseAdmin.from('emails').update({ vendor_id: vendorId, project_id: projectId }).eq('id', email.id);
@@ -518,6 +645,10 @@ function filledCount(p: ProjectRow): number {
 function pickSurvivor(group: ProjectRow[]): ProjectRow {
   return [...group].sort((a, b) => {
     if (Boolean(a.houzz_ref) !== Boolean(b.houzz_ref)) return a.houzz_ref ? -1 : 1;
+    // A proper name is worth keeping over a filled field: "Carissa 90826/Oak
+    // Kit" survived a merge over "OVI Oak Kitchen" by being older.
+    const named = nameQuality(b.name) - nameQuality(a.name);
+    if (named !== 0) return named;
     const filled = filledCount(b) - filledCount(a);
     if (filled !== 0) return filled;
     return (a.created_at ?? '').localeCompare(b.created_at ?? '');
@@ -716,6 +847,17 @@ export async function mergeProjects(
       const donor = group.find((l) => l[field] !== null && l[field] !== undefined && l[field] !== '');
       if (donor) patch[field] = donor[field];
     }
+  }
+  // Whichever row is kept, the job keeps its best name — unless the kept row
+  // came from Houzz, whose name is the studio's own.
+  if (!keep.houzz_ref) {
+    const best = bestName([keep.name, ...group.map((l) => l.name)]);
+    if (best && nameQuality(best) > nameQuality(keep.name)) patch.name = best;
+  }
+  // The same for the client: never the studio, when a loser knew better.
+  if (isStudioName(keep.client_name)) {
+    const donor = group.find((l) => l.client_name && !isStudioName(l.client_name));
+    if (donor) patch.client_name = donor.client_name;
   }
   const furthest = [keep, ...group].reduce((a, b) =>
     PROJECT_STAGES.indexOf(b.stage) > PROJECT_STAGES.indexOf(a.stage) ? b : a,

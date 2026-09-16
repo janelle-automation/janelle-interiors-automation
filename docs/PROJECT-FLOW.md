@@ -149,6 +149,12 @@ runIngest(orgId)
   ├─ guard  useAi && !isAiReady()      → reason: anthropic_not_configured
   ├─ guard  another pass in flight     → reason: busy        (5-min TTL lock, not a boolean)
   ├─ guard  no Google-connected user   → reason: no_source_user
+  │          (the principal who connected Google — not "any principal")
+  │
+  ├── PROJECTS FROM DRIVE (first, so mail can be filed against them) ── §5.5
+  │   CLIENTS/Projects/<numbered folder>          → an active project
+  │   CLIENTS/Projects/Archived Client Project/*  → an archived project
+  │   the status document in that folder          → client, stage, notes (when it changed)
   │
   ├── GMAIL ─────────────────────────────────────────────────────────────
   │   query: newer_than:3d -in:sent  minus the ignored-sender domains
@@ -158,7 +164,8 @@ runIngest(orgId)
   │     machine mail (Slack, GitHub, Dropbox…)? ─────▶ skip (free, counted)
   │            │
   │            ▼
-  │     classifyEmail()                    Claude #1 → class, confidence, hints, reply_to
+  │     classifyEmail()                    Claude #1 → class, confidence, hints, reply_to,
+  │                                                    vendor contact, better project name
   │            │
   │     resolve project + vendor by name   (only when the hint really names a project)
   │            │
@@ -172,7 +179,9 @@ runIngest(orgId)
   │                   INSERT documents  →  promoteDocument() → vendor, project, PO, line items
   │
   └── DRIVE ─────────────────────────────────────────────────────────────
-      list up to 15 PDFs → same extract → documents → promoteDocument()
+      vendor paperwork in active project folders, changed in the last 30 days, not yet read
+      → up to 15 per pass → extract → documents (project = the folder's) → promoteDocument()
+      (no project folder found: the 15 newest PDFs anywhere, as before)
 ```
 
 Returns `{ ok, emails, documents, replies, tasks, skipped, done, remaining }`.
@@ -200,6 +209,30 @@ before the system gets to it. What prevents a double-read is the stored `gmail_i
 
 `POST /api/ops/backfill-email-bodies` fills in the text and links of mail read before `0010`
 added those columns. It costs Gmail calls only: no Claude, no re-classification, no new tasks.
+
+Extraction runs at temperature 0: the same document gives the same fields on every read.
+
+### 5.5 Projects from the studio's Drive folders — `services/driveProjects.ts`
+
+The studio keeps every job in a folder of its own: *Design Department › CLIENTS/Projects ›
+3. Bernthal*, with finished jobs under *Archived Client Project*. That list is the studio's own
+record of its projects, so each pass reads it first:
+
+- **Each folder is a project.** "1. Lemon's Project" becomes *Lemon*; archived folders become
+  archived projects, which stay in the name list so mail about an old job ("Hardware Shorrs")
+  files to it instead of inventing one. Matching is exact first, so *OVIS Cabana* and *OVIS Spa
+  Cabana* stay two projects. A name found later in the paperwork ("Lemon Residence") is kept.
+- **Only vendor paperwork in project folders is read** — quotes, estimates, proposals, bids,
+  invoices, orders, reserves, budgets — changed in the last 30 days. Its project is the folder
+  it is filed in, whatever the document calls itself. Archive and superseded folders inside a
+  job are skipped. Drawings, renderings and moodboards are not read (two hundred in one month,
+  each a Claude call, none of them a price); nothing outside the project folders is read at all.
+- **The status document** in the folder (*Janelle Interiors Projects*) is read when it changes:
+  each job's client (when missing or wrongly the studio), stage (forward only), and a notes block
+  — location, who is on it, what is blocking it, urgency — replaced on each read, leaving notes
+  people wrote untouched.
+
+The folder name can be changed with the `drive_projects_folder` key in `organizations.settings`.
 
 ---
 
@@ -238,6 +271,20 @@ word "project" before anything is saved.
 A project is only ever renamed to a *better* name (`nameQuality`): "Lemon's" can become "Lemon
 Residence", never the reverse — which is how a project used to lose its proper name to an email's
 shorthand. When an email names only the client, a client with exactly one project finds it.
+
+- **Better names arrive by themselves.** The model returns `better_project_name` when a listed
+  project's name is poor and the email or document shows the proper one.
+- **Sidemarks are not job names.** "Carissa 90826/Oak Kit" is Carissa's order of a date for the
+  Oak Kitchen; a teammate's name, an order date or a PO number never makes a project name.
+- **The client is never the studio, a builder or a design firm.** A client wrongly recorded as the
+  studio is replaced when a real one appears, is never shown to the model, and never files a
+  document — which is how an Ojai Valley Inn quote once landed in the Lemon job.
+- **Software is never a vendor, client or project** — Slack, GitHub, Vercel, Dropbox, Houzz…
+- **General studio mail can open a project or record a vendor** — a project when the model is
+  sure it is a new client job with a proper name and a client; a vendor when the email carries the
+  vendor's own address. The vendor's contact is that address, never the reply-to, which was often
+  the client's.
+- **Merges keep the best name**, and a survivor whose client was the studio takes a real one.
 
 ### 6.2 Attachments name the job
 
@@ -295,6 +342,13 @@ Accounts (`profiles`) decide who can sign in and who a task can be given to. The
   shared inbox only when no person matches — so "Janelle" is Janelle Kandziora, not the
   "Janelle (Admin)" account.
 
+**Managing the team** (Team & roles): add a person (no email unless *Email them a sign-in link* is
+ticked), edit their name and sign-in email (confirmed on the spot, so nothing is emailed), change
+role and seat, and remove them. Removing deletes the sign-in account; their open tasks stay on the
+board unassigned. It is refused for yourself, for the last principal, and for the account the
+studio's Gmail and Drive are connected through. Who may do each is the permission matrix's
+`team.create / update / delete` (`GET /api/team/can`).
+
 ## 7. Raising a task — `services/tasks.ts`
 
 ```
@@ -322,6 +376,10 @@ createTaskFromEmail(orgId, emailId, class, parsedEmail)
 people the roles document names for it — by their address, their full name, then their first name if
 nobody else shares it. The names used to be first names only, and "Adelaide" matched nobody, so hotel
 work never reached Adeleigh. Mail addressed to the shared inbox is never "the person who was asked".
+
+The task carries the **vendor** (the email's, or one the task names that is on file) and a
+**Contact:** line with the outside person to reach — never a studio address or a no-reply sender.
+Shared inboxes never own work, by name, by address or by role.
 
 The email's filing is read **before** the task is written, so the title names the job by its real
 name ("…for Lemon Residence", never "…for Lemon's Project"). A named person is matched with the same
@@ -799,6 +857,7 @@ apps/api/src/
   services/
     scheduler.ts      the four jobs, when self-hosted
     ingest.ts         §5 the reading pass         gmail.ts / drive.ts  Google clients
+    driveProjects.ts  §5.5 projects, paperwork and status from the Drive project folders
     extract.ts        §5 classify · task · PDF    promote.ts           §6 records + merges
     tasks.ts          §7 raising and assigning    reply.ts             reply drafts
     followups.ts      §8 the nightly engine       digest.ts            §9 the morning digest

@@ -27,6 +27,8 @@ export interface StudioPerson {
   seat: Seat | null;
   /** Other spellings people use for them, in documents or aloud. */
   aliases?: string[];
+  /** Other addresses they write from. */
+  otherEmails?: string[];
 }
 
 /** How the studio names itself on paper. */
@@ -45,7 +47,7 @@ export const STUDIO_TEAM: StudioPerson[] = [
   { name: 'Victoria Manayan', email: 'manayan.victoriam@gmail.com', seat: 'technical_production' },
   { name: 'Adeleigh McGee', email: 'adeleigh@janelleinteriors.com', seat: 'hotel_ffe', aliases: ['Adelaide McGee'] },
   { name: 'Brianna Johnson', email: 'brianna@janelleinteriors.com', seat: 'design' },
-  { name: 'Amanda Neubecker', email: 'amanda.neubecker@gmail.com', seat: 'design' },
+  { name: 'Amanda Neubecker', email: 'amanda.neubecker@gmail.com', seat: 'design', otherEmails: ['amanda.neubecker@outlook.com'] },
   // On the studio's team list with no seat in the roles document.
   { name: 'Taryn Choquette', email: 'taryn@janelleinteriors.com', seat: null },
 ];
@@ -70,8 +72,50 @@ export function isStudioAddress(raw: string | null | undefined): boolean {
   return (
     STUDIO_DOMAINS.includes(address.split('@')[1]) ||
     STUDIO_MAILBOXES.includes(address) ||
-    STUDIO_TEAM.some((p) => p.email === address)
+    STUDIO_TEAM.some((p) => p.email === address || p.otherEmails?.includes(address))
   );
+}
+
+/**
+ * Software the studio runs on, which writes a great deal of email and is
+ * never a vendor, a client or a project: Slack's welcome, GitHub's codes,
+ * Vercel's deploys. Their names came back as vendor hints.
+ */
+const SOFTWARE = [
+  'slack', 'github', 'vercel', 'dropbox', 'google', 'gmail', 'google drive', 'google docs', 'houzz', 'houzz pro',
+  'canva', 'quickbooks', 'intuit', 'zoom', 'docusign', 'supabase', 'notion', 'asana', 'trello', 'microsoft',
+  'outlook', 'linkedin', 'facebook', 'instagram', 'mailchimp', 'stripe', 'paypal', 'calendly', 'copilot',
+];
+
+export function isSoftwareService(raw: string | null | undefined): boolean {
+  const said = plain(raw ?? '');
+  if (!said) return false;
+  return SOFTWARE.some((name) => said === name || said.startsWith(`${name} `));
+}
+
+/** A sender nobody answers: no-reply, notifications, mailer daemons. */
+export function isAutomatedAddress(raw: string | null | undefined): boolean {
+  const address = addressOf(raw);
+  if (!address) return false;
+  const local = address.split('@')[0];
+  return /^(no[-_.]?reply|do[-_.]?not[-_.]?reply|notifications?|notify|mailer[-_.]?daemon|postmaster|bounce|alerts?|updates?|news(letter)?|marketing|messages\+)/.test(local)
+    || /(^|\.)(noreply|no-reply)\./.test(address.split('@')[1] ?? '');
+}
+
+/**
+ * A job name with the teammate who ordered it, and when, taken off the front.
+ *
+ * Vendors write the sidemark they are given, and the studio gives "Carissa
+ * 90826/Oak Kit": Carissa's order of 9 August 2026 for the Oak Kitchen. The
+ * job is the part after the slash. Only that exact shape is changed — a
+ * teammate's first name, a number, a slash — so a client who shares a first
+ * name with a teammate keeps their project name.
+ */
+export function orderedByTeammate(name: string): string {
+  const firstNames = STUDIO_TEAM.flatMap((p) => [p.name, ...(p.aliases ?? [])].map((n) => n.split(' ')[0]));
+  const m = name.match(/^\s*([A-Za-z]+)\s+\d[\d-]*\s*\/\s*(.+)$/);
+  if (!m) return name;
+  return firstNames.some((f) => f.toLowerCase() === m[1].toLowerCase()) ? m[2].trim() : name;
 }
 
 const plain = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -91,7 +135,7 @@ export function isStudioName(raw: string | null | undefined): boolean {
 export function studioPerson(said: { email?: string | null; name?: string | null }): StudioPerson | null {
   const address = addressOf(said.email);
   if (address) {
-    const byEmail = STUDIO_TEAM.find((p) => p.email === address);
+    const byEmail = STUDIO_TEAM.find((p) => p.email === address || p.otherEmails?.includes(address));
     if (byEmail) return byEmail;
   }
   const name = (said.name ?? '').trim().toLowerCase();

@@ -238,6 +238,10 @@ export async function extractJson<T>(
 ): Promise<T | null> {
   const message = await recorded(ctx, {
     max_tokens: 4096,
+    // Reading, not writing: the same document should give the same fields
+    // every time. At the default temperature one estimate named its job on
+    // one read and not on the next.
+    temperature: 0,
     system: `${system}\n\nRespond with ONLY a single JSON object. No prose, no code fences.`,
     messages: [{ role: 'user', content: user }],
   });

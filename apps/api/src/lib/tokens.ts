@@ -72,11 +72,29 @@ export async function googleClientForUser(userId: string, service?: GoogleServic
  */
 export async function orgSourceUserId(orgId: string): Promise<string | null> {
   if (!supabaseAdmin) return null;
+  // The principal who actually connected Google. "Any principal" was fine
+  // with one; with a second added on Team & roles, whichever the database
+  // returned first became the source — often the one with no Google
+  // connection, and reading stopped.
+  const { data: connected } = await supabaseAdmin
+    .from('integrations')
+    .select('user_id, profiles!inner(role, org_id)')
+    .eq('org_id', orgId)
+    .eq('provider', 'google')
+    .eq('status', 'connected')
+    .eq('profiles.role', 'principal')
+    .order('connected_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  const source = (connected as { user_id?: string } | null)?.user_id;
+  if (source) return source;
+
   const { data } = await supabaseAdmin
     .from('profiles')
     .select('id')
     .eq('org_id', orgId)
     .eq('role', 'principal')
+    .order('created_at', { ascending: true })
     .limit(1)
     .maybeSingle();
   return data?.id ?? null;

@@ -26,6 +26,14 @@ export interface EmailExtraction {
   stage_signal: string | null;
   /** True when project_hint was copied from the studio's own project list. */
   project_is_existing?: boolean;
+  /**
+   * The proper name of a listed project whose listed name is poor ("Lemon's",
+   * "Carissa 90826/Oak Kit"), when the email or its attachments show it.
+   */
+  better_project_name?: string | null;
+  /** The vendor's own person, as written in the email — never the client's. */
+  vendor_contact_name?: string | null;
+  vendor_contact_email?: string | null;
 }
 
 /**
@@ -46,14 +54,33 @@ const PROJECT_NAME_RULES = `PROJECT NAMES
   Primary Suite", "Harborview Hotel". Never a possessive ("Lemon's"), never the word "project", never a
   job number or street address alone, never a room or a topic ("living room", "samples", "lighting").
 - A vendor, a studio team member or the studio itself is never a project.
+- A vendor's sidemark or reference often carries who placed the order and a date or number beside the
+  job: "Carissa 90826/Oak Kit" is the Oak Kitchen job, ordered by Carissa on a date. A project's name
+  never contains a studio team member's name, an order date, or a PO, quote or job number.
+- A hotel or resort client has several jobs, one per area or scope ("Topa Courtyard", "Oak Kitchen",
+  "Casa Elar Primary Suite"). Use a listed project only when the email is about THAT area; another area of
+  the same hotel is a different project, named with the property ("OVI Oak Kitchen").
 - If the email is not about one specific job, null.
+
+BETTER NAMES
+- If the job is a listed project whose listed name is poor — a possessive ("Lemon's"), a person's name, a
+  date or a job or PO number ("Carissa 90826/Oak Kit") — and the email or an attachment shows its proper
+  name ("Lemon Residence", "OVI Oak Kitchen"), keep project_hint exactly as listed and give the proper name
+  as "better_project_name". Otherwise "better_project_name" is null.
 
 CLIENT NAMES
 - The client is who the work is FOR: a homeowner ("Sarah Lemon", "The Lemons"), a hotel group or a
   business ("Harborview Group"). For a project in the list, use the client listed for it unless the
   email plainly names a different one.
 - Never a vendor, never anyone on the studio team, never the sender just because they sent it.
-- If the email does not say, null — do not guess from the project name.`;
+- Never a general contractor, builder, architect, design firm or purchasing agent working ON the job (a
+  builder, "AvroKO") — the client owns the home or the business. For a hotel job the client is the hotel.
+- If the email does not say, null — do not guess from the project name.
+
+WHAT IS NEVER A VENDOR, CLIENT OR PROJECT
+- A software or online service sending account, security, billing or marketing notices — Slack, GitHub,
+  Vercel, Dropbox, Google, Houzz, Canva, QuickBooks, Zoom, DocuSign and the like.
+- The studio itself, or anyone on the studio team.`;
 
 const EMAIL_SYSTEM = `You are the intelligence layer for an interior design studio's workflow system.
 Classify a single project email and extract structured facts from it.
@@ -68,7 +95,13 @@ Return JSON with exactly these keys:
 - "confidence": number 0..1
 - "project_hint": the project's name, following PROJECT NAMES below, else null
 - "project_is_existing": true if project_hint was copied from the studio's project list, else false
-- "vendor_hint": the vendor/supplier name — exactly as listed if it is a known vendor — else null
+- "better_project_name": see BETTER NAMES below, else null
+- "vendor_hint": the supplier, manufacturer, workroom, fabricator, installer or trade the email concerns —
+  exactly as listed if it is a known vendor — else null
+- "vendor_contact_name": that vendor's own person, as written in the email, else null
+- "vendor_contact_email": that vendor's own email address as it appears in the email (a From, To or Cc line,
+  forwarded headers or a signature). Never the client's, never the studio's; null when the vendor's own
+  address does not appear
 - "po_number": a purchase order number if present, else null
 - "amount": a total amount as a number if present, else null
 - "dates": array of ISO dates (YYYY-MM-DD) mentioned as ship/ETA/deadline dates
@@ -158,6 +191,11 @@ export interface TaskExtraction {
   kind: TaskKind;
   /** ISO date, only when the email states or clearly implies a deadline. */
   due_date: string | null;
+  /** The supplier the work concerns, as listed when known. */
+  vendor?: string | null;
+  /** The person outside the studio to reach to do it. */
+  contact_name?: string | null;
+  contact_email?: string | null;
 }
 
 const SEAT_TABLE = SEAT_KEYS.map((k) => {
@@ -193,7 +231,8 @@ Return JSON with exactly these keys:
   (e.g. "Chase Yael for the OVI elevation drawings"). Use "" when needs_task is false.
   When the email has been filed against a project (given above the email), refer to the job by
   THAT name — "Finalize furniture proposal for Lemon Residence", never "for Lemon's Project".
-- "detail": one or two sentences of context a colleague would need to act, or null
+- "detail": one or two sentences of context a colleague would need to act — naming the client and the
+  vendor where the email does — or null
 - "kind": one of "quote_request" (a quote must be requested or chased),
   "order_followup" (an existing order/PO needs chasing or confirming),
   "client_approval" (the client must approve or decide something),
@@ -209,6 +248,9 @@ Return JSON with exactly these keys:
   revised spec to procurement"). The studio requires one on every task; if the email
   genuinely does not imply one, use null rather than inventing something.
 - "seat": which seat owns this outcome, from the table below, or null if genuinely unclear.
+- "vendor": the supplier the work concerns — exactly as listed if it is a known vendor — else null.
+- "contact_name" and "contact_email": the person OUTSIDE the studio who has to be reached to do it (the
+  vendor's or the client's person), as written in the email, else null. Never a studio address.
 
 SEATS — one owner per outcome. Match on what the seat OWNS, and rule a seat out when the
 work is in its "does NOT own" list. A drawing or elevation is design, never technical
@@ -221,6 +263,8 @@ ${PROJECT_NAME_RULES}`;
 export interface TaskFiling {
   project?: string | null;
   client?: string | null;
+  /** The vendor the email is filed under, with its contact where known. */
+  vendor?: string | null;
   names?: StudioNames | null;
 }
 
@@ -240,6 +284,7 @@ export async function extractTask(
     ...(filing.project
       ? ['', `This email has been filed against the project "${filing.project}"${filing.client ? ` (client: ${filing.client})` : ''}. Refer to the job by that name.`]
       : []),
+    ...(filing.vendor ? ['', `The vendor on this email is "${filing.vendor}". Use that name for the vendor.`] : []),
     '',
     '— THE EMAIL —',
     '',
@@ -267,6 +312,8 @@ export interface DocumentExtraction {
   order_date: string | null;
   eta: string | null;
   line_items: { description: string; sku: string | null; qty: number; unit_price: number | null }[];
+  /** As on the email: the proper name of a poorly named listed project. */
+  better_project_name?: string | null;
 }
 
 const DOC_SYSTEM = `You are reading a PDF that reached an interior design studio — attached to an email or kept
@@ -280,19 +327,26 @@ Where documents say which job and client they belong to — look at all of these
 - header and footer lines: "Project:", "Job:", "Job name:", "Client:", "Customer:", "Prepared for";
 - on vendor paperwork, the SIDEMARK or TAG — FF&E vendors write the client's or job's name there
   ("Sidemark: LEMON / LIVING RM") — and a "Ship to" or "Deliver to" that is a residence, not the studio.
+- anywhere else the property or the owner is named — a scope line ("custom cabinetry throughout the
+  Bernthal Residence"), an estimate's heading, the job address with the owner's name.
 The studio itself, and the vendor who issued the document, are never the client.
+If you can say in the summary which job the document is for, that job is its project_hint — never leave
+project_hint null while the summary names the job.
 
 Return JSON with exactly these keys:
 - "type": one of "quote", "order_confirmation", "purchase_order", "other" (a presentation, proposal,
   drawing, specification or invoice is "other")
 - "title": the document's own title as on its cover or first page, else null
-- "summary": one sentence saying what the document is and what it covers
+- "summary": one sentence saying what the document is, which job it is for, and what it covers
+- "project_hint": the job the summary names ("Bernthal Residence"), following PROJECT NAMES below; null
+  only when the document names no job anywhere
+- "better_project_name": see BETTER NAMES below, else null
+- "client": who the job is for, following CLIENT NAMES below — for "the Bernthal Residence" with no owner
+  named, the household ("Bernthal"); else null
 - "confidence": number 0..1
 - "vendor": the supplier that ISSUED a quote, order or invoice, else null — a design presentation or
   drawing set has no vendor
 - "po_number": purchase order number if present, else null
-- "project_hint": the job's name, following PROJECT NAMES below, else null
-- "client": who the job is for, following CLIENT NAMES below, else null
 - "total": grand total as a number, else null
 - "order_date": ISO date (YYYY-MM-DD) or null
 - "eta": estimated ship/delivery ISO date or null
@@ -334,5 +388,28 @@ export async function extractPdf(
       text: `${names ? `${studioNamesBlock(names)}\n\n` : ''}Filename: ${filename}\nExtract the structured contents as instructed.`,
     },
   ];
-  return extractJson<DocumentExtraction>(DOC_SYSTEM, content, { feature: 'document.extract', ...ctx });
+  const parsed = await extractJson<DocumentExtraction>(DOC_SYSTEM, content, { feature: 'document.extract', ...ctx });
+  return parsed ? withJobFromSummary(parsed) : null;
+}
+
+/** "the Bernthal Residence", "Ojai Valley Inn's Oak Kitchen" — a property named the way a job is. */
+const JOB_IN_TEXT =
+  /\b((?:[A-Z][\w'’&.-]*\s+){1,4}(?:Residence|House|Home|Hotel|Inn|Resort|Suite|Loft|Villa|Estate|Ranch|Lodge|Cottage|Apartment|Condo|Penthouse|Courtyard))\b/;
+
+/**
+ * The job a document's own summary names, when the project field came back empty.
+ *
+ * Vendor paperwork often names the job only in its scope — "custom cabinetry
+ * throughout the Bernthal Residence" — and the model, sure of the job in the
+ * sentence it wrote, still left the field empty on most reads. The summary is
+ * its own words about this document, so a property named there is taken as
+ * the job; nothing else is guessed.
+ */
+export function withJobFromSummary(doc: DocumentExtraction): DocumentExtraction {
+  if (doc.project_hint) return doc;
+  const found = `${doc.title ?? ''} ${doc.summary ?? ''}`.match(JOB_IN_TEXT)?.[1];
+  if (!found) return doc;
+  const job = found.replace(/^(the|a|an|this|its|their)\s+/i, '').trim();
+  if (job.split(/\s+/).length < 2) return doc;
+  return { ...doc, project_hint: job };
 }

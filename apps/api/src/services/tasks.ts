@@ -7,7 +7,8 @@ import { supabaseAdmin } from '../lib/supabase.js';
 import { hasSeatColumn } from '../lib/columns.js';
 import { extractTask } from './extract.js';
 import { loadStudioNames } from '../lib/studioNames.js';
-import { STUDIO_TEAM, isStudioMailbox } from '../lib/studioTeam.js';
+import { STUDIO_TEAM, isAutomatedAddress, isStudioAddress, isStudioMailbox } from '../lib/studioTeam.js';
+import { matchProjectId } from './promote.js';
 import { matchPerson } from './proposals.js';
 import type { ParsedEmail } from './gmail.js';
 
@@ -139,12 +140,15 @@ async function resolveBySeat(orgId: string, seat: Seat | null): Promise<string |
  */
 async function resolveFromChain(
   orgId: string,
-  parsed: { from?: string; to?: string; cc?: string[] },
+  parsed: { from?: string; to?: string; cc?: string | string[] },
 ): Promise<string | null> {
   if (!supabaseAdmin) return null;
 
-  const addresses = (raw: string | undefined) =>
-    (raw ?? '')
+  // Gmail gives Cc as one header line, "A <a@x>, b@y"; older callers passed a
+  // list. Treating the line as a list threw, and every task from a message
+  // failed with it.
+  const addresses = (raw: string | string[] | undefined) =>
+    (Array.isArray(raw) ? raw.join(',') : raw ?? '')
       .split(',')
       .map((part) => {
         const m = part.match(/<([^>]+)>/);
@@ -154,7 +158,7 @@ async function resolveFromChain(
 
   const sender = new Set(addresses(parsed.from));
   // Mail to a shared inbox was sent to the studio, not handed to a person.
-  const recipients = [...addresses(parsed.to), ...(parsed.cc ?? []).map((c) => c.toLowerCase())]
+  const recipients = [...addresses(parsed.to), ...addresses(parsed.cc)]
     .filter((a) => !sender.has(a) && !isStudioMailbox(a));
   if (recipients.length === 0) return null;
 
@@ -190,12 +194,15 @@ async function resolveAssignee(
 
   const { data: candidates } = await supabaseAdmin
     .from('profiles')
-    .select('id')
+    .select('id, email')
     .eq('org_id', orgId)
     .eq('role', role)
     .order('created_at', { ascending: true });
 
-  const ids = (candidates ?? []).map((p) => (p as { id: string }).id);
+  // A shared inbox holds a role so it can sign in; nobody reads work given to it.
+  const ids = ((candidates ?? []) as { id: string; email: string | null }[])
+    .filter((p) => !isStudioMailbox(p.email))
+    .map((p) => p.id);
   if (ids.length === 0) return null;
   if (ids.length === 1) return ids[0];
 
@@ -465,20 +472,42 @@ export async function createTaskFromEmail(
   // file was Lemon Residence.
   const { data: email } = await supabaseAdmin
     .from('emails')
-    .select('project_id, vendor_id, projects(name, client_name)')
+    .select('project_id, vendor_id, projects(name, client_name), vendors(name)')
     .eq('id', emailId)
     .maybeSingle();
-  const filedUnder = (email as { projects?: { name: string; client_name: string | null } | null } | null)?.projects ?? null;
+  const filed = email as {
+    projects?: { name: string; client_name: string | null } | null;
+    vendors?: { name: string } | null;
+  } | null;
+  const filedUnder = filed?.projects ?? null;
 
+  const names = await loadStudioNames(orgId);
   const extracted = await extractTask(parsed, { orgId }, {
     project: filedUnder?.name ?? null,
     client: filedUnder?.client_name ?? null,
-    names: await loadStudioNames(orgId),
+    vendor: filed?.vendors?.name ?? null,
+    names,
   });
   if (!extracted || !extracted.needs_task) return false;
 
   const title = String(extracted.title ?? '').trim().slice(0, 200);
   if (!title) return false;
+
+  // The supplier the work is about: the email's own, else the one the task
+  // names, when the studio has it on file. Most studio mail about a supplier
+  // is not a quote, so the email itself often has no vendor.
+  const vendorId =
+    (email as { vendor_id: string | null } | null)?.vendor_id ??
+    (extracted.vendor ? matchProjectId(names.vendors, extracted.vendor) : null);
+
+  // Who to reach, so whoever picks the task up does not have to open the
+  // thread to find out. Never a studio address or a no-reply sender.
+  const contactEmail = extracted.contact_email?.trim() || null;
+  const contact =
+    contactEmail && contactEmail.includes('@') && !isStudioAddress(contactEmail) && !isAutomatedAddress(contactEmail)
+      ? `${extracted.contact_name?.trim() ? `${extracted.contact_name.trim()} ` : ''}<${contactEmail}>`
+      : null;
+  const detail = [extracted.detail?.trim() || null, contact ? `Contact: ${contact}` : null].filter(Boolean).join('\n\n') || null;
 
   const kind: TaskKind = TASK_KINDS.includes(extracted.kind) ? extracted.kind : 'admin';
   const role = TASK_KIND_ROLE[kind];
@@ -522,7 +551,7 @@ export async function createTaskFromEmail(
   const seat = (extracted.seat && SEAT_KEYS.includes(extracted.seat) ? extracted.seat : null) as Seat | null;
   const assignedTo =
     (await resolveNamedPerson(orgId, extracted.assignee_hint ?? null)) ??
-    (await resolveFromChain(orgId, parsed as { from?: string; to?: string })) ??
+    (await resolveFromChain(orgId, parsed)) ??
     (await resolveBySeat(orgId, seat)) ??
     (await resolveAssignee(orgId, role)) ??
     (await resolveTriage(orgId));
@@ -530,14 +559,14 @@ export async function createTaskFromEmail(
   const { error } = await supabaseAdmin.from('tasks').insert({
     org_id: orgId,
     title,
-    detail: extracted.detail ?? null,
+    detail,
     kind,
     assigned_to: assignedTo,
     assigned_role: seat ? SEATS[seat].role : role,
     seat,
     next_step: extracted.next_step ?? null,
     project_id: (email as { project_id: string | null } | null)?.project_id ?? null,
-    vendor_id: (email as { vendor_id: string | null } | null)?.vendor_id ?? null,
+    vendor_id: vendorId,
     source_email_id: emailId,
     // The email's own date when it gave one; otherwise the studio's SLA for
     // this kind of work. A task with no date cannot be chased for being
