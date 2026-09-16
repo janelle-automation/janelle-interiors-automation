@@ -41,7 +41,7 @@ function RunModal({ prompt, onClose }: { prompt: Prompt; onClose: () => void }) 
   };
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center p-4">
+    <div className="dock-aware fixed inset-0 z-50 grid place-items-center p-4">
       <div className="absolute inset-0 bg-black/40" onClick={onClose} />
       <div className="card relative z-10 flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden">
         <div className="flex items-center justify-between border-b border-line-soft px-5 py-4">

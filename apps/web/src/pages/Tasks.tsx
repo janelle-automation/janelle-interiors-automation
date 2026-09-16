@@ -76,18 +76,25 @@ function TaskPanel({ id, onClose }: { id: string; onClose: () => void }) {
   };
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end">
+    // `dock-aware`: when Jenny's panel is docked on a wide screen, this stops
+    // at her edge instead of sliding underneath her.
+    <div className="dock-aware fixed inset-0 z-40 flex justify-end">
+      {/* Black, not ink: in dark mode ink is near-white, and a backdrop made
+          from it washed the page grey instead of dimming it. */}
       <div
-        className="absolute inset-0 bg-ink/40"
+        className="absolute inset-0 bg-black/50"
         onClick={onClose}
         aria-hidden
       />
+      {/* bg-surface, not bg-canvas — "canvas" is not a colour in this theme,
+          so the panel rendered with no background and the board showed
+          through its text. */}
       <aside
         role="dialog"
         aria-label="Task detail"
-        className="relative flex h-full w-full max-w-xl flex-col overflow-y-auto border-l border-line bg-canvas shadow-xl"
+        className="relative flex h-full w-full max-w-xl flex-col overflow-y-auto border-l border-line bg-surface shadow-pop"
       >
-        <header className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-line-soft bg-canvas px-5 py-4">
+        <header className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-line bg-surface px-5 py-4">
           <div className="min-w-0">
             {t && (
               <div className="mb-1.5 flex flex-wrap items-center gap-2">
@@ -521,7 +528,23 @@ export default function Tasks() {
   const { user } = useAuth();
   const [showDone, setShowDone] = useState(false);
   // Which task's detail panel is open, if any.
-  const [openTask, setOpenTask] = useState<string | null>(null);
+  //
+  // Seeded from ?task=, so a task named in an answer, a digest or a link
+  // someone pasted opens on the task itself rather than on the board with
+  // the reader left to find it.
+  const [openTask, setOpenTask] = useState<string | null>(
+    () => new URLSearchParams(window.location.search).get('task'),
+  );
+
+  // Drop the parameter once it has been used: it has done its job, and
+  // leaving it in the URL would re-open the panel on every later close.
+  useEffect(() => {
+    if (!openTask) return;
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has('task')) return;
+    url.searchParams.delete('task');
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+  }, [openTask]);
 
   // The board answers "where is everything", the list "what do I owe".
   // Remembered per browser so the studio is not re-choosing every visit.

@@ -1,11 +1,14 @@
 import {
   DEFAULT_SLA, SEATS, SEAT_KEYS, TASK_HYGIENE_SEAT, TASK_KIND_ROLE, TASK_KINDS,
-  dueDateFor,
+  dueDateFor, seatPeople,
   type Seat, type SlaSettings, type TaskKind, type UserRole,
 } from '@janelle/shared';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { hasSeatColumn } from '../lib/columns.js';
 import { extractTask } from './extract.js';
+import { loadStudioNames } from '../lib/studioNames.js';
+import { STUDIO_TEAM, isStudioMailbox } from '../lib/studioTeam.js';
+import { matchPerson } from './proposals.js';
 import type { ParsedEmail } from './gmail.js';
 
 /**
@@ -66,42 +69,65 @@ async function resolveNamedPerson(orgId: string, hint: string | null): Promise<s
     .from('profiles')
     .select('id, full_name, email')
     .eq('org_id', orgId);
+  const accounts = (data ?? []) as { id: string; full_name: string | null; email: string | null }[];
 
-  for (const row of data ?? []) {
-    const p = row as { id: string; full_name: string | null; email: string | null };
-    const name = (p.full_name ?? '').toLowerCase();
-    const local = (p.email ?? '').split('@')[0].toLowerCase();
-    if (!name && !local) continue;
-    const parts = name.split(/\s+/).filter(Boolean);
-    if (
-      (name && (name === needle || name.includes(needle))) ||
-      parts.some((part) => part === needle) ||
-      (local && (local === needle || local.includes(needle))) ||
-      (p.email ?? '').toLowerCase() === needle
-    ) {
-      return p.id;
+  // The part of an address before the @ names its owner: "carissa" is
+  // carissa@. Never a shared inbox's — "systems" is nobody.
+  const byLocalPart = accounts.find(
+    (p) => p.email && !isStudioMailbox(p.email) && !needle.includes('@') && p.email.split('@')[0].toLowerCase() === needle,
+  );
+  if (byLocalPart) return byLocalPart.id;
+
+  // An address is exact or it is nobody; a name goes through the same matcher
+  // Jenny uses: whole name, every word, the start of a name, a spelling one
+  // or two letters out, every other spelling the studio lists — and never a
+  // pick between two equally good answers. The substring test this replaced
+  // gave any task that mentioned "an" to Brianna.
+  const named = accounts.filter((p) => p.full_name) as { id: string; full_name: string; email: string | null }[];
+  const match = matchPerson(hint, named);
+  // Work nobody reads is not assigned: a shared inbox is never the owner.
+  return match.status === 'found' && !isStudioMailbox(match.row.email) ? match.row.id : null;
+}
+
+/**
+ * Whoever holds a seat: the account given that seat on Team & roles, then
+ * the people the roles document names for it — by their address on the
+ * studio's list, then by name. Null for the vacant COO seat, and for a seat
+ * whose people have no account yet.
+ */
+async function resolveSeatHolder(orgId: string, seat: Seat): Promise<string | null> {
+  if (!supabaseAdmin) return null;
+
+  if (await hasSeatColumn()) {
+    const { data } = await supabaseAdmin
+      .from('profiles')
+      .select('id')
+      .eq('org_id', orgId)
+      .eq('seat', seat)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    const id = (data as { id?: string } | null)?.id;
+    if (id) return id;
+  }
+
+  // "Brianna Johnson / Amanda Neubecker" share the design seat; each in turn.
+  // An account made with only a first name still counts, unless that first
+  // name is shared.
+  for (const name of seatPeople(seat)) {
+    const email = STUDIO_TEAM.find((p) => p.name === name)?.email;
+    for (const said of [email, name, name.split(' ')[0]]) {
+      const id = said ? await resolveNamedPerson(orgId, said) : null;
+      if (id) return id;
     }
   }
   return null;
 }
 
-/**
- * Route to whoever holds a seat. The roles document names the person for
- * every seat except the vacant COO, so a seat resolves to a real teammate
- * by name — and falls through to the seat's role when that person has no
- * profile yet.
- */
+/** Route to whoever holds the seat that owns this outcome. */
 async function resolveBySeat(orgId: string, seat: Seat | null): Promise<string | null> {
   if (!seat || !SEAT_KEYS.includes(seat)) return null;
-  const brief = SEATS[seat];
-  if (!brief.person) return null; // vacant seat — nobody to route to
-
-  // "Brianna / Amanda" share the design seat; try each name in turn.
-  for (const name of brief.person.split('/').map((n) => n.trim())) {
-    const id = await resolveNamedPerson(orgId, name);
-    if (id) return id;
-  }
-  return null;
+  return resolveSeatHolder(orgId, seat);
 }
 
 /**
@@ -127,8 +153,9 @@ async function resolveFromChain(
       .filter((a) => a.includes('@'));
 
   const sender = new Set(addresses(parsed.from));
+  // Mail to a shared inbox was sent to the studio, not handed to a person.
   const recipients = [...addresses(parsed.to), ...(parsed.cc ?? []).map((c) => c.toLowerCase())]
-    .filter((a) => !sender.has(a));
+    .filter((a) => !sender.has(a) && !isStudioMailbox(a));
   if (recipients.length === 0) return null;
 
   const { data } = await supabaseAdmin
@@ -204,30 +231,7 @@ async function resolveAssignee(
  * problem in software.
  */
 async function resolveTriage(orgId: string): Promise<string | null> {
-  if (!supabaseAdmin) return null;
-
-  // By seat first, once seats exist.
-  if (await hasSeatColumn()) {
-    const { data } = await supabaseAdmin
-      .from('profiles')
-      .select('id')
-      .eq('org_id', orgId)
-      .eq('seat', TASK_HYGIENE_SEAT)
-      .limit(1)
-      .maybeSingle();
-    const id = (data as { id?: string } | null)?.id;
-    if (id) return id;
-  }
-
-  // Otherwise the person the roles document names for that seat.
-  const named = SEATS[TASK_HYGIENE_SEAT].person;
-  if (named) {
-    for (const name of named.split('/').map((n) => n.trim())) {
-      const id = await resolveNamedPerson(orgId, name);
-      if (id) return id;
-    }
-  }
-  return null;
+  return resolveSeatHolder(orgId, TASK_HYGIENE_SEAT);
 }
 
 // ── Deduplication ───────────────────────────────────────────
@@ -452,7 +456,25 @@ export async function createTaskFromEmail(
     .maybeSingle();
   if (existing) return false;
 
-  const extracted = await extractTask(parsed);
+  // promoteEmail may have re-linked this email to a project/vendor, so read
+  // the row back rather than trusting the ids the caller started with.
+  //
+  // Read BEFORE the task is written, not after: the title names the job,
+  // and naming it from the email's own wording is how the board filled with
+  // "Finalize furniture proposal for Lemon's Project" while the project on
+  // file was Lemon Residence.
+  const { data: email } = await supabaseAdmin
+    .from('emails')
+    .select('project_id, vendor_id, projects(name, client_name)')
+    .eq('id', emailId)
+    .maybeSingle();
+  const filedUnder = (email as { projects?: { name: string; client_name: string | null } | null } | null)?.projects ?? null;
+
+  const extracted = await extractTask(parsed, { orgId }, {
+    project: filedUnder?.name ?? null,
+    client: filedUnder?.client_name ?? null,
+    names: await loadStudioNames(orgId),
+  });
   if (!extracted || !extracted.needs_task) return false;
 
   const title = String(extracted.title ?? '').trim().slice(0, 200);
@@ -460,14 +482,6 @@ export async function createTaskFromEmail(
 
   const kind: TaskKind = TASK_KINDS.includes(extracted.kind) ? extracted.kind : 'admin';
   const role = TASK_KIND_ROLE[kind];
-
-  // promoteEmail may have re-linked this email to a project/vendor, so read
-  // the row back rather than trusting the ids the caller started with.
-  const { data: email } = await supabaseAdmin
-    .from('emails')
-    .select('project_id, vendor_id')
-    .eq('id', emailId)
-    .maybeSingle();
 
   // The unique index keys on the SOURCE EMAIL, so a thread where two
   // messages both ask for the same thing raised the same task twice — the
@@ -487,9 +501,14 @@ export async function createTaskFromEmail(
 
   const wanted = titleKey(title);
   const projectOf = (email as { project_id: string | null } | null)?.project_id ?? null;
+  // Same ask on the same job — or on a job and on nothing. A reply that
+  // arrives before the project exists files the first copy nowhere, and
+  // requiring the projects to be equal let the second one in beside it.
+  // Two DIFFERENT projects are still two jobs.
   const already = (liveSame ?? []).some((row) => {
     const r = row as { title: string; project_id: string | null };
-    return titleKey(r.title) === wanted && r.project_id === projectOf;
+    if (titleKey(r.title) !== wanted) return false;
+    return r.project_id === projectOf || r.project_id === null || projectOf === null;
   });
   if (already) return false;
 

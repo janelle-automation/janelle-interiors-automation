@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, NetworkError } from './api';
 import type {
-  Action, AiSettingsView, AiUsageReport, DashboardSummary, IngestSettingsView,
+  Action, AiSettingsView, AiUsageReport, AssistantAnswer, DashboardSummary, IngestSettingsView,
   Prompt, ProjectStage, PoStatus,
   SelectableModel,
   FollowUpType, Resource, Seat, TaskKind, TaskStatus, UserRole,
@@ -328,30 +328,43 @@ export interface ProposedAction {
   input: Record<string, unknown>;
 }
 export interface AssistantReply {
+  /** The answer as one block of text — what the history keeps. */
   reply: string;
+  /** The same answer, laid out: a lead, the rows behind it, what was checked. */
+  answer: AssistantAnswer;
   proposed: ProposedAction[];
   used: string[];
+  /**
+   * Earlier proposals the person answered in words — "yes", "cancel that" —
+   * keyed as the browser sent them, so their buttons can be settled too.
+   */
+  settled?: { key: string; decision: 'confirmed' | 'cancelled'; id?: string | null; kind?: 'task' | 'draft' | 'task_update' }[];
 }
+
+/** What a confirmed proposal became. */
+export type SavedProposal =
+  | { kind: 'task'; id: string; title: string; assignee: string | null; project: string | null; due_date: string | null; duplicate: boolean }
+  | { kind: 'draft'; id: string; subject: string; to: string | null }
+  | { kind: 'task_update'; id: string; title: string; assignee: string | null; due_date: string | null; status: string };
+
 export interface AssistantTurn {
   role: 'user' | 'assistant';
   content: string;
-}
-
-export function useAsk() {
-  return useMutation({
-    mutationFn: (v: { message: string; history: AssistantTurn[] }) =>
-      api<AssistantReply>('/assistant/ask', { method: 'POST', body: JSON.stringify(v) }),
-  });
 }
 
 /** Commit a proposal the person confirmed. Separate from asking, on purpose. */
 export function useConfirmAction() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (v: { input: Record<string, unknown> }) =>
-      api<{ id: string }>('/assistant/confirm', { method: 'POST', body: JSON.stringify(v) }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['tasks'] });
+    mutationFn: (v: { tool: string; input: Record<string, unknown> }) =>
+      api<SavedProposal>('/assistant/confirm', { method: 'POST', body: JSON.stringify(v) }),
+    onSuccess: (_data, v) => {
+      if (v.tool === 'propose_draft') qc.invalidateQueries({ queryKey: ['drafts'] });
+      else if (v.tool === 'propose_task_update') {
+        qc.invalidateQueries({ queryKey: ['tasks'] });
+        qc.invalidateQueries({ queryKey: ['task'] });
+      }
+      else qc.invalidateQueries({ queryKey: ['tasks'] });
       qc.invalidateQueries({ queryKey: ['dashboard'] });
     },
   });

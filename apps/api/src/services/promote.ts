@@ -1,4 +1,6 @@
 import { supabaseAdmin } from '../lib/supabase.js';
+import { forgetStudioNames } from '../lib/studioNames.js';
+import { isStudioAddress, isStudioName } from '../lib/studioTeam.js';
 import { PROJECT_STAGES, type PoStatus, type ProjectStage } from '@janelle/shared';
 
 /** Move a project forward to a signalled stage (never backwards). */
@@ -26,7 +28,9 @@ function normalize(s: string): string {
     .normalize('NFD')
     .replace(/[̀-ͯ]/g, '') // drop accents: Leon
     .toLowerCase()
-    .replace(/'s\b/g, '') // possessive: "Lemon's" is the Lemon job
+    // Possessive: "Lemon's" is the Lemon job — and mail clients send the
+    // curly apostrophe as often as the straight one.
+    .replace(/['’]s\b/g, '')
     .replace(/[^a-z0-9 ]/g, ' ')
     .replace(/\b(project|the|for|re|fwd|quote|order|proposal|inc|llc|ltd|co|company)\b/g, ' ')
     .replace(/\s+/g, ' ')
@@ -141,6 +145,70 @@ export function matchProjectId(projects: { id: string; name: string }[], name: s
 }
 
 /**
+ * The one project a client belongs to, or null.
+ *
+ * An email often names the client and never the job — "Sarah Lemon approved
+ * the banquette". When exactly one project is for that client, that is the
+ * job; when there are two, it is not safe to pick.
+ */
+export function matchClientProjectId(
+  projects: { id: string; client_name: string | null }[],
+  client: string,
+): string | null {
+  const norm = normalize(client);
+  if (!norm) return null;
+  const hits = projects.filter((p) => p.client_name && sameEntity(normalize(p.client_name), norm));
+  return hits.length === 1 ? hits[0].id : null;
+}
+
+/**
+ * A project name as the studio would file it.
+ *
+ * The model is asked for a clean name, but this is where a row is actually
+ * written, so the commonest slips are removed here whatever came in:
+ * "Lemon's Project" is the Lemon job, and "the lemon project" is too.
+ */
+export function cleanProjectName(raw: string): string {
+  let s = raw
+    .trim()
+    .replace(/['’]s\b/gi, '')
+    .replace(/\b(project|job)\b/gi, ' ')
+    .replace(/^\s*the\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s\-–—:,.#]+|[\s\-–—:,.#]+$/g, '')
+    .trim();
+  // Typed all in lower case, a name reads as a slip; give each word its capital.
+  if (s && s === s.toLowerCase()) s = s.replace(/(^|\s)(\p{L})/gu, (_m, space: string, c: string) => space + c.toUpperCase());
+  return s;
+}
+
+/** Words that say what a property is — the mark of a name the studio chose. */
+const PROPERTY_WORDS =
+  /\b(residence|house|home|hotel|suite|apartment|loft|villa|estate|condo|cottage|inn|resort|office|restaurant|showroom|penthouse|ranch|lodge|studio)\b/i;
+
+/**
+ * How good a project name is, for choosing between two that mean one job.
+ *
+ * Replaces "prefer the shorter name", which renamed "Lemon Residence" to
+ * "Lemon's" the first time an email said it that way — shorter, and worse.
+ * A name wins by being a proper name: no possessive, no "project", saying
+ * what the property is, and not a street address or a job number.
+ */
+export function nameQuality(name: string): number {
+  let q = 0;
+  if (/['’]s\b/i.test(name)) q -= 3;
+  if (/\bproject\b/i.test(name)) q -= 2;
+  if (name === name.toLowerCase()) q -= 1;
+  if (PROPERTY_WORDS.test(name)) q += 2;
+  if (keyWords(normalize(name)).length >= 2) q += 1;
+  if (/\d{4,}/.test(name)) q -= 1;
+  if (/\b\d+\s+\w+\s+(lane|ln|street|st|road|rd|avenue|ave|drive|dr|boulevard|blvd|way|court|ct)\b/i.test(name)) q -= 2;
+  if (/\b[A-Z]{2}\s+\d{5}\b/.test(name)) q -= 1;
+  if (name.length > 60) q -= 2;
+  return q;
+}
+
+/**
  * Whether a hint is specific enough to be treated as a project at all.
  *
  * `project_hint` is Claude's best guess, and its best guess for mail that
@@ -164,6 +232,10 @@ const MIN_PROJECT_CONFIDENCE = 0.55;
 
 async function upsertVendor(orgId: string, name?: string | null, email?: string | null): Promise<string | null> {
   if (!supabaseAdmin || !name || name.trim().length < 2) return null;
+  // The studio and its people are never a vendor, and a studio address is
+  // never a vendor's contact — the reply goes to the vendor, not to Brianna.
+  if (isStudioName(name)) return null;
+  if (email && isStudioAddress(email)) email = null;
   const clean = name.trim();
   const norm = normalize(clean);
   if (norm.length < 2) return null;
@@ -184,6 +256,7 @@ async function upsertVendor(orgId: string, name?: string | null, email?: string 
   }
 
   const contacts = email ? [{ email }] : [];
+  forgetStudioNames(orgId);
   const { data } = await supabaseAdmin
     .from('vendors')
     .insert({ org_id: orgId, name: clean, contacts })
@@ -206,9 +279,12 @@ async function upsertProject(
   opts: { client?: string | null; target?: string | null; create?: boolean } = {},
 ): Promise<string | null> {
   if (!supabaseAdmin || !name || name.trim().length < 3) return null;
-  const clean = name.trim();
+  const clean = cleanProjectName(name);
   const norm = normalize(clean);
   if (norm.length < 3) return null;
+  // A teammate is never the job, and never whom the job is for.
+  if (isStudioName(clean)) return null;
+  if (isStudioName(opts.client)) opts = { ...opts, client: null };
 
   const { data: all } = await supabaseAdmin
     .from('projects')
@@ -223,13 +299,18 @@ async function upsertProject(
     const patch: Record<string, unknown> = {};
     if (opts.client && !hit.client_name) patch.client_name = opts.client;
     if (opts.target && !hit.target_install) patch.target_install = opts.target;
-    // Prefer the shorter, cleaner project name if the new one is shorter.
-    if (clean.length < hit.name.length && normalize(hit.name).includes(norm)) patch.name = clean;
-    if (Object.keys(patch).length) await supabaseAdmin.from('projects').update(patch).eq('id', hit.id);
+    // Only ever a better name. This used to take any shorter one, which is
+    // how "Lemon Residence" became "Lemon's".
+    if (nameQuality(clean) > nameQuality(hit.name)) patch.name = clean;
+    if (Object.keys(patch).length) {
+      await supabaseAdmin.from('projects').update(patch).eq('id', hit.id);
+      forgetStudioNames(orgId);
+    }
     return hit.id;
   }
 
   if (opts.create === false) return null;
+  forgetStudioNames(orgId);
 
   const { data } = await supabaseAdmin
     .from('projects')

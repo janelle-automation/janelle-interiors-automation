@@ -1,16 +1,20 @@
 import { supabaseAdmin } from '../lib/supabase.js';
 import { isGoogleAuthFailure, orgSourceUserId } from '../lib/tokens.js';
 import {
-  gmailFor, getEmail, listMessageIds, downloadAttachment, addressOf, addressesOf,
+  gmailFor, getEmail, listMessageIds, downloadAttachment, addressOf, addressesOf, type PdfAttachment,
   getProfileEmail, ignoredSenderQuery, isIgnoredSender, linksIn,
 } from './gmail.js';
 import { driveFor, listPdfs, downloadFile } from './drive.js';
-import { classifyEmail } from './extract.js';
-import { extractPdf, MAX_PDF_BYTES } from './extract.js';
+import {
+  classifyEmail, extractPdf, MAX_PDF_BYTES,
+  type AttachmentEvidence, type DocumentExtraction,
+} from './extract.js';
 import { draftReply, REPLYABLE } from './reply.js';
 import {
-  autoMergeDuplicates, namesAProject, promoteDocument, promoteEmail, removeVendorProjects,
+  autoMergeDuplicates, cleanProjectName, matchClientProjectId, matchProjectId, namesAProject,
+  promoteDocument, promoteEmail, removeVendorProjects,
 } from './promote.js';
+import { loadStudioNames, type StudioNames } from '../lib/studioNames.js';
 import { createTaskFromEmail, mergeDuplicateTasks } from './tasks.js';
 import { isAiReady } from './anthropic.js';
 import { readIngestSettings } from '../lib/ingestSettings.js';
@@ -71,26 +75,125 @@ const DEFAULT_BUDGET_MS = Number(process.env.INGEST_BUDGET_MS || 20_000);
  */
 const MAX_BODY_CHARS = 12_000;
 
-/** Case-insensitive best-effort match of a name hint to an existing row. */
-async function resolveByName(
-  orgId: string,
-  table: 'projects' | 'vendors',
-  hint: string | null,
-): Promise<string | null> {
-  if (!hint || !supabaseAdmin) return null;
-  const nameCol = table === 'projects' ? 'name' : 'name';
-  const { data } = await supabaseAdmin
-    .from(table)
-    .select(`id, ${nameCol}, ${table === 'projects' ? 'client_name' : 'name'}`)
-    .eq('org_id', orgId);
-  if (!data) return null;
-  const needle = hint.toLowerCase();
-  const hit = data.find((row: Record<string, unknown>) => {
-    const a = String(row[nameCol] ?? '').toLowerCase();
-    const b = String((row as Record<string, unknown>).client_name ?? '').toLowerCase();
-    return (a && needle.includes(a)) || (a && a.includes(needle)) || (b && needle.includes(b));
-  });
-  return (hit as { id?: string })?.id ?? null;
+/**
+ * The project and vendor an extraction names, as rows the studio already has.
+ *
+ * This used to be a substring test in both directions, so "Oak" filed mail
+ * under "Oak Kitchen" and "Oakwood" alike, and a client's name was only
+ * consulted when it happened to contain the project's. The same matcher the
+ * rest of the system uses decides now, and a client with exactly one project
+ * finds that project even when the email never names the job.
+ */
+function resolveFiling(
+  names: StudioNames,
+  hint: { project?: string | null; client?: string | null; vendor?: string | null },
+): { projectId: string | null; vendorId: string | null } {
+  let projectId: string | null = null;
+  if (hint.project) projectId = matchProjectId(names.projects, cleanProjectName(hint.project));
+  if (!projectId && hint.client) projectId = matchClientProjectId(names.projects, hint.client);
+  const vendorId = hint.vendor ? matchProjectId(names.vendors, hint.vendor) : null;
+  return { projectId, vendorId };
+}
+
+/**
+ * How many of an email's PDFs are read before it is filed. Enough for the
+ * cover sheet, the quote and the drawings; a message carrying a dozen PDFs is
+ * usually a document dump, and past this they are known by name.
+ */
+const MAX_PDFS_PER_EMAIL = 4;
+
+/** A PDF read for an email: what it said, and whether it is already stored. */
+interface ReadAttachment {
+  att: PdfAttachment;
+  ref: string;
+  parsed: DocumentExtraction | null;
+  /** The documents row, when an earlier pass already read and stored it. */
+  storedId: string | null;
+}
+
+/**
+ * The project the first attachment that names one points to, or null.
+ *
+ * Used only when the email itself matched nothing on file: a vendor quote
+ * whose sidemark is the client, or a proposal whose cover names the job,
+ * files an email that never said either.
+ */
+function projectFromDocuments(names: StudioNames, documents: (DocumentExtraction | null)[]): string | null {
+  for (const p of documents) {
+    if (!p) continue;
+    const { projectId } = resolveFiling(names, {
+      project: namesAProject(p.project_hint, p.vendor) ? p.project_hint : null,
+      client: p.client,
+    });
+    if (projectId) return projectId;
+  }
+  return null;
+}
+
+/**
+ * File email that has no project, using what its attachments already said.
+ *
+ * Mail read before attachments informed the filing is sitting in the system
+ * under no project, while the quote or proposal that came with it — read and
+ * stored at the time — names the job plainly. This joins them up: the email,
+ * its documents and the task it raised all move to that project.
+ *
+ * Costs no Claude calls; everything it needs was extracted already. Matches
+ * only projects the studio has, and never opens a new one — old mail is not
+ * the place to start inventing jobs.
+ */
+export async function refileFromAttachments(orgId: string, limit = 200): Promise<{ refiled: number }> {
+  if (!supabaseAdmin) return { refiled: 0 };
+
+  const { data: emails } = await supabaseAdmin
+    .from('emails')
+    .select('id, gmail_id')
+    .eq('org_id', orgId)
+    .is('project_id', null)
+    .not('gmail_id', 'is', null)
+    .order('received_at', { ascending: false, nullsFirst: false })
+    .limit(limit);
+  const unfiled = (emails ?? []) as { id: string; gmail_id: string }[];
+  if (!unfiled.length) return { refiled: 0 };
+
+  // Every stored attachment in one read, grouped by the message it came on.
+  const { data: docs } = await supabaseAdmin
+    .from('documents')
+    .select('parsed_json, drive_file_id')
+    .eq('org_id', orgId)
+    .like('drive_file_id', 'gmail:%')
+    .not('parsed_json', 'is', null)
+    .limit(2000);
+  const byMessage = new Map<string, DocumentExtraction[]>();
+  for (const d of (docs ?? []) as { parsed_json: DocumentExtraction; drive_file_id: string }[]) {
+    const messageId = d.drive_file_id.slice('gmail:'.length).split(':')[0];
+    byMessage.set(messageId, [...(byMessage.get(messageId) ?? []), d.parsed_json]);
+  }
+
+  const names = await loadStudioNames(orgId);
+  let refiled = 0;
+  for (const e of unfiled) {
+    const parsed = byMessage.get(e.gmail_id);
+    if (!parsed?.length) continue;
+    const projectId = projectFromDocuments(names, parsed);
+    if (!projectId) continue;
+
+    await supabaseAdmin.from('emails').update({ project_id: projectId }).eq('id', e.id).is('project_id', null);
+    await supabaseAdmin
+      .from('documents')
+      .update({ project_id: projectId })
+      .eq('org_id', orgId)
+      .like('drive_file_id', `gmail:${e.gmail_id}:%`)
+      .is('project_id', null);
+    await supabaseAdmin
+      .from('tasks')
+      .update({ project_id: projectId })
+      .eq('org_id', orgId)
+      .eq('source_email_id', e.id)
+      .is('project_id', null);
+    refiled++;
+  }
+  return { refiled };
 }
 
 /**
@@ -316,17 +419,97 @@ async function ingestInternal(
           continue;
         }
 
+        const names = useAi ? await loadStudioNames(orgId) : null;
+
+        // ── Attachments first ────────────────────────────────
+        // What is attached often names the job more plainly than the body
+        // does — a proposal's cover page, a drawing's title block, a vendor
+        // quote's sidemark. The PDFs were always read, but only AFTER the
+        // email had been classified and filed, when what they said could no
+        // longer change which project it went to, what the project was
+        // called, who the client was, or what the task was titled. Now they
+        // are read first, and the email is filed on the evidence of both.
+        // No extra Claude calls: the same PDFs, read earlier.
+        for (const att of useAi ? email.attachments : []) {
+          if (att.size > MAX_PDF_BYTES) console.warn('[ingest] attachment too large to read', att.filename, att.size);
+        }
+        const readable = useAi
+          ? email.attachments.filter((att) => att.size <= MAX_PDF_BYTES).slice(0, MAX_PDFS_PER_EMAIL)
+          : [];
+
+        // An email whose attachments will not fit in what is left of this
+        // pass waits for the next one, rather than being filed without them
+        // and never looked at again. Not when nothing has been read yet: one
+        // slow attachment must not keep its email out of the system forever.
+        if (readable.length && !roomFor('doc') && emailCount > 0) {
+          done = false;
+          remaining += ids.length - index;
+          break;
+        }
+
+        const read: ReadAttachment[] = [];
+        for (const att of readable) {
+          // Past the budget, the rest of this email's files are known by
+          // name only — still evidence, just less of it.
+          if (read.length && !roomFor('doc')) break;
+          const attStarted = Date.now();
+          try {
+            const ref = `gmail:${email.gmailId}:${att.attachmentId}`;
+            const { data: seen } = await supabaseAdmin
+              .from('documents')
+              .select('id, parsed_json')
+              .eq('org_id', orgId)
+              .eq('drive_file_id', ref)
+              .maybeSingle();
+            if (seen) {
+              const stored = seen as { id: string; parsed_json: DocumentExtraction | null };
+              read.push({ att, ref, parsed: stored.parsed_json, storedId: stored.id });
+              continue;
+            }
+            const pdf = await downloadAttachment(gmail, email.gmailId, att.attachmentId);
+            const parsed = await extractPdf(pdf, att.filename, { orgId }, names);
+            read.push({ att, ref, parsed, storedId: null });
+          } catch (err) {
+            console.error('[ingest] attachment failed', att.filename, (err as Error).message);
+          } finally {
+            timed('doc', attStarted);
+          }
+        }
+
+        // Every attachment is evidence: the ones read, by what they say; the
+        // rest — images, spreadsheets, anything unread — by their names.
+        const evidence: AttachmentEvidence[] = (email.files ?? []).map((f) => ({
+          filename: f.filename,
+          mimeType: f.mimeType,
+          read: read.find((r) => r.att.attachmentId === f.attachmentId)?.parsed ?? null,
+        }));
+        for (const r of read) {
+          if (!evidence.some((e) => e.filename === r.att.filename)) {
+            evidence.push({ filename: r.att.filename, mimeType: 'application/pdf', read: r.parsed });
+          }
+        }
+
         // Every one of these is a Claude call. With reading turned off the
         // message is still stored, just unclassified and unlinked.
-        const extracted = useAi ? await classifyEmail(email, { orgId }) : null;
+        //
+        // Read against the studio's own names, so "Lemon's" comes back as the
+        // Lemon Residence already on file rather than as a new project. Loaded
+        // per email because the email before may have just created one.
+        const extracted = useAi ? await classifyEmail(email, { orgId }, names, evidence) : null;
         // Only look for a project when the hint actually names one. A hint
         // like "Samples" matches almost any project name and filed mail
         // that had nothing to do with the job against it.
         const projectHint = namesAProject(extracted?.project_hint, extracted?.vendor_hint)
           ? extracted?.project_hint ?? null
           : null;
-        const projectId = await resolveByName(orgId, 'projects', projectHint);
-        const vendorId = await resolveByName(orgId, 'vendors', extracted?.vendor_hint ?? null);
+        const filing = names
+          ? resolveFiling(names, { project: projectHint, client: extracted?.client_name, vendor: extracted?.vendor_hint })
+          : { projectId: null, vendorId: null };
+        let projectId = filing.projectId;
+        const vendorId = filing.vendorId;
+        // The email found no job on file, but an attachment may name one the
+        // email never mentioned — a quote whose sidemark is the client.
+        if (names && !projectId) projectId = projectFromDocuments(names, read.map((r) => r.parsed));
 
         const { data: emailRow } = await supabaseAdmin
           .from('emails')
@@ -366,6 +549,48 @@ async function ingestInternal(
             project_id: projectId,
             extracted_json: extracted ?? null,
           });
+        }
+
+        // The project the email ended up on — promotion may just have opened
+        // it — is the one its attachments are filed under too.
+        let filedProjectId = projectId;
+        if (emailRow) {
+          const { data: filed } = await supabaseAdmin.from('emails').select('project_id').eq('id', emailRow.id).maybeSingle();
+          filedProjectId = (filed as { project_id: string | null } | null)?.project_id ?? projectId;
+        }
+        for (const r of read) {
+          try {
+            if (r.storedId) {
+              // Read on an earlier pass and filed nowhere: file it now.
+              if (filedProjectId) {
+                await supabaseAdmin.from('documents').update({ project_id: filedProjectId }).eq('id', r.storedId).is('project_id', null);
+              }
+              continue;
+            }
+            const { data: docRow } = await supabaseAdmin
+              .from('documents')
+              .insert({
+                org_id: orgId,
+                drive_file_id: r.ref,
+                project_id: filedProjectId,
+                type: r.parsed?.type ?? 'other',
+                parsed_json: r.parsed ?? null,
+                confidence: r.parsed?.confidence ?? null,
+              })
+              .select('id')
+              .maybeSingle();
+            docCount++;
+            if (docRow) {
+              await promoteDocument(orgId, {
+                id: docRow.id,
+                type: r.parsed?.type ?? 'other',
+                parsed_json: r.parsed ?? null,
+                project_id: filedProjectId,
+              });
+            }
+          } catch (err) {
+            console.error('[ingest] storing attachment failed', r.att.filename, (err as Error).message);
+          }
         }
 
         // Raise an internal task when the email implies work, assigned by
@@ -440,57 +665,6 @@ async function ingestInternal(
           }
         }
 
-        // Parse any PDF attachments (quotes / order confirmations) that
-        // arrived on this email into the documents table. Reading a PDF is a
-        // Claude call, so with AI off we skip the download too.
-        for (const att of useAi ? email.attachments : []) {
-          if (!roomFor('doc')) {
-            // The email itself is stored, so the next pass skips it and
-            // these attachments with it. Rare, and cheaper than a 504.
-            done = false;
-            break;
-          }
-          // Skip before downloading: the bytes alone are what put the
-          // invocation at risk, and reading it would be refused anyway.
-          if (att.size > MAX_PDF_BYTES) {
-            console.warn('[ingest] attachment too large to read', att.filename, att.size);
-            continue;
-          }
-          const attStarted = Date.now();
-          try {
-            const ref = `gmail:${email.gmailId}:${att.attachmentId}`;
-            const { data: seen } = await supabaseAdmin
-              .from('documents')
-              .select('id')
-              .eq('org_id', orgId)
-              .eq('drive_file_id', ref)
-              .maybeSingle();
-            if (seen) continue;
-
-            const pdf = await downloadAttachment(gmail, email.gmailId, att.attachmentId);
-            const parsed = await extractPdf(pdf, att.filename);
-            const { data: docRow } = await supabaseAdmin
-              .from('documents')
-              .insert({
-                org_id: orgId,
-                drive_file_id: ref,
-                project_id: projectId,
-                type: parsed?.type ?? 'other',
-                parsed_json: parsed ?? null,
-                confidence: parsed?.confidence ?? null,
-              })
-              .select('id')
-              .maybeSingle();
-            docCount++;
-            if (docRow) {
-              await promoteDocument(orgId, { id: docRow.id, type: parsed?.type ?? 'other', parsed_json: parsed ?? null, project_id: projectId });
-            }
-          } catch (err) {
-            console.error('[ingest] attachment failed', att.filename, (err as Error).message);
-          } finally {
-            timed('doc', attStarted);
-          }
-        }
       } catch (err) {
         console.error('[ingest] email failed', id, (err as Error).message);
       } finally {
@@ -536,12 +710,12 @@ async function ingestInternal(
         if (existing) continue;
 
         const bytes = await downloadFile(drive, file.id);
-        const extracted = await extractPdf(bytes, file.name);
-        const projectId = await resolveByName(
-          orgId,
-          'projects',
-          namesAProject(extracted?.project_hint, extracted?.vendor) ? extracted?.project_hint ?? null : null,
-        );
+        const driveNames = await loadStudioNames(orgId);
+        const extracted = await extractPdf(bytes, file.name, { orgId }, driveNames);
+        const { projectId } = resolveFiling(driveNames, {
+          project: namesAProject(extracted?.project_hint, extracted?.vendor) ? extracted?.project_hint ?? null : null,
+          client: extracted?.client,
+        });
 
         const { data: docRow } = await supabaseAdmin
           .from('documents')
@@ -574,7 +748,14 @@ async function ingestInternal(
   // must not turn a good pass into an error.
   let mergedProjects = 0;
   let mergedTasks = 0;
+  let refiled = 0;
   if (done) {
+    try {
+      // Older mail sitting under no project, whose attachments name one.
+      refiled = (await refileFromAttachments(orgId)).refiled;
+    } catch (err) {
+      console.error('[ingest] re-filing from attachments failed:', (err as Error).message);
+    }
     try {
       mergedProjects = (await autoMergeDuplicates(orgId)).removed;
     } catch (err) {
@@ -607,6 +788,7 @@ async function ingestInternal(
       remaining,
       mergedProjects,
       mergedTasks,
+      refiled,
     },
   });
 

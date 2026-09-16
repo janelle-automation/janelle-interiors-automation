@@ -3,6 +3,8 @@ import { NavLink, Link, useLocation } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { useFollowUps, useDrafts, ageFrom } from '../lib/queries';
+import { useAssistant } from '../context/AssistantContext';
+import { AssistantLauncher, AssistantPanel } from './AssistantPanel';
 import { ASSISTANT_NAME, ROLE_LABELS } from '@janelle/shared';
 import {
   IconDashboard, IconProjects, IconVendors, IconInbox, IconDoc,
@@ -428,8 +430,27 @@ export function AppShell({ children }: { children: ReactNode }) {
   const base = '/' + location.pathname.split('/')[1];
   const pageTitle = PAGE_TITLES[base] ?? PAGE_TITLES['/'];
 
+  // With the assistant panel open on a wide screen, the page moves over
+  // rather than sitting underneath it: the point of asking beside the page
+  // is being able to see the page.
+  const assistant = useAssistant();
+  const docked = assistant.open && base !== '/assistant';
+
+  // Full-screen overlays — the task panel, a modal — are fixed to the window,
+  // not to this layout, so the padding above does not reach them. They opt in
+  // with `dock-aware` and stop at the panel's edge (index.css) instead of
+  // opening underneath it.
+  useEffect(() => {
+    const root = document.documentElement;
+    if (docked) root.dataset.assistantDocked = 'true';
+    else delete root.dataset.assistantDocked;
+    return () => {
+      delete root.dataset.assistantDocked;
+    };
+  }, [docked]);
+
   return (
-    <div className="flex min-h-screen">
+    <div className={`flex min-h-screen transition-[padding] duration-200 ${docked ? 'xl:pr-[440px]' : ''}`}>
       {/* Sidebar — desktop */}
       <aside
         className={`relative z-40 hidden shrink-0 bg-nav transition-[width] duration-200 ease-out lg:block ${collapsed ? 'w-[68px]' : 'w-60'}`}
@@ -480,6 +501,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           <h1 className="hidden shrink-0 text-[15px] font-semibold text-ink sm:block">{pageTitle}</h1>
 
           <div className="ml-auto flex items-center gap-1">
+            <span className="mr-1.5">
+              <AssistantLauncher />
+            </span>
             <NotificationsMenu />
             <ThemeButton />
             <span className="mx-2 hidden h-6 w-px bg-line sm:block" aria-hidden="true" />
@@ -487,8 +511,16 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </header>
 
-        <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 md:px-8 md:py-8">{children}</main>
+        {/* Jenny's page takes the whole width: conversations, a chat and its
+            tables need the room more than a reading measure does. */}
+        <main
+          className={`mx-auto w-full flex-1 px-4 py-6 md:px-8 md:py-8 ${base === '/assistant' ? '' : 'max-w-7xl'}`}
+        >
+          {children}
+        </main>
       </div>
+
+      <AssistantPanel />
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from './context/AuthContext';
 import { AppShell } from './components/AppShell';
+import { AssistantProvider } from './context/AssistantContext';
 import Dashboard from './pages/Dashboard';
 import Projects from './pages/Projects';
 import ProjectDetail from './pages/ProjectDetail';
@@ -73,6 +74,8 @@ export default function App() {
   }
 
   return (
+    // Above the pages, so the conversation outlives any one of them.
+    <AssistantProvider>
     <AppShell>
       <Routes>
         <Route path="/" element={<Dashboard />} />
@@ -94,5 +97,6 @@ export default function App() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AppShell>
+    </AssistantProvider>
   );
 }

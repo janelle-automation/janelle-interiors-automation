@@ -1,0 +1,1075 @@
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
+import { useLocation } from 'react-router-dom';
+import { ASSISTANT_NAME, type AssistantAnswer } from '@janelle/shared';
+import { useAuth } from './AuthContext';
+import { api, apiStream, apiUpload, NetworkError } from '../lib/api';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useProject, type AssistantReply, type ProposedAction, type SavedProposal } from '../lib/queries';
+import {
+  bestHearing,
+  listen,
+  soundsLikeEcho,
+  speak,
+  speechInputSupported,
+  speechOutputSupported,
+  stopSpeaking,
+  type StopListening,
+} from '../lib/speech';
+
+/**
+ * Jenny, as one presence across the whole app.
+ *
+ * She used to live on a page of her own, and the conversation lived in that
+ * page's state: step away to look at the project she had just named and the
+ * whole exchange was gone. A personal assistant is the opposite — at hand
+ * wherever you are, still holding the thread when you come back, and
+ * speaking first when there is something you should know.
+ *
+ * So the conversation, the briefing, the voice loop and whether the panel is
+ * open all live here, above the router's pages, and every surface that shows
+ * Jenny — the side panel, the full page — renders the same state.
+ */
+
+/** A file the person attached to a question, as the server granted it. */
+export interface AttachedFile {
+  name: string;
+  mimeType: string;
+  size: number;
+  /** Opaque grant: opens the file, and lets Jenny read it. */
+  token: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  /** Plain text: what the history sends back, and what Copy copies. */
+  content: string;
+  /** Files attached to a question. */
+  files?: AttachedFile[];
+  /** When it was said, epoch ms. */
+  at: number;
+  answer?: AssistantAnswer;
+  proposed?: ProposedAction[];
+  /** Proposals already committed, so the button does not offer twice. */
+  done?: string[];
+  /** Proposals the person turned down. */
+  dismissed?: string[];
+  /** A briefing is her speaking first; an error is a failure with a retry. */
+  kind?: 'briefing' | 'error';
+  /** For an error: the question to ask again. */
+  retry?: string;
+  /** For an error: the files that question carried. */
+  retryFiles?: AttachedFile[];
+}
+
+/** One conversation in the list of past ones. */
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  pinned: boolean;
+  createdAt: number;
+  updatedAt: number;
+  /** Questions asked in it. */
+  questions: number;
+  /** The last thing said, for the list. */
+  preview: string;
+}
+
+/** Where the hands-free conversation is, for the voice bar to show. */
+export type VoiceState = 'off' | 'listening' | 'thinking' | 'speaking';
+
+interface AssistantCtx {
+  messages: ChatMessage[];
+  pending: boolean;
+  /** What she is doing right now — "Searching Gmail" — while pending. */
+  status: string | null;
+  /**
+   * Ask. `alternatives` are the other ways a spoken question was heard;
+   * `files` are uploads attached to it.
+   */
+  send: (text: string, opts?: { alternatives?: string[]; files?: AttachedFile[] }) => void;
+  /** Upload a file to attach to the next question. */
+  uploadFile: (file: File, signal?: AbortSignal) => Promise<AttachedFile>;
+  /** The studio's names, for choosing between hearings of a spoken question. */
+  vocabulary: string[];
+  /** Words heard so far in a hands-free turn, while the person is still talking. */
+  interim: string;
+  /** Stop waiting for the answer in progress. */
+  stop: () => void;
+  newConversation: () => void;
+
+  /** Past conversations, pinned first, then the most recent. */
+  conversations: ConversationSummary[];
+  activeConversationId: string;
+  openConversation: (id: string) => void;
+  renameConversation: (id: string, title: string) => void;
+  pinConversation: (id: string, pinned: boolean) => void;
+  /** Deletes it here, and the files attached in it from storage. */
+  deleteConversation: (id: string) => void;
+  /** Save a conversation as a text file. */
+  downloadConversation: (id: string) => void;
+  /** Put words in the box without sending — "Create a task for …". */
+  prefill: { text: string; at: number } | null;
+  setPrefill: (text: string) => void;
+  /** Bumped to ask the composer to open its file picker. */
+  attachRequest: number;
+  requestAttach: () => void;
+  markDone: (messageId: string, key: string) => void;
+  markDismissed: (messageId: string, key: string) => void;
+  /** Say, in the conversation, that something the person confirmed is saved. */
+  acknowledge: (saved: SavedProposal) => void;
+
+  briefingLoading: boolean;
+  /** Things in a briefing nobody has opened yet — the launcher's badge. */
+  unseen: number;
+
+  open: boolean;
+  setOpen: (open: boolean) => void;
+  /** Bumped to ask whichever composer is showing to take focus. */
+  focusRequest: number;
+  requestFocus: () => void;
+
+  /** The project on screen, by name, when there is one. */
+  lookingAt: string | null;
+
+  handsFree: boolean;
+  setHandsFree: (on: boolean) => void;
+  voice: VoiceState;
+  /** Skip the rest of what she is saying and listen straight away. */
+  skipSpeaking: () => void;
+  /** Take what has been heard as finished now, without waiting for the pause. */
+  doneTalking: () => void;
+  speakReplies: boolean;
+  setSpeakReplies: (on: boolean) => void;
+  micError: string | null;
+  setMicError: (message: string | null) => void;
+  canListen: boolean;
+  canSpeak: boolean;
+}
+
+const Ctx = createContext<AssistantCtx | null>(null);
+
+// ── Remembering the conversation ────────────────────────────
+
+/** One conversation, as kept in this browser. */
+interface Conversation {
+  id: string;
+  /** Set when the person renamed it; otherwise it is named by its first question. */
+  title: string | null;
+  pinned?: boolean;
+  createdAt: number;
+  updatedAt: number;
+  messages: ChatMessage[];
+}
+
+interface Stored {
+  v: 2;
+  conversations: Conversation[];
+  activeId: string;
+  /** The local day the last briefing was made, so there is one a day. */
+  briefedOn: string | null;
+  unseen: number;
+}
+
+/** The version-1 shape: one conversation, forever. */
+interface StoredV1 {
+  v: 1;
+  messages: ChatMessage[];
+  briefedOn: string | null;
+  unseen: number;
+}
+
+/** Enough to scroll back through a day or two of one conversation. */
+const KEEP = 60;
+/** Conversations kept; past this the oldest unpinned ones go. */
+const KEEP_CONVERSATIONS = 40;
+
+const storageKey = (userId: string) => `janelle.assistant.v1.${userId}`;
+
+/** The person's own calendar day — a briefing is "today's" where they are. */
+const localDay = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+const blankConversation = (): Conversation => {
+  const now = Date.now();
+  return { id: newId(), title: null, createdAt: now, updatedAt: now, messages: [] };
+};
+
+const emptyStore = (): Stored => {
+  const first = blankConversation();
+  return { v: 2, conversations: [first], activeId: first.id, briefedOn: null, unseen: 0 };
+};
+
+/** The conversation on screen; there is always one. */
+const activeOf = (s: Stored): Conversation =>
+  s.conversations.find((c) => c.id === s.activeId) ?? s.conversations[0] ?? blankConversation();
+
+/**
+ * Read a person's saved conversations.
+ *
+ * Per person, not per browser: two people sharing a studio laptop must not
+ * see each other's questions. The single conversation an older version kept
+ * becomes the first in the list. Anything unreadable — a private window, a
+ * shape from an older version — starts fresh rather than breaking the panel.
+ */
+function load(userId: string): Stored {
+  try {
+    const raw = localStorage.getItem(storageKey(userId));
+    if (!raw) return emptyStore();
+    const parsed = JSON.parse(raw) as Stored | StoredV1;
+    if (parsed?.v === 1 && Array.isArray(parsed.messages)) {
+      const messages = parsed.messages;
+      const conversation: Conversation = {
+        id: newId(),
+        title: null,
+        createdAt: messages[0]?.at ?? Date.now(),
+        updatedAt: messages[messages.length - 1]?.at ?? Date.now(),
+        messages,
+      };
+      return { v: 2, conversations: [conversation], activeId: conversation.id, briefedOn: parsed.briefedOn ?? null, unseen: parsed.unseen ?? 0 };
+    }
+    if (parsed?.v !== 2 || !Array.isArray(parsed.conversations) || !parsed.conversations.length) return emptyStore();
+    const conversations = parsed.conversations.filter((c) => c && typeof c.id === 'string' && Array.isArray(c.messages));
+    if (!conversations.length) return emptyStore();
+    const activeId = conversations.some((c) => c.id === parsed.activeId) ? parsed.activeId : conversations[0].id;
+    return { ...parsed, conversations, activeId };
+  } catch {
+    return emptyStore();
+  }
+}
+
+/** Oldest first to go: never the one on screen, never a pinned one. */
+function trimmed(s: Stored, keep: number, perConversation: number): Stored {
+  const ranked = [...s.conversations].sort((a, b) => b.updatedAt - a.updatedAt);
+  const kept = ranked.filter((c, i) => c.id === s.activeId || c.pinned || i < keep);
+  return {
+    ...s,
+    conversations: s.conversations
+      .filter((c) => kept.includes(c) && (c.messages.length || c.id === s.activeId))
+      .map((c) => ({ ...c, messages: c.messages.slice(-perConversation) })),
+  };
+}
+
+function save(userId: string, stored: Stored): void {
+  const write = (s: Stored) => localStorage.setItem(storageKey(userId), JSON.stringify(s));
+  // Storage full — answers with long tables add up. Let the oldest
+  // conversations go first, then the start of long ones, rather than
+  // losing everything.
+  for (const [keep, per] of [[KEEP_CONVERSATIONS, KEEP], [20, KEEP], [8, 30], [1, 15]] as const) {
+    try {
+      write(trimmed(stored, keep, per));
+      return;
+    } catch {
+      /* try smaller */
+    }
+  }
+  /* storage is unavailable; the conversations last as long as the tab */
+}
+
+/** What a conversation is called in the list. */
+function titleOf(c: Conversation): string {
+  if (c.title) return c.title;
+  const first = c.messages.find((m) => m.role === 'user');
+  const said = first?.content.replace(/\s+/g, ' ').trim();
+  if (said) return said.length > 64 ? `${said.slice(0, 61).trimEnd()}…` : said;
+  if (first?.files?.length) return first.files.map((f) => f.name).join(', ');
+  const at = new Date(c.messages[0]?.at ?? c.createdAt);
+  return c.messages.some((m) => m.kind === 'briefing')
+    ? `Briefing · ${at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
+    : 'New conversation';
+}
+
+/** A conversation as plain text, for keeping outside the app. */
+function transcriptOf(c: Conversation, you: string): string {
+  const lines = [`# ${titleOf(c)}`, ''];
+  for (const m of c.messages) {
+    const when = new Date(m.at).toLocaleString();
+    const who = m.role === 'user' ? you : ASSISTANT_NAME;
+    lines.push(`## ${who} — ${when}`, '');
+    if (m.kind === 'error') lines.push(`(That did not work: ${m.content})`);
+    else if (m.content) lines.push(m.answer?.lead && m.role === 'assistant' ? m.answer.lead : m.content);
+    for (const f of m.files ?? []) lines.push(`- Attached: ${f.name}`);
+    for (const item of m.answer?.items ?? []) {
+      const facts = (item.fields ?? []).map((f) => `${f.label}: ${f.value}`).join('; ');
+      lines.push(`- ${item.title}${item.detail ? ` — ${item.detail}` : ''}${facts ? ` (${facts})` : ''}`);
+    }
+    if (m.answer?.more) lines.push(`- …and ${m.answer.more} more`);
+    for (const p of m.proposed ?? []) lines.push(`- Prepared: ${p.summary}`);
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+const newId = () =>
+  typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+/** A briefing's count, as a person would count it. */
+const thingsIn = (answer: AssistantAnswer) => answer.items.length + answer.more;
+
+/** The browser's own name for one proposal on one message. */
+const proposalKey = (messageId: string, index: number) => `${messageId}-${index}`;
+
+/**
+ * The conversation as the model will read it — with the truth about proposals.
+ *
+ * History is plain text, and plain text cannot say whether Confirm was
+ * pressed. So the model read its own "I've prepared a task" as the task
+ * existing and told the person it had been created when it had not. Each
+ * proposal now carries its real state into the history: saved, turned down,
+ * or still waiting.
+ */
+function historyOf(messages: ChatMessage[]) {
+  return messages
+    .filter((m) => m.kind !== 'error')
+    .slice(-8)
+    .map((m) => {
+      const files = m.files?.length ? `\n[Attached: ${m.files.map((f) => f.name).join(', ')}]` : '';
+      if (!m.proposed?.length) return { role: m.role, content: `${m.content}${files}`.trim() || '[Attached a file]' };
+      const states = m.proposed.map((p, i) => {
+        const key = proposalKey(m.id, i);
+        if (m.done?.includes(key)) return `[Saved — the person confirmed it: ${p.summary}]`;
+        if (m.dismissed?.includes(key)) return `[Not saved — the person turned it down: ${p.summary}]`;
+        return `[NOT saved yet — waiting for the person to confirm: ${p.summary}]`;
+      });
+      return { role: m.role, content: `${m.content}\n\n${states.join('\n')}` };
+    });
+}
+
+/**
+ * Files Jenny handed over recently, newest last — so a question about "this
+ * PDF" can reach the one she just gave. Only the grant tokens travel; the
+ * server opens each one, and drops any it did not seal for this studio.
+ */
+function recentFilesOf(messages: ChatMessage[]) {
+  const tokens: string[] = [];
+  for (const m of messages.slice(-12)) {
+    const handed = [...(m.files ?? []).map((f) => f.token), ...(m.answer?.items ?? []).map((item) => item.file?.token)];
+    for (const token of handed) {
+      if (!token) continue;
+      const at = tokens.indexOf(token);
+      if (at >= 0) tokens.splice(at, 1);
+      tokens.push(token);
+    }
+  }
+  return tokens.slice(-8).map((token) => ({ token }));
+}
+
+/** Everything shown to the person that they have not yet answered, oldest first. */
+function pendingOf(messages: ChatMessage[]) {
+  return messages.flatMap((m) =>
+    (m.proposed ?? [])
+      .map((p, i) => ({ key: proposalKey(m.id, i), tool: p.tool, summary: p.summary, input: p.input }))
+      .filter((p) => !m.done?.includes(p.key) && !m.dismissed?.includes(p.key)),
+  ).slice(-5);
+}
+
+/** A short line in her voice confirming what was saved, with the row to open it. */
+function acknowledgement(saved: SavedProposal): AssistantAnswer {
+  if (saved.kind === 'draft') {
+    const lead = `Saved to Drafts${saved.to ? ` — ready to send to ${saved.to}` : ''}.`;
+    return {
+      lead,
+      items: [{ kind: 'draft', title: saved.subject, detail: saved.to ? `To ${saved.to}` : null, tone: 'good' }],
+      more: 0,
+      speech: 'Saved to your drafts.',
+      sources: [],
+      suggestions: [],
+    };
+  }
+  const due = saved.due_date
+    ? new Date(`${saved.due_date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })
+    : null;
+  if (saved.kind === 'task_update') {
+    const lead = `Updated${saved.assignee ? ` — it's with ${saved.assignee}` : ''}${due ? `, due ${due}` : ''}.`;
+    return {
+      lead,
+      items: [
+        {
+          kind: 'task',
+          id: saved.id,
+          title: saved.title,
+          tone: 'good',
+          fields: [
+            { label: 'Owner', value: saved.assignee ?? 'Unassigned' },
+            { label: 'Due', value: due ?? '—' },
+            { label: 'Status', value: saved.status.replace(/_/g, ' ') },
+          ],
+        },
+      ],
+      more: 0,
+      speech: lead,
+      sources: [],
+      suggestions: [],
+    };
+  }
+  const lead = `Done — it's on the task board${saved.assignee ? ` for ${saved.assignee}` : ''}${due ? `, due ${due}` : ''}.`;
+  return {
+    lead,
+    items: [
+      {
+        kind: 'task',
+        id: saved.id,
+        title: saved.title,
+        tone: 'good',
+        fields: [
+          { label: 'Owner', value: saved.assignee ?? 'Unassigned' },
+          { label: 'Project', value: saved.project ?? '—' },
+          { label: 'Due', value: due ?? '—' },
+        ],
+      },
+    ],
+    more: 0,
+    speech: `Done. It's on the task board${saved.assignee ? ` for ${saved.assignee}` : ''}.`,
+    sources: [],
+    suggestions: [],
+  };
+}
+
+// ── Provider ────────────────────────────────────────────────
+
+/** One conversation's messages with the day's briefing state — what most changes touch. */
+interface View {
+  messages: ChatMessage[];
+  briefedOn: string | null;
+  unseen: number;
+}
+
+export function AssistantProvider({ children }: { children: ReactNode }) {
+  const { user } = useAuth();
+  const location = useLocation();
+  const queryClient = useQueryClient();
+  const userId = user?.id ?? null;
+
+  const [store, setStore] = useState<Stored>(() => (userId ? load(userId) : emptyStore()));
+  const [pending, setPending] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const [briefingLoading, setBriefingLoading] = useState(false);
+  const [open, setOpenState] = useState(false);
+  const [focusRequest, setFocusRequest] = useState(0);
+
+  const [handsFree, setHandsFreeState] = useState(false);
+  const [voice, setVoice] = useState<VoiceState>('off');
+  const [speakReplies, setSpeakReplies] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
+  const [interim, setInterim] = useState('');
+
+  // Names a recogniser has never heard of — Denish, Casa Elar, Nordhaus —
+  // used to pick the hearing that contains them. Rarely changes.
+  const { data: vocabularyData } = useQuery({
+    queryKey: ['assistant-vocabulary', userId],
+    queryFn: () =>
+      api<{ people: string[]; projects: string[]; clients: string[]; vendors: string[] }>('/assistant/vocabulary'),
+    enabled: Boolean(userId),
+    staleTime: 10 * 60_000,
+  });
+  const vocabulary = useMemo(
+    () => (vocabularyData ? [...vocabularyData.people, ...vocabularyData.projects, ...vocabularyData.clients, ...vocabularyData.vendors] : []),
+    [vocabularyData],
+  );
+  const vocabularyRef = useRef<string[]>([]);
+  vocabularyRef.current = vocabulary;
+
+  const canListen = speechInputSupported();
+  const canSpeak = speechOutputSupported();
+
+  // Refs for the voice loop, whose callbacks outlive the render that made them.
+  const handsFreeRef = useRef(false);
+  const speakRepliesRef = useRef(false);
+  const stopListeningRef = useRef<StopListening | null>(null);
+  const silencesRef = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
+  const briefingInFlight = useRef(false);
+  const storeRef = useRef(store);
+  storeRef.current = store;
+  speakRepliesRef.current = speakReplies;
+
+  // A different person signed in: their conversation, not the last one's.
+  const loadedFor = useRef<string | null>(userId);
+  useEffect(() => {
+    if (loadedFor.current === userId) return;
+    loadedFor.current = userId;
+    setStore(userId ? load(userId) : emptyStore());
+  }, [userId]);
+
+  useEffect(() => {
+    if (userId) save(userId, store);
+  }, [userId, store]);
+
+  const active = activeOf(store);
+
+  /**
+   * Change one conversation — the one on screen unless another is named —
+   * together with the day's briefing state. An answer lands in the
+   * conversation it was asked in, whatever is on screen by then.
+   */
+  const update = useCallback(
+    (fn: (s: View) => View, conversationId?: string) =>
+      setStore((s) => {
+        const id = conversationId ?? s.activeId;
+        const target = s.conversations.find((c) => c.id === id);
+        if (!target) return s; // deleted while the answer was on its way
+        const before: View = { messages: target.messages, briefedOn: s.briefedOn, unseen: s.unseen };
+        const after = fn(before);
+        if (after === before) return s;
+        return {
+          ...s,
+          briefedOn: after.briefedOn,
+          unseen: after.unseen,
+          conversations:
+            after.messages === target.messages
+              ? s.conversations
+              : s.conversations.map((c) =>
+                  c.id === id
+                    ? {
+                        ...c,
+                        messages: after.messages,
+                        updatedAt: after.messages.length > c.messages.length ? Date.now() : c.updatedAt,
+                      }
+                    : c,
+                ),
+        };
+      }),
+    [],
+  );
+
+  const append = useCallback(
+    (message: Omit<ChatMessage, 'id' | 'at'>, conversationId?: string) =>
+      update((s) => ({ ...s, messages: [...s.messages, { ...message, id: newId(), at: Date.now() }] }), conversationId),
+    [update],
+  );
+
+  // ── What is on screen ─────────────────────────────────────
+
+  const path = `${location.pathname}${location.search}`;
+  const projectId = location.pathname.match(/^\/projects\/([0-9a-f-]{36})$/i)?.[1];
+  // Usually already cached — the person is on that project's page.
+  const { data: project } = useProject(projectId);
+  const lookingAt = projectId ? (project?.project.name ?? null) : null;
+
+  // ── The briefing ──────────────────────────────────────────
+
+  const openRef = useRef(open);
+  openRef.current = open;
+
+  const fetchBriefing = useCallback(async () => {
+    if (briefingInFlight.current) return;
+    briefingInFlight.current = true;
+    setBriefingLoading(true);
+    try {
+      const answer = await api<AssistantAnswer>(`/assistant/briefing?hour=${new Date().getHours()}`);
+      const onPage = window.location.pathname.startsWith('/assistant');
+      update((s) => ({
+        ...s,
+        briefedOn: localDay(),
+        // Unseen only when nobody is looking: open panel, or the page.
+        unseen: openRef.current || onPage ? 0 : thingsIn(answer),
+        messages: [
+          ...s.messages,
+          {
+            id: newId(),
+            at: Date.now(),
+            role: 'assistant',
+            kind: 'briefing',
+            content: answer.lead,
+            answer,
+          },
+        ],
+      }));
+    } catch {
+      // No briefing is a quiet absence, not an error to show: the backend
+      // may simply not be configured yet. The next load tries again.
+    } finally {
+      briefingInFlight.current = false;
+      setBriefingLoading(false);
+    }
+  }, [update]);
+
+  // Once a day, as soon as the app is open — not when the panel is. That is
+  // what lets the launcher show a count before anyone thinks to ask.
+  useEffect(() => {
+    if (!userId || store.briefedOn === localDay()) return;
+    void fetchBriefing();
+  }, [userId, store.briefedOn, fetchBriefing]);
+
+  // ── Asking ────────────────────────────────────────────────
+
+  const listenRef = useRef<() => void>(() => {});
+
+  const deliver = useCallback((spokenText: string) => {
+    if (handsFreeRef.current) {
+      setVoice('speaking');
+      speak(spokenText, () => {
+        if (handsFreeRef.current) listenRef.current();
+      });
+    } else if (speakRepliesRef.current) {
+      speak(spokenText);
+    }
+  }, []);
+
+  const send = useCallback(
+    (text: string, opts: { alternatives?: string[]; files?: AttachedFile[] } = {}) => {
+      const typed = text.trim();
+      const files = (opts.files ?? []).slice(0, 4);
+      if ((!typed && !files.length) || abortRef.current) return;
+      // A file on its own still asks something: look at it.
+      const message =
+        typed || (files.length === 1 ? `Take a look at ${files[0].name}.` : `Take a look at these ${files.length} files.`);
+
+      const conversation = activeOf(storeRef.current);
+      const conversationId = conversation.id;
+
+      // What was said before, as plain text. Failed exchanges are left out:
+      // an error message in the history reads to the model as something it
+      // said, and it starts apologising for it.
+      const history = historyOf(conversation.messages);
+      const waiting = pendingOf(conversation.messages);
+      const earlier = recentFilesOf(conversation.messages);
+
+      append({ role: 'user', content: typed, ...(files.length ? { files } : {}) }, conversationId);
+      setPending(true);
+      setStatus('Thinking');
+      if (handsFreeRef.current) setVoice('thinking');
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      let reply: AssistantReply | null = null;
+      let failure: string | null = null;
+      let answered = false;
+
+      const body = {
+        message,
+        history,
+        page: { path },
+        pending: waiting,
+        files: earlier,
+        attachments: files.map((f) => ({ token: f.token })),
+        ...(opts.alternatives?.length ? { spoken: { alternatives: opts.alternatives } } : {}),
+      };
+      const onEvent = (event: Record<string, unknown>) => {
+        answered = true;
+        if (event.type === 'status') setStatus(String(event.text ?? ''));
+        else if (event.type === 'result') reply = event.data as AssistantReply;
+        else if (event.type === 'error') failure = String(event.error ?? 'Something went wrong');
+      };
+      // A question that never reached the server is asked again before it is
+      // reported: the connection blinked, or the API was restarting. Only when
+      // nothing at all came back — once the server has started answering, a
+      // second ask could do the work twice.
+      const attempt = async (tries: number): Promise<void> => {
+        try {
+          await apiStream('/assistant/ask?stream=1', body, onEvent, controller.signal);
+        } catch (err) {
+          if (!(err instanceof NetworkError) || answered || tries >= 3 || controller.signal.aborted) throw err;
+          setStatus('Reconnecting');
+          await new Promise((resolve) => setTimeout(resolve, 1_500 * tries));
+          if (controller.signal.aborted) throw err;
+          return attempt(tries + 1);
+        }
+      };
+
+      void attempt(1)
+        .catch((err: Error) => {
+          if (err.name === 'AbortError') return;
+          failure = err instanceof NetworkError ? err.message : err.message || 'Something went wrong';
+        })
+        .finally(() => {
+          abortRef.current = null;
+          setPending(false);
+          setStatus(null);
+
+          if (controller.signal.aborted) {
+            if (handsFreeRef.current) listenRef.current();
+            else setVoice('off');
+            return;
+          }
+
+          const r = reply as AssistantReply | null;
+          if (r) {
+            // "Yes" said in words settles the buttons on the earlier message
+            // too, so nothing offers to confirm what is already saved.
+            if (r.settled?.length) {
+              update(
+                (st) => ({
+                ...st,
+                messages: st.messages.map((m) => {
+                  const mine = r.settled!.filter((x) => x.key.startsWith(`${m.id}-`));
+                  if (!mine.length) return m;
+                  return {
+                    ...m,
+                    done: [...(m.done ?? []), ...mine.filter((x) => x.decision === 'confirmed').map((x) => x.key)],
+                    dismissed: [...(m.dismissed ?? []), ...mine.filter((x) => x.decision === 'cancelled').map((x) => x.key)],
+                  };
+                }),
+                }),
+                conversationId,
+              );
+              if (r.settled.some((x) => x.decision === 'confirmed')) {
+                void queryClient.invalidateQueries({ queryKey: ['tasks'] });
+                void queryClient.invalidateQueries({ queryKey: ['drafts'] });
+                void queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+              }
+            }
+            append({ role: 'assistant', content: r.reply, answer: r.answer, proposed: r.proposed, done: [] }, conversationId);
+            deliver(r.answer?.speech || r.reply);
+            return;
+          }
+
+          const why = failure ?? 'No answer came back.';
+          append(
+            { role: 'assistant', kind: 'error', content: why, retry: typed, ...(files.length ? { retryFiles: files } : {}) },
+            conversationId,
+          );
+          deliver('Sorry, that did not work. Try asking again.');
+        });
+    },
+    [append, deliver, path, update, queryClient],
+  );
+
+  const stop = useCallback(() => abortRef.current?.abort(), []);
+
+  const newConversation = useCallback(() => {
+    abortRef.current?.abort();
+    stopSpeaking();
+    // The last one is kept in the list, today's briefing with it. A new
+    // conversation starts clean — with what she can do — rather than with
+    // the same briefing again: that comes once a day.
+    setStore((s) => {
+      const current = activeOf(s);
+      // One with nothing in it yet is reused, not piled up.
+      if (!current.messages.length) return { ...s, unseen: 0 };
+      const fresh = blankConversation();
+      return { ...s, conversations: [fresh, ...s.conversations], activeId: fresh.id, unseen: 0 };
+    });
+  }, []);
+
+  const openConversation = useCallback((id: string) => {
+    if (id === storeRef.current.activeId) return;
+    // An answer still on its way belongs to the conversation it was asked in.
+    abortRef.current?.abort();
+    stopSpeaking();
+    setStore((s) => {
+      if (!s.conversations.some((c) => c.id === id)) return s;
+      // An empty conversation left behind is not worth a line in the list.
+      const leaving = activeOf(s);
+      const conversations = leaving.messages.length ? s.conversations : s.conversations.filter((c) => c.id !== leaving.id);
+      return { ...s, conversations, activeId: id };
+    });
+  }, []);
+
+  const renameConversation = useCallback((id: string, title: string) => {
+    const clean = title.replace(/\s+/g, ' ').trim().slice(0, 80);
+    setStore((s) => ({ ...s, conversations: s.conversations.map((c) => (c.id === id ? { ...c, title: clean || null } : c)) }));
+  }, []);
+
+  const pinConversation = useCallback((id: string, pinned: boolean) => {
+    setStore((s) => ({ ...s, conversations: s.conversations.map((c) => (c.id === id ? { ...c, pinned } : c)) }));
+  }, []);
+
+  const deleteConversation = useCallback((id: string) => {
+    const doomed = storeRef.current.conversations.find((c) => c.id === id);
+    if (!doomed) return;
+    if (id === storeRef.current.activeId) {
+      abortRef.current?.abort();
+      stopSpeaking();
+    }
+    // The files attached in it go too — they were only kept for it.
+    const tokens = doomed.messages.flatMap((m) => (m.files ?? []).map((f) => f.token));
+    if (tokens.length) {
+      void api('/assistant/uploads/forget', { method: 'POST', body: JSON.stringify({ tokens }) }).catch(() => {
+        /* the files expire on their own; the conversation is gone either way */
+      });
+    }
+    setStore((s) => {
+      const rest = s.conversations.filter((c) => c.id !== id);
+      if (s.activeId !== id) return { ...s, conversations: rest };
+      const next = [...rest].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+      if (next) return { ...s, conversations: rest, activeId: next.id };
+      const fresh = blankConversation();
+      return { ...s, conversations: [fresh], activeId: fresh.id };
+    });
+  }, []);
+
+  const downloadConversation = useCallback(
+    (id: string) => {
+      const c = storeRef.current.conversations.find((x) => x.id === id);
+      if (!c) return;
+      const text = transcriptOf(c, user?.name ?? 'You');
+      const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${titleOf(c).replace(/[^\w\- ]+/g, '').trim().slice(0, 60) || 'conversation'}.md`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    },
+    [user?.name],
+  );
+
+  const uploadFile = useCallback(
+    (file: File, signal?: AbortSignal) =>
+      apiUpload<AttachedFile>(`/assistant/upload?name=${encodeURIComponent(file.name)}`, file, signal),
+    [],
+  );
+
+  const [prefill, setPrefillState] = useState<{ text: string; at: number } | null>(null);
+  const setPrefill = useCallback((text: string) => setPrefillState({ text, at: Date.now() }), []);
+  const [attachRequest, setAttachRequest] = useState(0);
+  const requestAttach = useCallback(() => setAttachRequest((n) => n + 1), []);
+
+  const conversations = useMemo<ConversationSummary[]>(
+    () =>
+      store.conversations
+        .filter((c) => c.messages.length > 0)
+        .map((c) => {
+          const last = [...c.messages].reverse().find((m) => m.kind !== 'error');
+          return {
+            id: c.id,
+            title: titleOf(c),
+            pinned: Boolean(c.pinned),
+            createdAt: c.createdAt,
+            updatedAt: c.updatedAt,
+            questions: c.messages.filter((m) => m.role === 'user').length,
+            preview: (last?.answer?.lead ?? last?.content ?? '').replace(/\s+/g, ' ').slice(0, 120),
+          };
+        })
+        .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt),
+    [store.conversations],
+  );
+
+  const markDone = useCallback(
+    (messageId: string, key: string) =>
+      update((s) => ({
+        ...s,
+        messages: s.messages.map((m) => (m.id === messageId ? { ...m, done: [...(m.done ?? []), key] } : m)),
+      })),
+    [update],
+  );
+
+  const markDismissed = useCallback(
+    (messageId: string, key: string) =>
+      update((st) => ({
+        ...st,
+        messages: st.messages.map((m) =>
+          m.id === messageId ? { ...m, dismissed: [...(m.dismissed ?? []), key] } : m,
+        ),
+      })),
+    [update],
+  );
+
+  // A confirmation from the button is said back in the conversation, as one
+  // said aloud would be — so the thread records it, and so does the history
+  // the next question is asked with.
+  const acknowledge = useCallback(
+    (saved: SavedProposal) => {
+      const answer = acknowledgement(saved);
+      append({ role: 'assistant', content: answer.lead, answer });
+      deliver(answer.speech);
+    },
+    [append, deliver],
+  );
+
+  // ── Hands-free ────────────────────────────────────────────
+
+  const endHandsFree = useCallback((message?: string) => {
+    handsFreeRef.current = false;
+    setHandsFreeState(false);
+    // Leaving the conversation is not the end of a sentence: nothing is sent.
+    stopListeningRef.current?.({ discard: true });
+    stopListeningRef.current = null;
+    stopSpeaking();
+    setVoice('off');
+    if (message) setMicError(message);
+  }, []);
+
+  /**
+   * Listen for one thing said, then hand it to `send`.
+   *
+   * Silence is allowed once — people pause — and ends the conversation the
+   * second time, so a microphone is never left open in an empty room.
+   */
+  listenRef.current = () => {
+    if (!handsFreeRef.current) return;
+    setVoice('listening');
+    setInterim('');
+    let heard = false;
+    let echo = false;
+    stopListeningRef.current = listen({
+      onInterim: (words) => setInterim(words),
+      onResult: (hearings) => {
+        const ranked = bestHearing(hearings, vocabularyRef.current);
+        // Her own last sentence, picked up by the microphone, is not a reply.
+        if (soundsLikeEcho(ranked[0].transcript)) {
+          echo = true;
+          return;
+        }
+        heard = true;
+        silencesRef.current = 0;
+        setInterim('');
+        send(ranked[0].transcript, { alternatives: ranked.map((h) => h.transcript) });
+      },
+      onError: (error) => {
+        // "I did not catch that" is silence, which the end handler counts.
+        if (error !== 'I did not catch that.') endHandsFree(error);
+      },
+      onEnd: () => {
+        stopListeningRef.current = null;
+        setInterim('');
+        if (!handsFreeRef.current || heard) return;
+        // An echo is not silence: listen again without counting it.
+        if (!echo) silencesRef.current += 1;
+        if (silencesRef.current >= 2) {
+          endHandsFree('Stopped listening — nothing was said. Turn on Talk to carry on.');
+          return;
+        }
+        listenRef.current();
+      },
+    });
+  };
+
+  const setHandsFree = useCallback(
+    (on: boolean) => {
+      if (!on) {
+        endHandsFree();
+        return;
+      }
+      if (!canListen) {
+        setMicError('This browser cannot listen. Chrome, Edge and Safari can.');
+        return;
+      }
+      setMicError(null);
+      silencesRef.current = 0;
+      handsFreeRef.current = true;
+      setHandsFreeState(true);
+      stopSpeaking();
+      // Already waiting on an answer: it will speak, then listen.
+      if (!abortRef.current) listenRef.current();
+      else setVoice('thinking');
+    },
+    [canListen, endHandsFree],
+  );
+
+  const skipSpeaking = useCallback(() => {
+    stopSpeaking();
+    if (handsFreeRef.current) listenRef.current();
+  }, []);
+
+  const doneTalking = useCallback(() => stopListeningRef.current?.(), []);
+
+  // ── The panel ─────────────────────────────────────────────
+
+  const setOpen = useCallback(
+    (next: boolean) => {
+      setOpenState(next);
+      if (next) {
+        update((s) => (s.unseen ? { ...s, unseen: 0 } : s));
+        setFocusRequest((n) => n + 1);
+      } else if (!window.location.pathname.startsWith('/assistant')) {
+        // Closing the panel ends a spoken conversation: talking to a panel
+        // you cannot see is how a microphone gets left on.
+        endHandsFree();
+      }
+    },
+    [update, endHandsFree],
+  );
+
+  // The full page is Jenny too: arriving there counts as having seen her.
+  useEffect(() => {
+    if (location.pathname.startsWith('/assistant')) {
+      setOpenState(false);
+      update((s) => (s.unseen ? { ...s, unseen: 0 } : s));
+    }
+  }, [location.pathname, update]);
+
+  // A spoken conversation needs somewhere it can be seen. Leaving the full
+  // page with the panel shut would leave the microphone listening with
+  // nothing on screen to say so, or to turn it off.
+  useEffect(() => {
+    if (handsFree && !open && !location.pathname.startsWith('/assistant')) endHandsFree();
+  }, [handsFree, open, location.pathname, endHandsFree]);
+
+  const requestFocus = useCallback(() => setFocusRequest((n) => n + 1), []);
+
+  // Nothing keeps listening or talking after the app goes away.
+  useEffect(
+    () => () => {
+      abortRef.current?.abort();
+      stopListeningRef.current?.({ discard: true });
+      stopSpeaking();
+    },
+    [],
+  );
+
+  const value = useMemo<AssistantCtx>(
+    () => ({
+      messages: active.messages,
+      pending,
+      status,
+      send,
+      uploadFile,
+      vocabulary,
+      interim,
+      stop,
+      newConversation,
+      conversations,
+      activeConversationId: active.id,
+      openConversation,
+      renameConversation,
+      pinConversation,
+      deleteConversation,
+      downloadConversation,
+      prefill,
+      setPrefill,
+      attachRequest,
+      requestAttach,
+      markDone,
+      markDismissed,
+      acknowledge,
+      briefingLoading,
+      unseen: store.unseen,
+      open,
+      setOpen,
+      focusRequest,
+      requestFocus,
+      lookingAt,
+      handsFree,
+      setHandsFree,
+      voice,
+      skipSpeaking,
+      doneTalking,
+      speakReplies,
+      setSpeakReplies,
+      micError,
+      setMicError,
+      canListen,
+      canSpeak,
+    }),
+    [
+      active.messages, active.id, store.unseen, pending, status, send, uploadFile, vocabulary, interim, stop, newConversation,
+      conversations, openConversation, renameConversation, pinConversation, deleteConversation, downloadConversation,
+      prefill, setPrefill, attachRequest, requestAttach, markDone, markDismissed, acknowledge,
+      briefingLoading, open, setOpen, focusRequest, requestFocus, lookingAt, handsFree,
+      setHandsFree, voice, skipSpeaking, doneTalking, speakReplies, micError, canListen, canSpeak,
+    ],
+  );
+
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+}
+
+export function useAssistant(): AssistantCtx {
+  const ctx = useContext(Ctx);
+  if (!ctx) throw new Error('useAssistant must be used inside AssistantProvider');
+  return ctx;
+}

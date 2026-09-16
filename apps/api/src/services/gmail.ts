@@ -20,6 +20,12 @@ export interface ParsedEmail {
   receivedAt: string | null;
   body: string;
   attachments: PdfAttachment[];
+  /**
+   * Every real attachment, of any type — for their names as much as their
+   * contents: "Lemon Residence - Elevations.pdf" says which job an email is
+   * about even when nothing reads the file.
+   */
+  files?: MessageAttachment[];
   /** RFC Message-ID header of this email, for threading a reply. */
   messageIdHeader: string;
 }
@@ -238,8 +244,116 @@ export async function getEmail(gmail: gmail_v1.Gmail, id: string): Promise<Parse
     receivedAt: dateMs ? new Date(dateMs).toISOString() : null,
     body: decodeBody(payload).slice(0, 12000),
     attachments: collectPdfAttachments(payload),
+    files: attachmentsOf(payload),
     messageIdHeader: header(payload, 'Message-ID') || header(payload, 'Message-Id'),
   };
+}
+
+// ── Live reading, for the assistant ─────────────────────────
+// Ingestion only ever wanted PDFs, and only from the last few days. The
+// assistant is asked for anything — last spring's floor plan, a photo a
+// client sent, a spreadsheet of finishes — so it reads the mailbox itself.
+
+/** Any attachment on a message, whatever its type. */
+export interface MessageAttachment {
+  filename: string;
+  mimeType: string;
+  attachmentId: string;
+  size: number;
+}
+
+/** A message as a search result: enough to choose one, not to read it. */
+export interface MessageSummary {
+  gmailId: string;
+  threadId: string;
+  from: string;
+  to: string;
+  subject: string;
+  snippet: string;
+  receivedAt: string | null;
+}
+
+/**
+ * Every real attachment on a message.
+ *
+ * "Real" is doing the work: a signature logo or a pasted screenshot is an
+ * attachment to Gmail, carries a filename like image001.png, and would bury
+ * the one drawing someone actually sent. Those parts are the ones referenced
+ * from the HTML body by Content-ID and marked inline, so that is what is
+ * left out. An inline part with no Content-ID is kept — some clients mark
+ * genuine attachments inline for no reason.
+ */
+export function attachmentsOf(payload: gmail_v1.Schema$MessagePart | undefined): MessageAttachment[] {
+  const out: MessageAttachment[] = [];
+  const stack: gmail_v1.Schema$MessagePart[] = payload ? [payload] : [];
+  while (stack.length) {
+    const part = stack.shift()!;
+    if (part.filename && part.body?.attachmentId) {
+      const disposition = header(part, 'Content-Disposition').toLowerCase();
+      const embedded = disposition.startsWith('inline') && Boolean(header(part, 'Content-ID'));
+      if (!embedded) {
+        out.push({
+          filename: part.filename,
+          mimeType: part.mimeType || 'application/octet-stream',
+          attachmentId: part.body.attachmentId,
+          size: part.body.size ?? 0,
+        });
+      }
+    }
+    if (part.parts) stack.push(...part.parts);
+  }
+  return out;
+}
+
+/** A readable message plus every real attachment on it. */
+export async function getMessageWithAttachments(
+  gmail: gmail_v1.Gmail,
+  id: string,
+): Promise<ParsedEmail & { files: MessageAttachment[] }> {
+  const email = await getEmail(gmail, id);
+  return { ...email, files: email.files ?? [] };
+}
+
+/**
+ * Search the whole mailbox with Gmail's own query language.
+ *
+ * Headers only — a search that fetched every body would spend seconds on
+ * messages nobody is going to open. Fetched in parallel because each one is
+ * a separate request and they are independent.
+ */
+export async function searchMessages(
+  gmail: gmail_v1.Gmail,
+  query: string,
+  max = 10,
+): Promise<MessageSummary[]> {
+  const ids = await listMessageIds(gmail, query, max);
+  const found = await Promise.all(
+    ids.map(async (id) => {
+      const res = await gmail.users.messages.get({
+        userId: 'me',
+        id,
+        format: 'metadata',
+        metadataHeaders: ['From', 'To', 'Subject'],
+      });
+      const msg = res.data;
+      const dateMs = msg.internalDate ? Number(msg.internalDate) : null;
+      return {
+        gmailId: msg.id!,
+        threadId: msg.threadId ?? '',
+        from: header(msg.payload, 'From'),
+        to: header(msg.payload, 'To'),
+        subject: header(msg.payload, 'Subject'),
+        snippet: msg.snippet ?? '',
+        receivedAt: dateMs ? new Date(dateMs).toISOString() : null,
+      };
+    }),
+  );
+  return found;
+}
+
+/** Where a message opens in Gmail, for a person who wants the original. */
+export function gmailMessageUrl(gmailId: string): string {
+  return `https://mail.google.com/mail/u/0/#all/${gmailId}`;
 }
 
 /** Download a single PDF attachment's bytes. */
