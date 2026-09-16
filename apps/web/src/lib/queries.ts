@@ -273,6 +273,42 @@ export function useSetRole() {
   });
 }
 
+/** What the signed-in person may do on Team & roles, per the permission matrix. */
+export function useTeamAbilities() {
+  return useQuery({
+    queryKey: ['team', 'can'],
+    queryFn: () => api<{ create: boolean; update: boolean; delete: boolean }>('/team/can'),
+    staleTime: 60_000,
+  });
+}
+
+/** Change someone's name or sign-in email. No email is sent to them either way. */
+export function useEditTeamMember() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { id: string; full_name?: string; email?: string }) =>
+      api(`/team/${v.id}`, { method: 'PATCH', body: JSON.stringify({ full_name: v.full_name, email: v.email }) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['team'] });
+      qc.invalidateQueries({ queryKey: ['me'] });
+      qc.invalidateQueries({ queryKey: ['tasks'] });
+    },
+  });
+}
+
+/** Remove someone from the studio. Their open tasks stay on the board, unassigned. */
+export function useRemoveTeamMember() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api<{ id: string; unassigned_tasks: number }>(`/team/${id}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['team'] });
+      qc.invalidateQueries({ queryKey: ['tasks'] });
+      qc.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+}
+
 export interface NewTeamMember {
   email: string; full_name: string; role: UserRole;
   /** True sends them a sign-in email; false just creates the account. */

@@ -2,8 +2,10 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ROLE_LABELS, SEATS, SEAT_KEYS, USER_ROLES, type Seat, type UserRole } from '@janelle/shared';
 import { PageHeading, Card, Pill } from '../components/ui';
-import { useAuth } from '../context/AuthContext';
-import { useAddTeamMember, useSetRole, useTeam } from '../lib/queries';
+import {
+  useAddTeamMember, useEditTeamMember, useRemoveTeamMember, useSetRole, useTeam, useTeamAbilities,
+  type TeamMember,
+} from '../lib/queries';
 
 
 /** What each role is for, in the studio's own terms. */
@@ -86,15 +88,190 @@ function AddPerson({ onDone }: { onDone: () => void }) {
   );
 }
 
+/**
+ * One person: who they are, what they carry, and — for someone allowed to
+ * manage the team — their role and seat, and editing or removing them.
+ * Removing asks first, in place: a person is not a row to lose by a slip.
+ */
+function PersonRow({
+  m, canUpdate, canDelete, principals,
+}: { m: TeamMember; canUpdate: boolean; canDelete: boolean; principals: number }) {
+  const setRole = useSetRole();
+  const edit = useEditTeamMember();
+  const remove = useRemoveTeamMember();
+  const [mode, setMode] = useState<'view' | 'edit' | 'remove'>('view');
+  const [name, setName] = useState(m.full_name ?? '');
+  const [email, setEmail] = useState(m.email ?? '');
+
+  const lastPrincipal = m.role === 'principal' && principals <= 1;
+  const error = (setRole.error ?? edit.error ?? remove.error) as Error | null;
+
+  if (mode === 'edit') {
+    return (
+      <li className="px-5 py-4">
+        <form
+          className="flex flex-wrap items-end gap-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const change: { id: string; full_name?: string; email?: string } = { id: m.id };
+            if (name.trim() !== (m.full_name ?? '')) change.full_name = name.trim();
+            if (email.trim().toLowerCase() !== (m.email ?? '').toLowerCase()) change.email = email.trim();
+            if (!change.full_name && !change.email) {
+              setMode('view');
+              return;
+            }
+            edit.mutate(change, { onSuccess: () => setMode('view') });
+          }}
+        >
+          <label className="min-w-[12rem] flex-1">
+            <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-faint">Name</span>
+            <input className="input w-full" value={name} onChange={(e) => setName(e.target.value)} required maxLength={120} autoFocus />
+          </label>
+          <label className="min-w-[14rem] flex-1">
+            <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-faint">Sign-in email</span>
+            <input className="input w-full" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+          </label>
+          <div className="flex gap-2">
+            <button type="submit" className="btn-primary btn-sm" disabled={edit.isPending}>
+              {edit.isPending ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={() => {
+                setName(m.full_name ?? '');
+                setEmail(m.email ?? '');
+                edit.reset();
+                setMode('view');
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+        <p className="mt-2 text-[11.5px] text-ink-faint">No email is sent when a name or address changes.</p>
+        {edit.isError && <p className="mt-1 text-[12.5px] text-crit">{(edit.error as Error).message}</p>}
+      </li>
+    );
+  }
+
+  return (
+    <li className="px-5 py-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-brass/10 text-[13px] font-bold text-brass-deep">
+          {(m.full_name ?? m.email ?? '?').slice(0, 1).toUpperCase()}
+        </span>
+
+        <div className="min-w-0 flex-1">
+          <div className="text-[14px] font-medium text-ink">
+            {m.full_name ?? '—'}
+            {m.is_you && <span className="ml-2 text-[11px] font-normal text-ink-faint">you</span>}
+          </div>
+          <div className="truncate text-[12.5px] text-ink-soft">{m.email ?? '—'}</div>
+        </div>
+
+        <div className="text-[12px] text-ink-faint sm:w-28">
+          {m.live_tasks ? `${m.live_tasks} open task${m.live_tasks === 1 ? '' : 's'}` : 'no open work'}
+        </div>
+
+        {canUpdate ? (
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <select
+              className="input sm:w-44"
+              value={m.role}
+              // Losing the last principal would make roles unchangeable
+              // by anyone, so that one case is locked in the UI too.
+              disabled={setRole.isPending || lastPrincipal}
+              title={lastPrincipal ? 'The studio needs at least one principal' : undefined}
+              onChange={(e) => setRole.mutate({ id: m.id, role: e.target.value as UserRole })}
+            >
+              {USER_ROLES.map((r) => (
+                <option key={r} value={r}>{ROLE_LABELS[r]}</option>
+              ))}
+            </select>
+            {/* The seat is what routes work: two people can share a
+                role and owe completely different outcomes. */}
+            <select
+              className="input sm:w-52"
+              value={m.seat ?? ''}
+              disabled={setRole.isPending}
+              title="The named seat from the roles document — this is what routes work"
+              onChange={(e) =>
+                setRole.mutate({ id: m.id, seat: (e.target.value || null) as Seat | null })
+              }
+            >
+              <option value="">No seat</option>
+              {SEAT_KEYS.map((k) => (
+                <option key={k} value={k}>{SEATS[k].label}</option>
+              ))}
+            </select>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <Pill tone="neutral">{ROLE_LABELS[m.role]}</Pill>
+            {m.seat && <Pill tone="brass">{SEATS[m.seat].label}</Pill>}
+          </div>
+        )}
+
+        {(canUpdate || canDelete) && (
+          <div className="flex gap-1.5 sm:ml-1">
+            {canUpdate && (
+              <button type="button" className="btn-secondary btn-sm" onClick={() => setMode('edit')} aria-label={`Edit ${m.full_name ?? m.email}`}>
+                Edit
+              </button>
+            )}
+            {canDelete && !m.is_you && (
+              <button
+                type="button"
+                className="btn-secondary btn-sm text-crit hover:border-crit/50"
+                onClick={() => setMode('remove')}
+                disabled={lastPrincipal}
+                title={lastPrincipal ? 'The studio needs at least one principal' : undefined}
+                aria-label={`Remove ${m.full_name ?? m.email}`}
+              >
+                Remove
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {mode === 'remove' && (
+        <div role="alertdialog" aria-label={`Remove ${m.full_name ?? m.email}`} className="mt-3 rounded-lg border border-crit/30 bg-crit/5 px-4 py-3">
+          <p className="text-[13px] text-ink">
+            Remove <span className="font-semibold">{m.full_name ?? m.email}</span> from the studio? They will no longer be
+            able to sign in.
+            {m.live_tasks ? ` Their ${m.live_tasks} open task${m.live_tasks === 1 ? '' : 's'} will stay on the board, unassigned.` : ''}{' '}
+            Nothing is emailed to them.
+          </p>
+          <div className="mt-2.5 flex gap-2">
+            <button
+              type="button"
+              className="rounded-lg bg-crit px-3 py-1.5 text-[12.5px] font-semibold text-white hover:opacity-90 disabled:opacity-50"
+              disabled={remove.isPending}
+              onClick={() => remove.mutate(m.id)}
+            >
+              {remove.isPending ? 'Removing…' : 'Remove'}
+            </button>
+            <button type="button" className="btn-secondary btn-sm" onClick={() => { remove.reset(); setMode('view'); }}>
+              Keep
+            </button>
+          </div>
+        </div>
+      )}
+
+      {error && <p className="mt-2 text-[12.5px] text-crit">{error.message}</p>}
+    </li>
+  );
+}
+
 export default function Team() {
   const { data: team, isLoading } = useTeam();
-  const { user } = useAuth();
-  const setRole = useSetRole();
+  const { data: can } = useTeamAbilities();
   const [adding, setAdding] = useState(false);
 
-  const isPrincipal = user?.role === 'principal';
-
   const principals = team.filter((m) => m.role === 'principal').length;
+  const manages = Boolean(can?.create || can?.update || can?.delete);
 
   return (
     <>
@@ -102,7 +279,7 @@ export default function Team() {
         title="Team & roles"
         sub="Who is in the studio, what each role may do, and who owns what. Roles are enforced in the app and again in the database."
         action={
-          isPrincipal ? (
+          can?.create ? (
             <button onClick={() => setAdding((v) => !v)} className="btn-primary btn-sm">
               {adding ? 'Cancel' : 'Add person'}
             </button>
@@ -129,75 +306,13 @@ export default function Team() {
             )}
 
             {team.map((m) => (
-              <li key={m.id} className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center">
-                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-brass/10 text-[13px] font-bold text-brass-deep">
-                  {(m.full_name ?? m.email ?? '?').slice(0, 1).toUpperCase()}
-                </span>
-
-                <div className="min-w-0 flex-1">
-                  <div className="text-[14px] font-medium text-ink">
-                    {m.full_name ?? '—'}
-                    {m.is_you && <span className="ml-2 text-[11px] font-normal text-ink-faint">you</span>}
-                  </div>
-                  <div className="truncate text-[12.5px] text-ink-soft">{m.email ?? '—'}</div>
-                </div>
-
-                <div className="text-[12px] text-ink-faint sm:w-28">
-                  {m.live_tasks ? `${m.live_tasks} open task${m.live_tasks === 1 ? '' : 's'}` : 'no open work'}
-                </div>
-
-                {isPrincipal ? (
-                  <div className="flex flex-col gap-2 sm:flex-row">
-                    <select
-                      className="input sm:w-44"
-                      value={m.role}
-                      // Losing the last principal would make roles unchangeable
-                      // by anyone, so that one case is locked in the UI too.
-                      disabled={setRole.isPending || (m.is_you && principals <= 1)}
-                      title={m.is_you && principals <= 1 ? 'You are the only principal' : undefined}
-                      onChange={(e) => setRole.mutate({ id: m.id, role: e.target.value as UserRole })}
-                    >
-                      {USER_ROLES.map((r) => (
-                        <option key={r} value={r}>{ROLE_LABELS[r]}</option>
-                      ))}
-                    </select>
-                    {/* The seat is what routes work: two people can share a
-                        role and owe completely different outcomes. Assigning
-                        it takes it off whoever held it — one seat, one holder. */}
-                    <select
-                      className="input sm:w-52"
-                      value={m.seat ?? ''}
-                      disabled={setRole.isPending}
-                      title="The named seat from the roles document — this is what routes work"
-                      onChange={(e) =>
-                        setRole.mutate({ id: m.id, seat: (e.target.value || null) as Seat | null })
-                      }
-                    >
-                      <option value="">No seat</option>
-                      {SEAT_KEYS.map((k) => (
-                        <option key={k} value={k}>{SEATS[k].label}</option>
-                      ))}
-                    </select>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2">
-                    <Pill tone="neutral">{ROLE_LABELS[m.role]}</Pill>
-                    {m.seat && <Pill tone="brass">{SEATS[m.seat].label}</Pill>}
-                  </div>
-                )}
-              </li>
+              <PersonRow key={m.id} m={m} canUpdate={Boolean(can?.update)} canDelete={Boolean(can?.delete)} principals={principals} />
             ))}
           </ul>
 
-          {setRole.isError && (
-            <div className="border-t border-line-soft px-5 py-3 text-[12.5px] text-crit">
-              {(setRole.error as Error).message}
-            </div>
-          )}
-
-          {!isPrincipal && (
+          {!manages && (
             <div className="border-t border-line-soft px-5 py-3 text-[12.5px] text-ink-faint">
-              Only a principal can add people or change roles.
+              Only someone allowed to manage the team can add, edit or remove people.
             </div>
           )}
         </Card>

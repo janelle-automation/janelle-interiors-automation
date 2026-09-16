@@ -1,7 +1,7 @@
 import { SEATS, type Seat } from '@janelle/shared';
 import { supabaseAdmin } from './supabase.js';
 import { profileColumns } from './columns.js';
-import { STUDIO_DOMAINS, STUDIO_MAILBOXES, STUDIO_TEAM, isStudioMailbox, studioPerson } from './studioTeam.js';
+import { STUDIO_DOMAINS, STUDIO_MAILBOXES, STUDIO_TEAM, isStudioMailbox, isStudioName, studioPerson } from './studioTeam.js';
 
 /**
  * The names the studio already has on file: its projects and their clients,
@@ -15,7 +15,8 @@ import { STUDIO_DOMAINS, STUDIO_MAILBOXES, STUDIO_TEAM, isStudioMailbox, studioP
  */
 
 export interface StudioNames {
-  projects: { id: string; name: string; client_name: string | null }[];
+  /** Archived jobs included, so mail about an old job files to it instead of opening a new one. */
+  projects: { id: string; name: string; client_name: string | null; archived?: boolean }[];
   vendors: { id: string; name: string }[];
   /**
    * The studio's people: every account, plus anyone on the studio's own list
@@ -52,8 +53,8 @@ export async function loadStudioNames(orgId: string): Promise<StudioNames> {
 
   const names: StudioNames = {
     projects: ((projects.data ?? []) as { id: string; name: string; client_name: string | null; status: string }[])
-      .filter((p) => p.name && p.status !== 'archived')
-      .map(({ id, name, client_name }) => ({ id, name, client_name })),
+      .filter((p) => p.name)
+      .map(({ id, name, client_name, status }) => ({ id, name, client_name, archived: status === 'archived' })),
     vendors: ((vendors.data ?? []) as { id: string; name: string }[]).filter((v) => v.name),
     team: teamOf((team.data ?? []) as unknown as Account[]),
   };
@@ -104,7 +105,14 @@ const LIMIT = { projects: 120, vendors: 120, team: 40 };
  * against these rows.
  */
 export function studioNamesBlock(names: StudioNames): string {
-  const projects = names.projects.slice(0, LIMIT.projects).map((p) => `- ${p.name}${p.client_name ? ` — client: ${p.client_name}` : ''}`);
+  // A client recorded as the studio itself is a mistake, and repeating it here
+  // taught the model to repeat it: the Lemon job came back as the studio's own.
+  const projects = names.projects
+    .slice(0, LIMIT.projects)
+    .map(
+      (p) =>
+        `- ${p.name}${p.client_name && !isStudioName(p.client_name) ? ` — client: ${p.client_name}` : ''}${p.archived ? ' (archived, finished job)' : ''}`,
+    );
   const vendors = names.vendors.slice(0, LIMIT.vendors).map((v) => `- ${v.name}`);
   const team = names.team.slice(0, LIMIT.team).map((p) =>
     [
