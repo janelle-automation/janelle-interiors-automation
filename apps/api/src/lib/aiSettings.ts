@@ -1,4 +1,10 @@
-import { DEFAULT_MODEL, SELECTABLE_MODELS, type AiSettingsView } from '@janelle/shared';
+import {
+  DEFAULT_IMAGE_MODEL,
+  DEFAULT_MODEL,
+  IMAGE_MODELS,
+  SELECTABLE_MODELS,
+  type AiSettingsView,
+} from '@janelle/shared';
 import { env } from '../env.js';
 import { decrypt, encrypt } from './crypto.js';
 import { resolveOrgId } from './org.js';
@@ -21,6 +27,12 @@ import { supabaseAdmin } from './supabase.js';
 
 const KEY_FIELD = 'anthropic_api_key_encrypted';
 const MODEL_FIELD = 'anthropic_model';
+
+// Rendering boards is a second provider with a second key. Same JSON blob,
+// same encryption, its own cache — so a studio can have Claude without
+// renders, which is the normal state until someone pays for image credit.
+const IMAGE_KEY_FIELD = 'image_api_key_encrypted';
+const IMAGE_MODEL_FIELD = 'image_model';
 
 export interface ResolvedAi {
   apiKey: string | null;
@@ -102,6 +114,106 @@ export async function resolveAi(given?: string | null): Promise<ResolvedAi> {
 
   cache.set(orgId, { at: Date.now(), value });
   return value;
+}
+
+const imageCache = new Map<string, { at: number; value: ResolvedAi }>();
+
+export function invalidateImageSettings(orgId?: string | null): void {
+  if (orgId) imageCache.delete(orgId);
+  else imageCache.clear();
+}
+
+function imageFromEnvironment(): ResolvedAi {
+  return {
+    apiKey: env.images.apiKey || null,
+    model: env.images.model || DEFAULT_IMAGE_MODEL,
+    source: env.images.apiKey ? 'environment' : 'none',
+  };
+}
+
+/** The image key and model this org should use, resolved like the Claude one. */
+export async function resolveImageAi(given?: string | null): Promise<ResolvedAi> {
+  if (!supabaseAdmin) return imageFromEnvironment();
+
+  const orgId = await resolveOrgId(given);
+  if (!orgId) return imageFromEnvironment();
+
+  const hit = imageCache.get(orgId);
+  if (hit && Date.now() - hit.at < TTL_MS) return hit.value;
+
+  let value = imageFromEnvironment();
+  try {
+    const settings = await readSettings(orgId);
+
+    const stored = settings[IMAGE_KEY_FIELD];
+    if (typeof stored === 'string' && stored) {
+      try {
+        const apiKey = decrypt(stored);
+        if (apiKey) value = { ...value, apiKey, source: 'studio' };
+      } catch {
+        console.error('[images] stored API key could not be decrypted — using the environment key');
+      }
+    }
+
+    const model = settings[IMAGE_MODEL_FIELD];
+    if (typeof model === 'string' && IMAGE_MODELS.some((m) => m.id === model)) {
+      value = { ...value, model };
+    }
+  } catch (err) {
+    console.error('[images] settings unreadable, using the environment:', (err as Error).message);
+    return imageFromEnvironment();
+  }
+
+  imageCache.set(orgId, { at: Date.now(), value });
+  return value;
+}
+
+export async function saveImageApiKey(orgId: string, apiKey: string): Promise<void> {
+  if (!supabaseAdmin) throw new Error('Backend not configured');
+  const settings = await readSettings(orgId);
+  const { error } = await supabaseAdmin
+    .from('organizations')
+    .update({ settings: { ...settings, [IMAGE_KEY_FIELD]: encrypt(apiKey.trim()) } })
+    .eq('id', orgId);
+  if (error) throw new Error(error.message);
+  invalidateImageSettings(orgId);
+}
+
+export async function saveImageModel(orgId: string, model: string): Promise<void> {
+  if (!supabaseAdmin) throw new Error('Backend not configured');
+  const settings = await readSettings(orgId);
+  const { error } = await supabaseAdmin
+    .from('organizations')
+    .update({ settings: { ...settings, [IMAGE_MODEL_FIELD]: model } })
+    .eq('id', orgId);
+  if (error) throw new Error(error.message);
+  invalidateImageSettings(orgId);
+}
+
+export async function clearImageApiKey(orgId: string): Promise<void> {
+  if (!supabaseAdmin) throw new Error('Backend not configured');
+  const settings = await readSettings(orgId);
+  delete settings[IMAGE_KEY_FIELD];
+  const { error } = await supabaseAdmin
+    .from('organizations')
+    .update({ settings })
+    .eq('id', orgId);
+  if (error) throw new Error(error.message);
+  invalidateImageSettings(orgId);
+}
+
+/** The board renderer's state, for the settings screen. Never the key itself. */
+export async function imageSettingsView(orgId: string): Promise<AiSettingsView> {
+  const settings = await readSettings(orgId).catch(() => ({}) as Record<string, unknown>);
+  const resolved = await resolveImageAi(orgId);
+
+  return {
+    configured: Boolean(resolved.apiKey),
+    source: resolved.source,
+    keyHint: resolved.apiKey ? resolved.apiKey.slice(-4) : null,
+    model: resolved.model,
+    modelIsDefault: typeof settings[IMAGE_MODEL_FIELD] !== 'string',
+  };
 }
 
 /** What the settings screen may see. Never includes the key. */

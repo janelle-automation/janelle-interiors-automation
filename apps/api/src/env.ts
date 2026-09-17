@@ -55,6 +55,14 @@ export const env = {
     model: optional('ANTHROPIC_MODEL', 'claude-opus-5'),
   },
 
+  // Rendering presentation boards. A separate provider because Claude does
+  // not make pictures; left empty until the studio sets a key, and every
+  // render path degrades to "not configured" rather than failing oddly.
+  images: {
+    apiKey: optional('GEMINI_API_KEY'),
+    model: optional('GEMINI_IMAGE_MODEL', 'gemini-3-pro-image'),
+  },
+
   tokenEncryptionKey: optional('TOKEN_ENCRYPTION_KEY'),
 } as const;
 

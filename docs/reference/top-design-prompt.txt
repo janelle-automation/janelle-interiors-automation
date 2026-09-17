@@ -1,0 +1,584 @@
+Below are the highest-value AI prompts an interior design firm can standardize across its team. I would treat these as your internal prompt library for Janelle Interiors.
+1. Full Project Design Direction
+Act as a senior interior designer at a luxury residential and hospitality design firm.
+
+Review the client brief, architectural plans, inspiration images, existing conditions, budget, and project constraints.
+
+Develop a cohesive design direction for the entire project.
+
+For each room, provide:
+
+- Overall design concept
+- Color palette
+- Material direction
+- Flooring
+- Wall finishes
+- Cabinetry / millwork direction
+- Countertop and stone direction
+- Plumbing finish
+- Lighting direction
+- Furniture style
+- Textile direction
+- Key architectural details
+- Connections to adjacent rooms
+- Items requiring client approval
+- Information still missing
+
+Maintain one cohesive design language throughout the project while allowing each room to have its own identity.
+
+Do not invent dimensions, products, or specifications. Mark missing information as TBD.
+
+2. Room-by-Room Moodboard Prompt
+Act as a senior interior designer.
+
+Develop a moodboard direction for:
+
+CLIENT:
+ROOM:
+PROJECT STYLE:
+BUDGET LEVEL:
+EXISTING CONDITIONS:
+CLIENT REQUESTS:
+
+Create a clear design concept including:
+
+- 5–8 inspiration directions
+- Overall color palette
+- Tile / stone direction
+- Wood tone
+- Metal finish
+- Cabinetry direction
+- Wall finish
+- Lighting style
+- Furniture direction
+- Textile direction
+- Architectural details
+
+Explain how the selections work together.
+
+The moodboard should establish design direction only. Do not treat inspiration images as actual product selections.
+
+3. Pinterest Research Prompt
+Act as an interior design research assistant.
+
+I am designing a [ROOM] with the following direction:
+
+[DESIGN DESCRIPTION]
+
+Create a targeted Pinterest research list.
+
+Give me specific search phrases for:
+
+- Overall room inspiration
+- Tile layouts
+- Tile patterns
+- Cabinetry
+- Millwork
+- Stone
+- Lighting
+- Plumbing
+- Furniture
+- Architectural details
+- Color palette
+
+Avoid generic search terms.
+
+Give me highly specific Pinterest searches that will produce professional designer-level inspiration.
+
+4. Material Selection Prompt
+Act as a senior interior designer and materials specialist.
+
+Using the approved moodboard and design direction, develop an actual material-selection package for this room.
+
+ROOM:
+STYLE:
+BUDGET:
+ARCHITECTURAL CONDITIONS:
+APPROVED DESIGN DIRECTION:
+
+Select or define the requirements for:
+
+- Flooring
+- Wall tile
+- Shower tile
+- Shower flooring
+- Stone
+- Countertop
+- Backsplash
+- Cabinet finish
+- Cabinet hardware
+- Paint
+- Wallpaper
+- Plumbing finish
+- Decorative lighting
+
+For each selection provide:
+
+- Material category
+- Recommended material
+- Color
+- Finish
+- Size
+- Application
+- Design rationale
+- Sample required: Yes / No
+- Information still needed
+
+Flag any material combinations that may compete visually.
+
+5. Finish Schedule Prompt
+Act as a senior interior designer and specifications coordinator.
+
+Create a professional Finish Schedule from the approved project selections.
+
+Organize it room by room.
+
+For each finish include:
+
+- Room
+- Category
+- Location
+- Manufacturer
+- Product
+- SKU
+- Color
+- Finish
+- Size
+- Installation direction
+- Grout if applicable
+- Edge / trim detail
+- Vendor
+- Product link
+- Status
+- Notes
+- Client approval status
+- GC quantity confirmation status
+
+Categories should include:
+
+- Flooring
+- Wall finish
+- Tile
+- Stone
+- Countertops
+- Backsplash
+- Cabinetry
+- Millwork
+- Hardware
+- Paint
+- Wallpaper
+- Plumbing
+- Decorative lighting
+
+Do not invent missing information.
+
+Use:
+TBD — DESIGN TEAM TO COMPLETE
+when information is unavailable.
+
+6. FF&E Schedule Prompt
+Act as a senior FF&E designer and procurement specialist.
+
+Create a room-by-room FF&E schedule using the approved design direction and product selections.
+
+Track:
+
+- Room
+- Item
+- Category
+- Manufacturer
+- Product
+- SKU
+- Finish
+- Dimensions
+- Quantity
+- Vendor
+- Product link
+- Retail price
+- Trade price
+- Client price
+- Lead time
+- Availability
+- Status
+- Client approval
+- Notes
+
+Identify:
+
+- Missing selections
+- Missing pricing
+- Missing dimensions
+- Lead-time risks
+- Products requiring samples
+- Products requiring custom quotes
+- Items that should be sourced immediately
+
+7. Interior Elevation Prompt
+Act as a senior interior designer and interior architectural designer.
+
+Review the architectural plans and approved finish selections for this room.
+
+Create an interior elevation planning brief showing exactly what needs to be documented.
+
+Include:
+
+- Overall wall dimensions
+- Ceiling height
+- Cabinetry
+- Millwork
+- Countertops
+- Backsplashes
+- Tile extents
+- Tile direction
+- Plumbing fixtures
+- Mirrors
+- Decorative lighting
+- Niches
+- Shelving
+- Hardware
+- Artwork
+- Furniture if applicable
+- Electrical coordination
+- Mounting heights
+- Key dimensions
+
+Identify any dimensions or architectural information missing before drafting begins.
+
+The finished elevation should answer:
+
+WHAT GOES WHERE?
+
+8. Elevation Quality-Control Prompt
+Act as a senior interior designer reviewing a junior designer's interior elevation.
+
+Review the elevation for:
+
+- Accuracy
+- Proportion
+- Missing dimensions
+- Tile placement
+- Tile termination
+- Centerlines
+- Plumbing alignment
+- Lighting alignment
+- Mirror placement
+- Cabinetry proportions
+- Countertop thickness
+- Hardware
+- Niches
+- Trim
+- Material callouts
+- Constructability
+- Coordination with architectural plans
+
+Identify:
+
+1. Errors
+2. Missing information
+3. Items requiring GC confirmation
+4. Items requiring Lead Designer approval
+5. Recommended corrections
+
+Do not approve the drawing if critical construction information is missing.
+
+9. Kitchen Design Review
+Act as a senior kitchen designer.
+
+Review this kitchen design for both aesthetics and functionality.
+
+Evaluate:
+
+- Appliance locations
+- Work triangle
+- Aisle clearances
+- Landing areas
+- Cabinet storage
+- Drawer placement
+- Trash location
+- Pantry storage
+- Island size
+- Island seating
+- Lighting
+- Electrical
+- Plumbing
+- Ventilation
+- Countertop material
+- Backsplash
+- Cabinet finishes
+- Hardware
+- Symmetry
+- Sightlines
+
+Identify anything that may cause a construction, usability, or aesthetic problem.
+
+10. Bathroom Design Review
+Act as a senior bathroom designer.
+
+Review this bathroom plan, elevation, and finish package.
+
+Check:
+
+- Vanity layout
+- Sink placement
+- Faucet compatibility
+- Mirror placement
+- Sconce placement
+- Shower controls
+- Showerhead location
+- Hand shower
+- Niches
+- Bench
+- Grab bars if required
+- Drain
+- Tile layout
+- Tile transitions
+- Waterproof areas
+- Flooring transitions
+- Toilet clearances
+- Accessories
+- Electrical
+- Lighting
+
+Identify missing information and anything requiring GC or plumber confirmation.
+
+11. Design Presentation Review
+Act as the Creative Director of a luxury interior design firm.
+
+Review this Canva client presentation before it goes to the client.
+
+Evaluate:
+
+- Visual hierarchy
+- Consistency
+- Image quality
+- Page layouts
+- Typography
+- Spacing
+- Moodboard clarity
+- Material presentation
+- Elevation clarity
+- Finish Schedule
+- FF&E Schedule
+- Missing selections
+- TBD items
+- Client decisions required
+
+Identify anything that looks unfinished, confusing, inconsistent, or unprofessional.
+
+Finish with:
+
+MUST FIX BEFORE CLIENT
+SHOULD IMPROVE
+READY TO PRESENT
+
+12. Client Meeting Preparation
+Act as the Lead Interior Designer preparing for a client presentation.
+
+Review the project presentation and create a meeting agenda.
+
+Separate everything into:
+
+- Decisions already made
+- Items to present
+- Items requiring client approval
+- Alternatives to discuss
+- Budget concerns
+- Lead-time concerns
+- Design questions
+- Missing information
+- GC questions
+- Architect questions
+
+Put the most important client decisions first.
+
+13. Convert Meeting Notes Into Design Tasks
+Act as a senior interior design project manager.
+
+Convert these meeting notes into actionable tasks.
+
+Organize by:
+
+- Design
+- Drawings
+- Materials
+- FF&E
+- Procurement
+- GC
+- Architect
+- Vendor
+- Client
+- Lead Designer
+
+For every task provide:
+
+- Task
+- Room
+- Owner
+- Due date if known
+- Dependency
+- Status
+- Priority
+
+Do not invent responsibilities or deadlines.
+
+If unknown use:
+
+OWNER TO BE ASSIGNED
+
+or
+
+DATE TBD
+
+14. Missing-Information Audit
+This is one of the most useful prompts for junior designers.
+Act as a senior interior designer performing a completeness audit.
+
+Review the entire project.
+
+For every room identify missing:
+
+- Moodboards
+- Material selections
+- Finish selections
+- Plumbing
+- Lighting
+- Flooring
+- Paint
+- Wallpaper
+- Cabinet finishes
+- Hardware
+- Elevations
+- Dimensions
+- FF&E
+- Client approvals
+- Samples
+- Vendor quotes
+- GC information
+- Architect information
+
+Create a punch list organized:
+
+RED — Blocking progress
+YELLOW — Needed soon
+GREEN — Can wait
+
+15. Client Approval Audit
+Review the project and identify the approval status of every material and FF&E selection.
+
+Sort into:
+
+APPROVED
+
+WAITING FOR CLIENT
+
+WAITING FOR LEAD DESIGNER
+
+RESELECT
+
+TBD
+
+NOT YET PRESENTED
+
+For each unresolved item state exactly what action needs to happen next.
+
+16. Procurement Readiness Audit
+Act as a senior FF&E procurement manager.
+
+Review all approved design selections and determine whether each item is ready for procurement.
+
+Check:
+
+- Manufacturer
+- Product
+- SKU
+- Finish
+- Dimensions
+- Quantity
+- Vendor
+- Quote
+- Availability
+- Lead time
+- Freight
+- Client approval
+- Lead Designer approval
+- GC quantity approval
+- Delivery location
+
+Classify every item:
+
+READY TO ORDER
+
+MISSING INFORMATION
+
+WAITING ON CLIENT
+
+WAITING ON GC
+
+WAITING ON VENDOR
+
+RESELECT REQUIRED
+
+17. Designer Hours Review
+Act as the COO of an interior design firm.
+
+Review the designer's time spent on this project.
+
+Compare actual hours against standard target hours for:
+
+- Project setup
+- Moodboards
+- Material sourcing
+- Plumbing
+- Lighting
+- Elevations
+- Finish Schedule
+- FF&E sourcing
+- FF&E Schedule
+- Canva updates
+- Client revisions
+- Coordination
+
+Identify:
+
+- Appropriate hours
+- Excessive hours
+- Work that should have been delegated
+- Rework
+- Client-driven revisions
+- Scope creep
+- Opportunities to improve efficiency
+
+Finish with recommended hours remaining to complete the project.
+
+18. Weekly Lead Designer Project Review
+Act as the Lead Designer and COO.
+
+Review the entire project and tell me:
+
+- Current design phase
+- Percent design complete
+- Rooms complete
+- Rooms incomplete
+- Client approvals outstanding
+- Lead Designer approvals outstanding
+- Missing elevations
+- Missing materials
+- Missing FF&E
+- Missing Finish Schedule information
+- Missing vendor quotes
+- GC decisions needed
+- Long-lead risks
+- Designer tasks overdue
+- Procurement tasks overdue
+
+Then create the top 10 priorities for the design team this week.
+
+The 5 prompts I would require your team to use every week
+If you want the system simple, make these mandatory:
+Missing-Information Audit
+Design Presentation Review
+Interior Elevation QC
+Procurement Readiness Audit
+Weekly Lead Designer Project Review
+Those five prompts can catch a large percentage of the issues that normally cause interior-design projects to fall behind: unfinished selections, unclear approvals, incomplete drawings, missing specifications, and procurement not knowing what is actually ready to order.
+

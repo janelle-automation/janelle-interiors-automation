@@ -459,9 +459,12 @@ export default function Dashboard() {
                 )}
                 {recentPos.map((o) => (
                   <tr key={o.id} className="text-ink-soft transition-colors hover:bg-sunk/40">
-                    <td className="px-5 py-3 font-semibold text-ink">{o.po}</td>
-                    <td className="px-5 py-3 font-medium text-ink">{o.vendor}</td>
-                    <td className="px-5 py-3">{o.project}</td>
+                    {/* The view model returns '' for an unset field now, so the
+                        dash is applied here rather than baked into the data —
+                        the Vendors table hides such columns instead. */}
+                    <td className="px-5 py-3 font-semibold text-ink">{o.po || '—'}</td>
+                    <td className="px-5 py-3 font-medium text-ink">{o.vendor || '—'}</td>
+                    <td className="px-5 py-3">{o.project || '—'}</td>
                     <td className="px-5 py-3">
                       <Pill tone={o.status === 'received' ? 'good' : o.status === 'shipped' ? 'brass' : 'neutral'}>
                         {o.status.replace('_', ' ')}

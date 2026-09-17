@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { estimateCostUsd, type AiFeature } from '@janelle/shared';
 import { env, isAnthropicConfigured } from '../env.js';
+import { UserFacingError } from '../middleware/error.js';
 import { resolveAi } from '../lib/aiSettings.js';
 import { resolveOrgId } from '../lib/org.js';
 import { supabaseAdmin } from '../lib/supabase.js';
@@ -24,6 +25,44 @@ export const AI_USAGE_ACTION = 'ai.usage';
  */
 const CALL_TIMEOUT_MS = Number(process.env.ANTHROPIC_TIMEOUT_MS || 25_000);
 const CALL_MAX_RETRIES = Number(process.env.ANTHROPIC_MAX_RETRIES ?? 1);
+
+/**
+ * The bound for a call that WRITES something long.
+ *
+ * 25 seconds is right for the reading calls — classify this email, pull the
+ * fields out of this quote — and wrong for a prompt whose answer is a
+ * moodboard or a finish schedule. Those legitimately run past half a minute,
+ * and bounding them at 25s meant the studio's longest-running prompts were
+ * the ones that could never finish: the work was done and thrown away at the
+ * timeout, twice, then reported as "Server error".
+ */
+const LONG_CALL_TIMEOUT_MS = Number(process.env.ANTHROPIC_LONG_TIMEOUT_MS || 120_000);
+
+/**
+ * How many tokens one call may spend, input and output together.
+ *
+ * Measured before this existed: the assistant averaged 9,181 tokens a turn
+ * and peaked at 30,428, and 424 of the last 1,000 calls went past 5,000.
+ * Nearly all of it was input — the same system prompt and tool list resent
+ * on every turn — which is why the fix is caching first and clamping second.
+ *
+ * The clamp is on OUTPUT, because output is the part a caller chooses.
+ * A request whose input alone exceeds the budget still goes out: refusing
+ * it would mean answering nothing at all, and a floor of 512 keeps the
+ * reply usable rather than truncated mid-sentence.
+ */
+const TOKEN_BUDGET = Number(process.env.AI_TOKEN_BUDGET || 5_000);
+const MIN_OUTPUT_TOKENS = 512;
+
+/** Cheap, deliberately pessimistic: ~3.5 characters per token. */
+function estimateTokens(params: { system?: unknown; messages?: unknown; tools?: unknown }): number {
+  let chars = 0;
+  for (const part of [params.system, params.messages, params.tools]) {
+    if (typeof part === 'string') chars += part.length;
+    else if (part) chars += JSON.stringify(part).length;
+  }
+  return Math.ceil(chars / 3.5);
+}
 
 /**
  * The environment-configured client, kept for callers that only need to
@@ -164,18 +203,47 @@ async function record(
 async function recorded(
   ctx: CallContext,
   params: Omit<Anthropic.MessageCreateParamsNonStreaming, 'model'> & { model?: string },
+  options?: { timeoutMs?: number },
 ): Promise<Anthropic.Message> {
   const ai = await clientFor(ctx.orgId);
   if (!ai) throw new AnthropicNotConfigured();
 
   const request = { ...params, model: params.model ?? ai.model };
+
+  // Kept inside the budget rather than trusting each call site to remember
+  // one. The estimate counts the tools and the system prompt too, which is
+  // where the assistant's tokens actually go.
+  const estimatedInput = estimateTokens(request);
+  const room = Math.max(MIN_OUTPUT_TOKENS, TOKEN_BUDGET - estimatedInput);
+  if (request.max_tokens > room) {
+    console.warn(
+      `[ai] ${ctx.feature}: ~${estimatedInput} input tokens, capping output ${request.max_tokens} → ${room} (budget ${TOKEN_BUDGET})`,
+    );
+    request.max_tokens = room;
+  }
+
   const started = Date.now();
   try {
-    const message = await ai.client.messages.create(request);
+    // Per-request, so one long call does not loosen the bound on every
+    // short one sharing the client.
+    const message = await ai.client.messages.create(
+      request,
+      options?.timeoutMs ? { timeout: options.timeoutMs } : undefined,
+    );
     await record(ctx, request.model, message.usage, Date.now() - started, null);
     return message;
   } catch (err) {
     await record(ctx, request.model, null, Date.now() - started, err);
+
+    // The provider says this in a 400 with the rest of an API error around
+    // it, so it reaches the screen as "Server error" and reads like a bug in
+    // the app. It is an empty account, and only one person can fix it.
+    if (/credit balance is too low|billing/i.test(String((err as Error)?.message ?? ''))) {
+      throw new UserFacingError(
+        "The studio's Claude credit has run out. Top it up at console.anthropic.com under Plans & Billing, then try again.",
+        402,
+      );
+    }
     throw err;
   }
 }
@@ -254,11 +322,31 @@ export async function generate(
   user: string,
   ctx: CallContext,
   maxTokens = 8000,
+  timeoutMs = LONG_CALL_TIMEOUT_MS,
 ): Promise<string> {
-  const message = await recorded(ctx, {
-    max_tokens: maxTokens,
-    system,
-    messages: [{ role: 'user', content: user }],
-  });
+  const message = await recorded(
+    ctx,
+    {
+      max_tokens: maxTokens,
+      system,
+      messages: [{ role: 'user', content: user }],
+    },
+    { timeoutMs },
+  );
   return textOf(message);
+}
+
+/**
+ * Whether a failure was the clock rather than the request.
+ *
+ * Worth telling apart: a timeout is "ask again or give it less to do", and
+ * everything else is not. The SDK's error carries the name; the message is
+ * checked too, because a wrapped cause loses the class.
+ */
+export function isTimeoutError(err: unknown): boolean {
+  const e = err as { name?: string; message?: string };
+  return (
+    e?.name === 'APIConnectionTimeoutError' ||
+    /timed? ?out/i.test(e?.message ?? '')
+  );
 }

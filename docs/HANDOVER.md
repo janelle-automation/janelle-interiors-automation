@@ -63,6 +63,38 @@ npm run db:apply:seed   # schema + demo org, vendors, projects, prompts
 ```
 Or paste `supabase/schema.sql` (then `supabase/seed.sql`) into the Supabase SQL editor.
 
+### Load the prompt library
+The studio's own prompts (`docs/reference/*.txt`, written up in
+`scripts/prompt-library.mjs`) go in with:
+```bash
+npm run seed-prompts          # every organization
+npm run seed-prompts -- --dry # show what would change first
+```
+This writes rows, not schema, so it goes through PostgREST with the service-role
+key and works even while `db:apply` is blocked. It is idempotent and matches on
+(org, title): edit `scripts/prompt-library.mjs` and re-run to revise a prompt.
+
+### Rendering presentation boards
+Five of the library prompts also draw a picture — the 644 Adirondack elevation +
+moodboard board, a room rendering, a moodboard page, a materials page and a
+snapshot retouch. Claude does not make images, so this needs a second provider:
+
+```bash
+GEMINI_API_KEY=...                        # aistudio.google.com/apikey
+GEMINI_IMAGE_MODEL=gemini-3-pro-image     # optional; Flash is cheaper for iterating
+```
+
+A studio may instead set its own key from Settings, which is stored encrypted in
+`organizations.settings` exactly as the Anthropic key is. Without a key the
+Render button never appears and the endpoint answers 503 — everything else keeps
+working.
+
+The board is drawn from the reference images attached in the run modal, which is
+what makes "match the approved house template" enforceable: the approved board
+goes in as a reference on every render. Output lands in the same private uploads
+bucket as Jenny's attachments, and each render is priced per image onto the usual
+AI spend report (`IMAGE_MODELS` in `packages/shared`).
+
 ### Google OAuth setup
 1. Enable the **Gmail API** and **Google Drive API** in Google Cloud.
 2. Create an OAuth 2.0 Client (Web application).
@@ -77,6 +109,22 @@ account is the ingestion source.
 ---
 
 ## 4. Running
+
+### What Claude costs, and keeping it down
+`npm run ai-usage` (or `-- 60` for the recent ones) prints spend per feature and
+whether the prompt cache is being hit. Two things keep the bill down, and both
+are easy to undo by accident:
+
+- **The tool block carries the cache breakpoint** (`CACHED_TOOLS`). It is the
+  largest stable part of every request.
+- **The system prompt is split in two**: `systemPrompt()` is stable and cached,
+  `situation()` carries the page, the live figures and anything pending, and is
+  appended *after* the breakpoint. Moving a volatile value back into the stable
+  half silently doubles the bill — it invalidates the cache on every question.
+
+Measured on the assistant: $0.0096 a turn before, $0.0050 with the tools cached,
+$0.0025 with both. `AI_TOKEN_BUDGET` (default 5000) additionally clamps output
+so one call cannot run away; raise it if long documents come back truncated.
 
 ```bash
 npm run dev        # web (http://localhost:5173) + api (http://localhost:4055) together

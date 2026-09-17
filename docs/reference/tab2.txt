@@ -1,0 +1,145 @@
+Interior Design Presentation Rendering Prompt
+Act as a senior interior designer, architectural visualization artist, and luxury hospitality photographer.
+I am providing several reference images for a client's interior design project. These may include:
+Architectural elevation drawings
+Cabinet elevations and millwork details
+Cabinet door style and finish
+Countertop or stone slabs
+Tile and backsplash materials
+Flooring
+Plumbing fixtures
+Lighting
+Hardware
+Paint or wall finishes
+Furniture
+Decorative materials
+Your job is to combine the elevation and material selections into one highly realistic interior design visualization suitable for a professional client presentation.
+PRIORITY #1 — FOLLOW THE ELEVATION
+Use the architectural elevation as the primary guide for the design.
+Preserve as accurately as possible:
+Overall room proportions
+Cabinet locations
+Cabinet widths and heights
+Drawer and door configurations
+Appliance locations
+Window locations and proportions
+Door locations
+Hood size and shape
+Millwork details
+Countertop heights
+Backsplash locations
+Niches
+Shelving
+Architectural openings
+Symmetry and spacing
+Do not redesign the cabinetry or architecture unless I specifically request a change.
+If the elevation and inspiration photographs conflict, the elevation takes priority.
+MATERIAL APPLICATION
+Carefully study the material reference images and apply them realistically.
+Match as closely as possible:
+Cabinetry
+Use the exact cabinet door style, wood tone, paint color, grain direction, panel detailing, fluting, molding and finish shown in the reference.
+Countertops / Stone
+Use the supplied countertop or slab reference. Preserve the overall color, veining character, movement and scale of the stone.
+Where appropriate, create realistic slab placement and bookmatching without making the stone excessively busy.
+Backsplash / Tile
+Use the supplied tile reference and accurately represent:
+Tile size
+Color
+Finish
+Variation
+Grout
+Handmade texture
+Layout pattern
+Apply the tile only to the areas indicated by the elevation or my notes.
+Hardware
+Use hardware that matches the supplied finish and style. Maintain realistic scale and placement.
+Walls and Architectural Finishes
+Accurately reproduce specified plaster, limewash, paint, stone, wood or specialty wall finishes.
+Show subtle natural variation and texture.
+VISUAL STYLE
+Create a photorealistic luxury interior design editorial photograph, not a computer rendering.
+The finished image should look as though the completed space was photographed by a leading architectural interiors photographer for:
+Architectural Digest
+Veranda
+House Beautiful
+Elle Decor
+Hospitality Design
+A luxury hotel or resort portfolio
+Use:
+Sophisticated natural lighting
+Soft directional daylight
+Subtle ambient interior lighting
+Soft shadows
+Realistic reflections
+Accurate material textures
+Natural depth
+Balanced exposure
+Refined neutral color grading
+High dynamic range without looking artificial
+Crisp architectural details
+Realistic wood grain
+Realistic stone
+Realistic handmade tile variation
+Professional architectural photography
+CAMERA & COMPOSITION
+Create a polished architectural photograph.
+Use:
+Straight vertical architectural lines
+Correct perspective
+Eye-level camera position
+Approximately 24–35mm architectural lens appearance
+Balanced composition
+Minimal lens distortion
+Natural depth of field
+Full visibility of the important design features
+For elevations, favor a straight-on composition that clearly communicates the design.
+Do not use dramatic wide-angle distortion.
+STYLING
+Keep the room sophisticated and presentation-ready.
+Add only minimal, appropriate styling such as:
+A few books
+Ceramic vessels
+Branches or greenery
+Small decorative objects
+Simple countertop accessories
+Styling should support the architecture, not hide the design.
+Do not clutter countertops.
+IMPORTANT RESTRICTIONS
+Do NOT:
+Change the architectural layout
+Add extra windows
+Remove windows
+Add cabinets that are not shown
+Change cabinet configurations
+Invent additional architectural details
+Add artwork where windows are shown
+Change selected materials
+Substitute a different stone
+Change tile color
+Change appliances
+Add excessive accessories
+Over-style the room
+Make the image look overly CGI
+Make surfaces unnaturally perfect
+If a design detail is unclear, maintain the simplest interpretation of the architectural elevation rather than inventing something new.
+FINAL IMAGE
+Create one high-resolution, photorealistic luxury interior visualization that clearly communicates how the client's completed space will look when constructed.
+The final image should feel:
+Timeless, refined, warm, sophisticated, architectural, luxurious and believable.
+It should be polished enough to place directly into an interior design presentation, moodboard, Canva presentation or client proposal.
+PROJECT-SPECIFIC NOTES
+For this rendering, also follow these specific instructions:
+Room: [ROOM NAME]
+Cabinetry: [CABINET STYLE / COLOR / WOOD]
+Countertop: [COUNTERTOP MATERIAL]
+Backsplash: [TILE / STONE / MATERIAL]
+Wall Finish: [PAINT / LIMEWASH / WALLPAPER / ETC.]
+Flooring: [FLOOR MATERIAL]
+Hardware: [FINISH / STYLE]
+Lighting: [FIXTURES / COLOR TEMPERATURE]
+Appliances / Plumbing: [DETAILS]
+Special Architectural Details: [HOOD / NICHES / TRIM / ARCHES / ETC.]
+Additional Instructions:
+[ADD PROJECT-SPECIFIC NOTES HERE]
+

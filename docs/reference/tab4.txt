@@ -1,0 +1,151 @@
+Here’s a polished prompt you can reuse with snapshots of tile, stone, wood, fabric, paint, hardware, plumbing finishes, and other project materials:
+INTERIOR DESIGN MATERIALS — EDITORIAL PRESENTATION PROMPT
+Act as my Senior Interior Designer, Creative Director, Interior Stylist, and Luxury Architectural Photographer.
+I am providing one or more casual snapshot images of materials selected for a residential interior design project.
+These may include:
+Tile
+Natural stone
+Countertop slabs
+Cabinet finishes
+Wood samples
+Flooring
+Paint colors
+Wallpaper
+Fabric
+Upholstery
+Plumbing finishes
+Decorative hardware
+Metal finishes
+Lighting finishes
+Rugs
+Specialty materials
+Your job is to transform these simple material snapshots into a beautiful, sophisticated editorial materials photograph suitable for a high-end interior design presentation.
+PRIMARY GOAL
+Create an image that feels like it was professionally styled and photographed for:
+Architectural Digest
+Elle Decor
+Luxe Interiors + Design
+House Beautiful
+A luxury residential interior design studio presentation
+Do not make it look like a casual phone photo, sample-board snapshot, retail display, or AI-generated collage.
+PRESERVE THE ACTUAL MATERIALS
+The supplied samples are the approved or proposed design materials.
+Preserve as accurately as possible:
+Actual colors
+Veining
+Grain
+Texture
+Pattern
+Finish
+Scale
+Material character
+Hardware shape
+Tile shape
+Fabric pattern
+Do not redesign the materials or substitute unrelated products.
+The finished photograph should still clearly represent the materials I supplied.
+COMPOSITION
+Arrange the materials into a refined, layered designer flat-lay or editorial vignette.
+Create intentional overlap and visual hierarchy.
+Use a combination of:
+Larger architectural materials as the base
+Smaller samples layered naturally
+Stone and tile partially overlapping
+Wood or cabinetry samples anchoring the composition
+Fabric folded or softly draped where appropriate
+Hardware or metal finishes used as small accents
+Paint samples integrated subtly
+Plumbing or decorative finishes positioned elegantly
+Avoid perfectly straight rows or a catalog-style grid unless the materials naturally call for it.
+The composition should feel curated, effortless, dimensional, and expensive.
+PHOTOGRAPHY STYLE
+Create the appearance of a professionally photographed material story.
+Use:
+Soft natural daylight
+Warm diffused directional light
+Gentle architectural shadows
+Realistic material texture
+Natural depth of field
+Crisp but not overly sharpened details
+Accurate whites
+Sophisticated neutral color balance
+Subtle contrast
+High-end editorial styling
+Camera perspective should generally be:
+Overhead flat-lay or slightly angled 30–45 degree editorial view.
+BACKGROUND
+Use a quiet luxury background such as:
+Warm ivory plaster
+Soft limestone
+Pale natural oak
+Cream linen
+Light travertine
+Warm neutral microcement
+Off-white textured paper
+Choose whichever background best complements the supplied materials.
+Do not introduce a background color that competes with the design palette.
+STYLING
+If appropriate, introduce only a few restrained styling elements such as:
+Small architectural sketch
+Linen swatch
+Pencil
+Subtle design drawing
+Natural stone fragment
+Minimal brass ruler
+Small organic branch
+Interior specification card
+Keep styling minimal.
+The actual design materials must remain the hero.
+Do not add excessive flowers, coffee cups, candles, books, jewelry, or decorative objects that distract from the selections.
+MATERIAL REALISM
+Make every material look tactile and believable.
+Stone should show authentic depth and veining.
+Wood should show natural grain.
+Fabric should show weave and softness.
+Tile should show realistic surface irregularities.
+Metal should have realistic reflection without excessive shine.
+Matte finishes should remain matte.
+Polished finishes should reflect light naturally.
+CLEAN UP THE ORIGINAL SNAPSHOTS
+Remove or minimize:
+Fingers or hands
+Messy desks
+Packaging
+Stickers
+Barcodes
+Retail labels
+Background clutter
+Plastic wrapping
+Harsh overhead shadows
+Phone-camera distortion
+Glare
+Poor white balance
+Distracting sample edges
+If a manufacturer label is important for identifying the material, keep it subtle and professionally integrated.
+OVERALL AESTHETIC
+The final result should feel:
+Quiet luxury. Warm. Architectural. Organic. Sophisticated. Layered. Timeless. Residential. High-end. Editorial.
+Think:
+Luxury interior design studio material palette photographed for a client presentation.
+Avoid making the image overly beige or monochromatic if the supplied materials contain meaningful color.
+PRESENTATION QUALITY
+The finished image should be appropriate for:
+Canva client presentation
+Interior design moodboard
+Finish presentation
+Material selection presentation
+Design proposal
+Project specification book
+Instagram or portfolio imagery
+Use a clean landscape composition with generous negative space, suitable for placement on a presentation page.
+IMPORTANT
+Do not invent major new materials.
+Do not significantly change the color of approved materials.
+Do not make the samples look computer-generated.
+Do not create visible text unless it already exists on the sample and is necessary.
+Do not turn the image into a traditional moodboard with digital cutouts.
+The goal is a realistic, professionally styled photograph of the physical material selections themselves.
+FINAL IMAGE DIRECTION
+Create one cohesive, magazine-quality editorial photograph that makes these everyday material snapshots look like they were professionally styled and photographed by a luxury interior design studio for a client presentation.
+A useful variation is to add the specific room name at the top—such as “Primary Bathroom,” “Kitchen,” or “Exterior Materials”—so the styling can be tailored to that space.
+

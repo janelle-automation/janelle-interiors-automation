@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { STAGE_LABELS, type ProjectStage } from '@janelle/shared';
 
 export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
@@ -180,4 +180,101 @@ export function shortDate(iso: string | null | undefined): string {
   if (!iso) return '—';
   const d = new Date(iso);
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+// ── Paging ──────────────────────────────────────────────────
+
+/**
+ * Slice a list into pages. Filtering is the reason this needs care:
+ * a search that shrinks the list to two rows while you are on page 6
+ * would otherwise render an empty table, so the page is clamped to
+ * what exists and the state is corrected on the way through.
+ */
+export function usePager<T>(items: T[], pageSize = 25) {
+  const [page, setPage] = useState(1);
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  const current = Math.min(page, pageCount);
+  useEffect(() => {
+    if (page !== current) setPage(current);
+  }, [page, current]);
+  const start = (current - 1) * pageSize;
+  return {
+    page: current,
+    setPage,
+    pageCount,
+    rows: items.slice(start, start + pageSize),
+    start,
+    total: items.length,
+  };
+}
+
+/** 1 … 4 5 6 … 12 — always the ends, always the neighbours, never a wall of numbers. */
+function pageWindow(page: number, pageCount: number): (number | '…')[] {
+  if (pageCount <= 7) return Array.from({ length: pageCount }, (_, i) => i + 1);
+  const out: (number | '…')[] = [1];
+  const from = Math.max(2, page - 1);
+  const to = Math.min(pageCount - 1, page + 1);
+  if (from > 2) out.push('…');
+  for (let i = from; i <= to; i++) out.push(i);
+  if (to < pageCount - 1) out.push('…');
+  out.push(pageCount);
+  return out;
+}
+
+/**
+ * The footer under a paged table. Renders nothing at all when everything
+ * fits on one page — an empty control bar is just a band of wasted height.
+ */
+export function Pager({
+  page, pageCount, setPage, start, count, total, noun = 'row',
+}: {
+  page: number; pageCount: number; setPage: (p: number) => void;
+  start: number; count: number; total: number; noun?: string;
+}) {
+  if (pageCount <= 1) return null;
+  const last = start + count;
+  const step = (d: number) => setPage(Math.min(pageCount, Math.max(1, page + d)));
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line-soft px-5 py-2.5">
+      <span className="text-[12px] text-ink-faint">
+        {start + 1}–{last} of {total} {noun}{total === 1 ? '' : 's'}
+      </span>
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={() => step(-1)}
+          disabled={page === 1}
+          className="focusable rounded-lg px-2.5 py-1 text-[12.5px] text-ink-soft transition-colors hover:text-ink disabled:cursor-not-allowed disabled:text-ink-faint/50"
+        >
+          ‹ Prev
+        </button>
+        {pageWindow(page, pageCount).map((p, i) =>
+          p === '…' ? (
+            <span key={`gap${i}`} className="px-1 text-[12.5px] text-ink-faint">…</span>
+          ) : (
+            <button
+              key={p}
+              type="button"
+              onClick={() => setPage(p)}
+              aria-current={p === page ? 'page' : undefined}
+              className={`focusable min-w-[28px] rounded-lg px-2 py-1 text-[12.5px] tabular-nums transition-colors ${
+                p === page ? 'bg-brass font-semibold text-white' : 'text-ink-soft hover:bg-sunk hover:text-ink'
+              }`}
+            >
+              {p}
+            </button>
+          ),
+        )}
+        <button
+          type="button"
+          onClick={() => step(1)}
+          disabled={page === pageCount}
+          className="focusable rounded-lg px-2.5 py-1 text-[12.5px] text-ink-soft transition-colors hover:text-ink disabled:cursor-not-allowed disabled:text-ink-faint/50"
+        >
+          Next ›
+        </button>
+      </div>
+    </div>
+  );
 }

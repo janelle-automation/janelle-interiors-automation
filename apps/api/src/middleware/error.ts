@@ -9,6 +9,23 @@ export function asyncHandler(
   };
 }
 
+/**
+ * A failure whose message is written for the person, not the log.
+ *
+ * Most errors are flattened to "Server error" on purpose: an exception
+ * message can carry a query, a key or a whole request body. Some, though,
+ * exist precisely to be read — an empty account, an expired credential —
+ * and hiding those sends people hunting for a bug that is not there.
+ */
+export class UserFacingError extends Error {
+  readonly status: number;
+  constructor(message: string, status = 400) {
+    super(message);
+    this.name = 'UserFacingError';
+    this.status = status;
+  }
+}
+
 export function notFound(_req: Request, res: Response) {
   res.status(404).json({ error: 'Not found' });
 }
@@ -23,6 +40,10 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   const status = e.statusCode ?? e.status;
   if (type === 'entity.parse.failed' || (err instanceof SyntaxError && status === 400)) {
     return res.status(400).json({ error: 'Invalid JSON body' });
+  }
+
+  if (err instanceof UserFacingError) {
+    return res.status(err.status).json({ error: err.message });
   }
 
   // In production, avoid leaking internals; log server-side.

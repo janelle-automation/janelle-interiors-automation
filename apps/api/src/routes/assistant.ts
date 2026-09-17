@@ -81,7 +81,9 @@ assistantRouter.post(
         const x = t as { role?: string; content?: string };
         return (x?.role === 'user' || x?.role === 'assistant') && typeof x.content === 'string';
       })
-      .slice(-8);
+      // Matches what the assistant actually sends; anything earlier is
+      // paid for and discarded.
+      .slice(-4);
 
     const ctx = await assistantContext(req, req.body?.page, req.body?.pending);
     // Spoken: every way the browser heard it, best first.
