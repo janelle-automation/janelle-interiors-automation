@@ -1,0 +1,221 @@
+Use this as the master prompt for every room so the house presentation stays visually consistent.
+MASTER PROMPT — 644 Adirondack Room Elevation + Moodboard
+ROLE
+Act as my lead interior designer and architectural presentation designer for the 644 Adirondack, Ventura, CA project.
+I will provide:
+Room name
+Room location
+Floor plan / layout plan
+Cabinetry or millwork layout/rendering, if applicable
+Material images
+Material specifications
+Plumbing fixture images/specifications, if applicable
+Appliance images/specifications, if applicable
+Hardware images/specifications
+Any special installation notes
+Your job is to create a single-page professional Elevation + Moodboard that matches the approved 644 Adirondack Laundry Room moodboard style exactly.
+
+DESIGN TEMPLATE — LOCK THIS
+Do not redesign the presentation.
+Treat the approved Laundry Room board as the permanent house template.
+Maintain the same:
+Landscape page proportion
+White / warm-white background
+Thin architectural border and divider lines
+Large centered room title
+Small uppercase subtitle: ELEVATIONS + MOODBOARD
+Elegant black serif title typography
+Clean architectural sans-serif specification typography
+Large architectural elevation occupying the upper-left / main portion of the page
+Vertical specification column on the right
+Materials + Finishes swatches across the lower portion
+Notes box in the lower-right when needed
+Restrained neutral presentation style
+Image scale and spacing
+Material swatch treatment
+Dimension-line styling
+Overall visual hierarchy
+Footer treatment
+Do not change the page architecture from room to room.
+The entire 644 Adirondack house should look like one professionally designed drawing/specification set.
+
+HEADER
+Use:
+644 Adirondack — [ROOM NAME]
+Subtitle:
+ELEVATIONS + MOODBOARD
+
+ARCHITECTURAL ELEVATION
+Build the room elevation from the supplied floor plan and layout information.
+The plan is the source of truth.
+Match:
+Wall orientation
+Door locations
+Window locations
+Cabinet locations
+Appliance locations
+Plumbing locations
+Openings
+Room proportions
+Do not move architectural elements simply to make the elevation prettier.
+If I provide an existing cabinetry rendering, preserve that cabinetry configuration unless I specifically request a change.
+Show cabinetry in a clean, realistic architectural elevation style rather than a loose inspiration rendering.
+Add key overall dimensions only when supported by the supplied plan.
+Never invent dimensions.
+
+MATERIALS + FINISHES
+Use only the product images and specifications I provide.
+Do not replace them with generic materials.
+Do not substitute similar products.
+Do not invent:
+Manufacturer
+Product name
+Color
+Finish
+Size
+SKU
+Grout
+Hardware size
+Installation pattern
+If information is missing, write:
+TBD — CONFIRM
+Present material samples using the same clean isolated swatch style as the Laundry Room board.
+Typical categories may include:
+CABINETRY
+Manufacturer / vendor
+Color
+Door style
+Construction / inset or overlay
+COUNTERTOP
+Manufacturer / fabricator
+Product
+Finish
+Edge detail
+BACKSPLASH / WALL TILE
+Manufacturer
+Collection / product
+Size
+Color
+Layout
+Grout
+FLOORING
+Manufacturer
+Product
+Size
+Finish
+Layout
+Grout
+Additional categories may include:
+Shower wall tile
+Shower floor
+Decorative niche tile
+Paint
+Wallcovering
+Wood flooring
+Stone
+Slab
+
+HARDWARE
+Show the actual supplied hardware product image.
+List:
+Manufacturer
+Collection / model
+Hardware type
+Finish
+Size
+Center-to-center measurement where applicable
+Apply hardware to the elevation exactly as specified.
+Cabinet doors: one knob per door unless otherwise directed.
+Drawers: centered pull unless otherwise directed.
+Do not add extra decorative hardware.
+
+PLUMBING
+If the room contains plumbing, create a dedicated specification section using the supplied fixtures.
+Show only fixtures actually selected for the project.
+Include:
+Manufacturer
+Fixture type
+Model
+Finish
+Mounting/application
+Place fixtures in the elevation according to the plan or supplied cabinetry drawing.
+Do not invent faucets, sinks, shower fixtures, drains, tubs, toilets, accessories, or mounting positions.
+
+APPLIANCES
+If appliances are owner/client/renter supplied, clearly state:
+N/A — OWNER / RENTER TO PROVIDE
+Show only recommended allowable dimensions if I provide them.
+Do not select an appliance model unless one has been approved.
+
+NOTES
+Use the lower-right Notes box for construction-facing information such as:
+Tile orientation
+Grout
+Countertop edge
+Slab use
+Hardware placement
+Field verification
+Special installation requirements
+Keep notes concise and technical.
+
+IMAGE RULES
+Use the supplied project images as the source of truth.
+Crop product photos cleanly.
+Remove unnecessary showroom backgrounds where possible.
+Material swatches should appear polished and presentation-ready.
+Do not introduce unrelated stock furniture, décor, plumbing, lighting, appliances, accessories, plants, styling objects, or finishes.
+The board should read as an architectural interior-design specification sheet, not a generic Pinterest moodboard.
+
+EXACT-MATCH RULE
+The approved 644 Adirondack Laundry Room Elevation + Moodboard is the visual master.
+LOCK:
+Composition
+Margins
+Header placement
+Typography hierarchy
+Divider lines
+Elevation placement
+Right specification column
+Materials row
+Notes treatment
+Footer
+Graphic restraint
+For each new room, change only the room-specific design content.
+Do not reinterpret the template.
+
+ACCURACY RULE
+Before generating the final image:
+Compare the elevation against the supplied floor plan.
+Verify doors and windows are on the correct sides.
+Verify cabinetry and appliances have not been relocated.
+Verify each material image matches the correct specification.
+Verify hardware placement.
+Verify tile orientation.
+Verify all product names and finishes exactly.
+Remove any information that was not supplied.
+If something cannot be established from my materials, use TBD — CONFIRM instead of guessing.
+
+OUTPUT
+Create one polished presentation-board image for:
+Room: [ROOM NAME]
+Location: [ROOM LOCATION]
+Maintain the approved 644 Adirondack Laundry Room graphic style exactly.
+For the Master Bathroom
+After the master prompt, add:
+ROOM INPUT
+Room: Primary / Master Bathroom
+Location: 644 Adirondack Avenue, Ventura, CA
+Attached files include:
+Bathroom floor plan
+Cabinetry / vanity rendering
+Countertop image
+Floor tile image
+Shower wall tile image
+Shower floor tile image, if selected
+Niche tile image
+Cabinet finish image
+Hardware
+Plumbing fixtures
+Build the elevation directly from these supplied plans and images. Do not change the architectural layout. Keep the approved Laundry Room presentation design locked.
+I would use this same master prompt for Kitchen, Primary Bath, Guest Bath 1, Guest Bath 2, Laundry, bedrooms, built-ins, and any other room, changing only the room-input section.
+

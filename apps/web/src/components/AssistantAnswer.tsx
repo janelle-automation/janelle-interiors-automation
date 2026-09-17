@@ -8,6 +8,7 @@ import {
   type AssistantItemKind,
 } from '@janelle/shared';
 import { apiBlob } from '../lib/api';
+import { Markdown } from './Markdown';
 
 /**
  * How the assistant's answers are drawn.
@@ -270,6 +271,25 @@ const PREVIEWABLE = new Set([
   'text/plain',
 ]);
 
+/**
+ * Types that may be drawn INSIDE an <img>, which is a narrower thing than
+ * the list above allows.
+ *
+ * The distinction is where the markup ends up. Opening an SVG in a tab makes
+ * it a document on this origin and its scripts run with the session in
+ * reach — so it stays off PREVIEWABLE, and Open still downloads it. Drawn in
+ * an <img> it is a picture: no script runs, no network request of its own is
+ * made. Rendered boards come back as SVG when the studio has no image
+ * billing, and a board that shows as a broken icon is no board at all.
+ */
+const INLINE_IMAGE_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'image/svg+xml',
+]);
+
 /** The badge colour for a kind of file, so a list of mixed files can be scanned. */
 function badgeTone(mimeType: string): string {
   if (mimeType === 'application/pdf') return 'bg-crit/10 text-crit';
@@ -511,7 +531,9 @@ function PagePreview({ item, compact }: { item: AssistantItem; compact: boolean 
       const blob = await fetchPreviewFile(file);
 
       if (item.preview === 'image') {
-        const type = PREVIEWABLE.has(file.mimeType) && file.mimeType.startsWith('image/') ? file.mimeType : 'image/png';
+        // Mislabelling the blob is what broke this: an SVG handed to the
+        // browser as image/png decodes as nothing at all.
+        const type = INLINE_IMAGE_TYPES.has(file.mimeType) ? file.mimeType : 'image/png';
         const url = URL.createObjectURL(new Blob([blob], { type }));
         urls.push(url);
         if (!cancelled) setImages([{ url, label: item.title }]);
@@ -625,6 +647,40 @@ export function answerIsWide(answer: AssistantAnswer | undefined): boolean {
  * because this sits inside a chat bubble and an answer that shouts is
  * harder to read than one that does not.
  */
+/**
+ * Work the assistant produced, rather than a fact it looked up.
+ *
+ * Set apart from the prose and given its own copy button: a moodboard or a
+ * finish schedule is something the designer takes somewhere else — into a
+ * presentation, a spec book, an email — and the thing they will want first
+ * is all of it, unedited, on the clipboard.
+ */
+function AnswerDocument({ title, body }: { title?: string | null; body: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(body);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard may be blocked */
+    }
+  };
+
+  return (
+    <div className="mt-3 overflow-hidden rounded-lg border border-line bg-surface">
+      <div className="flex items-center justify-between gap-3 border-b border-line-soft bg-sunk/40 px-3.5 py-2">
+        <span className="min-w-0 truncate text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-faint">
+          {title || 'Draft work'}
+        </span>
+        <button onClick={copy} className="btn-secondary btn-sm shrink-0">{copied ? 'Copied' : 'Copy'}</button>
+      </div>
+      <Markdown text={body} className="max-h-[32rem] overflow-y-auto px-4 py-3 text-[13.5px] leading-relaxed text-ink-soft" />
+    </div>
+  );
+}
+
 export function AssistantAnswerView({
   answer,
   compact = false,
@@ -644,6 +700,8 @@ export function AssistantAnswerView({
   return (
     <>
       <p className="whitespace-pre-line text-[14px] leading-relaxed text-ink">{answer.lead}</p>
+
+      {answer.document && <AnswerDocument title={answer.documentTitle} body={answer.document} />}
 
       {records.length > 0 &&
         (columns ? (

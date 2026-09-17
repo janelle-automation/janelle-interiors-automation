@@ -16,7 +16,12 @@ import { MAX_RELAY_BYTES } from './fileTokens.js';
 export const UPLOAD_BUCKET = 'assistant-uploads';
 
 /** What Jenny can read: PDFs and the image types Claude accepts. */
-export const UPLOAD_TYPES = ['application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const;
+export const UPLOAD_TYPES = [
+  'application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+  // Written by a model rather than uploaded by a person: a rendered board
+  // comes back as vector when the studio has no image-model billing.
+  'image/svg+xml',
+] as const;
 export type UploadType = (typeof UPLOAD_TYPES)[number];
 
 /** A request body on Vercel caps near 4.5 MB; elsewhere, what a document reader can take. */

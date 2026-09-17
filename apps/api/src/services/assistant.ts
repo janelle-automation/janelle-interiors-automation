@@ -27,7 +27,11 @@ import {
   type Seat,
 } from '@janelle/shared';
 import type { drive_v3, gmail_v1 } from 'googleapis';
-import { createMessage, isAiReady } from './anthropic.js';
+import { createMessage, isAiReady, isTimeoutError } from './anthropic.js';
+import { fillTemplate, matchPrompt, missingInputs, runLibraryPrompt } from './promptRunner.js';
+import { BOARD_PROMPTS, boardPrompt, freeformBoard, isRenderable } from './boards.js';
+import { isImageReady, renderImage, type ImageReference } from './images.js';
+import { storeUpload, type UploadType } from '../lib/uploads.js';
 import {
   ProposalError,
   commitProposal,
@@ -43,7 +47,13 @@ import { STUDIO_TEAM, isStudioMailbox, seatRole, studioPerson } from '../lib/stu
 import { bodyColumnsReady, readStoredText } from '../lib/emailStore.js';
 import { env } from '../env.js';
 import { isGoogleAuthFailure, orgSourceUserId } from '../lib/tokens.js';
-import { MAX_RELAY_BYTES, openFileGrant, sealFileGrant, type FileGrant } from '../lib/fileTokens.js';
+import {
+  MAX_RELAY_BYTES,
+  UPLOAD_GRANT_TTL_MS,
+  openFileGrant,
+  sealFileGrant,
+  type FileGrant,
+} from '../lib/fileTokens.js';
 import { FileFetchError, fetchGrantedFile } from './files.js';
 import { readDocument } from './documentReader.js';
 import {
@@ -245,6 +255,22 @@ interface ToolSession {
   refs: RefRegistry;
   google: GoogleAccess;
   settled: SettledProposal[];
+  /**
+   * Work a studio prompt produced this turn.
+   *
+   * Held because the model cannot be relied on to hand it back: asked for a
+   * kitchen design it will happily answer "I've written a full kitchen
+   * design review" and leave the design behind — and on the out-of-time
+   * path it answers under a 1536-token cap, where a real one could not fit
+   * even if it tried. The work exists; delivering it is not the model's
+   * decision to get wrong.
+   */
+  produced: ProducedWork | null;
+}
+
+interface ProducedWork {
+  title: string;
+  body: string;
 }
 
 /**
@@ -333,6 +359,15 @@ export const ANSWER_TOOL: Anthropic.Tool = {
         type: 'string',
         description:
           'One clause about anything you could not check, and only when something genuinely failed. Never use it to hedge an answer you do have.',
+      },
+      document: {
+        type: 'string',
+        description:
+          'Long-form work you were asked to PRODUCE — a moodboard, a design direction, a finish or FF&E schedule, a brief, a review. Markdown, with headings, lists and tables as the work needs them. Put the work here and keep `lead` to a sentence saying what it is; never crush a schedule into `lead`, and never put an ordinary answer here. Leave it out entirely when nothing was produced.',
+      },
+      documentTitle: {
+        type: 'string',
+        description: 'What the document is, in a few words — "Primary bathroom moodboard". Only with `document`.',
       },
       speech: {
         type: 'string',
@@ -525,6 +560,57 @@ const TOOLS: Anthropic.Tool[] = [
         project: { type: 'string', description: 'Limit to one project (substring).' },
         include_resolved: { type: 'boolean', description: 'Default false — only open gaps.' },
       },
+    },
+  },
+  {
+    name: 'list_studio_prompts',
+    description:
+      "The studio's own prompt library — the prompts Janelle wrote for design direction, moodboards, material selection, finish and FF&E schedules, elevations, reviews and audits. Use it BEFORE writing any design work of your own, so the studio's standard is the one that gets applied. Returns each prompt's title and the inputs it needs.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        search: { type: 'string', description: 'Words to match in the title or description — "moodboard", "finish schedule".' },
+      },
+    },
+  },
+  {
+    name: 'render_board',
+    description:
+      "DRAW a presentation board or a rendering, as a picture. Only some of the studio's prompts make one — the elevation + moodboard board, a room rendering, a moodboard page, a materials page, a snapshot retouch — and list_studio_prompts marks them. Use this when someone asks to SEE something: \"make the board\", \"render the kitchen\", \"draw the moodboard\". It needs no project record. Anything the person attached to the question becomes reference imagery, which is how the approved house template gets matched — draw it with whatever they gave you and say what would improve it, rather than refusing until they attach more. Put the ref it returns in the answer's items so they can see it.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: "A renderable prompt's title, as list_studio_prompts gave it. Use one when it fits." },
+        variables: {
+          type: 'object',
+          description: 'That prompt\'s inputs, keyed as list_studio_prompts named them.',
+          additionalProperties: { type: 'string' },
+        },
+        brief: {
+          type: 'string',
+          description:
+            'What to draw, in your own words, when NO library prompt fits — a flooring-plan board, a lighting-plan board, anything the library never covered. Write it as you would brief a designer: the room, the page, what goes on it, and every specification the person gave you. The library is a shortcut, not the limit of what can be drawn, so reach for this rather than reporting that no prompt exists.',
+        },
+        project_id: { type: 'string', description: 'The project this belongs to, so the render is filed against it.' },
+      },
+    },
+  },
+  {
+    name: 'run_studio_prompt',
+    description:
+      "Produce design work by running one of the studio's prompts. This WRITES the moodboard, schedule, direction or review — it is how you make something rather than look something up. It needs NO project record: a room and a direction are enough, and a project that does not exist in the system is not a reason to refuse. Fill every input from what the person told you, from what you have read, and otherwise from what a senior designer would assume of a room like that — the prompts themselves say to mark an assumption rather than hide it. Put what comes back in the answer's `document`, whole and unedited.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: "The prompt's title, exactly as list_studio_prompts gave it." },
+        variables: {
+          type: 'object',
+          description: 'The prompt\'s inputs, keyed as list_studio_prompts named them.',
+          additionalProperties: { type: 'string' },
+        },
+        project_id: { type: 'string', description: 'The project this belongs to, when there is one, so the run is filed against it.' },
+      },
+      required: ['prompt'],
     },
   },
   {
@@ -755,6 +841,9 @@ const TOOL_SOURCES: Record<string, string> = {
   list_drafts: 'drafts',
   list_spec_gaps: 'spec gaps',
   get_weekly_report: 'the weekly report',
+  list_studio_prompts: 'the prompt library',
+  run_studio_prompt: 'the prompt library',
+  render_board: 'the prompt library',
   get_studio_rules: "the studio's rules",
   get_recent_activity: 'the audit log',
   get_ai_spend: 'AI spend',
@@ -765,6 +854,23 @@ const TOOL_SOURCES: Record<string, string> = {
   drive_read: 'Google Drive',
   propose_draft: 'drafts',
 };
+
+/**
+ * The tool list with a cache breakpoint on its last entry.
+ *
+ * Measured after caching the system prompt alone: only a quarter of the
+ * input was being read from cache, because the system prompt is not stable —
+ * it carries the page they are on, anything pending, and how they asked. The
+ * tools ARE stable, byte for byte, on every turn of every conversation for
+ * every person, and they are the larger half. Marking the last one caches
+ * the whole tool block, which sits at the very front of the prefix.
+ *
+ * Built once: rebuilding the array per call would defeat nothing, but it
+ * would allocate the same 25 KB on every turn.
+ */
+const CACHED_TOOLS: Anthropic.Tool[] = TOOLS.map((tool, i) =>
+  i === TOOLS.length - 1 ? { ...tool, cache_control: { type: 'ephemeral' as const } } : tool,
+);
 
 /** What each tool is doing, said the way a person would say it while they work. */
 const TOOL_STATUS: Record<string, string> = {
@@ -782,6 +888,9 @@ const TOOL_STATUS: Record<string, string> = {
   list_drafts: 'Checking the drafts',
   list_spec_gaps: 'Checking the spec gaps',
   get_weekly_report: 'Reading the weekly report',
+  list_studio_prompts: "Checking the studio's prompts",
+  run_studio_prompt: 'Writing it, to the studio\'s prompt',
+  render_board: 'Drawing the board',
   get_studio_rules: "Checking the studio's rules",
   get_recent_activity: 'Reading the audit log',
   get_ai_spend: 'Adding up the AI spend',
@@ -816,6 +925,23 @@ const MAX_ITEMS = 25;
 
 const text = (v: unknown, max: number): string =>
   typeof v === 'string' ? v.trim().replace(/\s+/g, ' ').slice(0, max) : '';
+
+/**
+ * The same, for a field whose newlines are its meaning.
+ *
+ * `text` flattens every run of whitespace, which is right for a sentence and
+ * fatal for Markdown: it turns a moodboard into one unbroken line with the
+ * hashes still in it. Here only trailing spaces and runs of blank lines go.
+ */
+const block = (v: unknown, max: number): string =>
+  typeof v === 'string'
+    ? v
+        .replace(/\r\n/g, '\n')
+        .replace(/[ \t]+$/gm, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim()
+        .slice(0, max)
+    : '';
 
 /** Optional text: empty becomes null, so the UI can test one thing. */
 const maybe = (v: unknown, max: number): string | null => text(v, max) || null;
@@ -912,14 +1038,38 @@ function toAnswer(input: Record<string, unknown>, used: string[], refs?: RefRegi
   // better than one that is spoken as an empty string.
   const speech = text(input.speech, 900) || lead;
 
+  // Generous, because this is the work itself rather than a label for it:
+  // a finish schedule for a whole house is legitimately thousands of words.
+  const document = block(input.document, 40_000) || null;
+
   return {
     lead,
     items,
     more,
     caveat: maybe(input.caveat, 240),
     speech,
+    document,
+    documentTitle: document ? maybe(input.documentTitle, 120) : null,
     sources: sourcesOf(used),
     suggestions: cleanSuggestions(input.suggestions),
+  };
+}
+
+/**
+ * The produced work, carried into the answer when the model did not carry
+ * it itself — or carried only a fragment of it.
+ *
+ * Longer wins, which is the honest rule here: the document IS the artefact,
+ * and a shorter one in its place is the model having summarised away the
+ * very thing that was asked for.
+ */
+function withProduced(answer: AssistantAnswer, produced: ProducedWork | null): AssistantAnswer {
+  if (!produced) return answer;
+  if ((answer.document ?? '').length >= produced.body.length) return answer;
+  return {
+    ...answer,
+    document: produced.body,
+    documentTitle: answer.documentTitle || produced.title,
   };
 }
 
@@ -1001,7 +1151,13 @@ function answerToText(answer: AssistantAnswer): string {
   });
   if (answer.more > 0) rows.push(`- …and ${answer.more} more`);
 
-  return [answer.lead, rows.join('\n'), answer.caveat].filter(Boolean).join('\n\n');
+  // The document travels with the turn: without it, "make the palette
+  // warmer" reaches a model that can no longer see the palette.
+  const document = answer.document
+    ? [answer.documentTitle ? `## ${answer.documentTitle}` : null, answer.document].filter(Boolean).join('\n\n')
+    : null;
+
+  return [answer.lead, rows.join('\n'), document, answer.caveat].filter(Boolean).join('\n\n');
 }
 
 // ── Rows, formatted once ────────────────────────────────────
@@ -1986,10 +2142,10 @@ async function runTool(
 
     case 'list_vendors': {
       const search = typeof input.search === 'string' ? input.search : null;
-      let q = db.from('vendors').select('id, name, category, contacts, notes');
+      let q = db.from('vendors').select('id, name, category, website, contacts, notes');
       if (search) q = q.or(`name.ilike.${ilike(search)},category.ilike.${ilike(search)}`);
       const vendors = (await rows(q, 'vendors')) as unknown as {
-        id: string; name: string; category: string | null;
+        id: string; name: string; category: string | null; website: string | null;
         contacts: unknown; notes: string | null;
       }[];
 
@@ -2005,6 +2161,9 @@ async function runTool(
           id: v.id,
           name: v.name,
           category: v.category,
+          // Where to actually go and order — the question people ask most
+          // about a vendor, and unanswerable until the directory held it.
+          website: v.website,
           contacts: v.contacts,
           open_orders: open.length,
           on_order: open.reduce((sum, p) => sum + (p.amount ?? 0), 0),
@@ -2126,6 +2285,236 @@ async function runTool(
           resolved: g.resolved,
           open_days: Math.floor((Date.now() - new Date(g.created_at).getTime()) / 86_400_000),
         }));
+    }
+
+    case 'list_studio_prompts': {
+      const search = typeof input.search === 'string' ? input.search : null;
+      let q = db.from('prompts').select('id, title, category, description, variables').order('category');
+      if (search) q = q.or(`title.ilike.${ilike(search)},description.ilike.${ilike(search)}`);
+      const prompts = (await rows(q, 'prompts')) as unknown as {
+        id: string; title: string; category: string; description: string | null;
+        variables: { key: string; label: string; required?: boolean }[] | null;
+      }[];
+
+      return prompts.map((p) => ({
+        title: p.title,
+        category: p.category,
+        description: p.description,
+        // The labels, not the keys: the model fills these from what it was
+        // told, and a label says what belongs in it.
+        inputs: (p.variables ?? []).map((v) => `${v.key} (${v.label})${v.required ? ' — required' : ''}`),
+      }));
+    }
+
+    case 'render_board': {
+      if (!canWith(ctx.permissions, ctx.role, 'prompts', 'update')) {
+        return { refused: true, reason: 'Rendering the studio boards is not something this role may do.' };
+      }
+      if (!ctx.orgId) return { refused: true, reason: 'No studio is attached to this account.' };
+      if (!(await isImageReady(ctx.orgId))) {
+        return {
+          refused: true,
+          reason: 'Board rendering has no image key set up yet — say so, and offer to write the board out in words instead.',
+        };
+      }
+
+      const wanted = String(input.prompt ?? '').trim();
+      const library = (await rows(
+        db.from('prompts').select('id, title, template, variables'),
+        'prompts',
+      )) as unknown as {
+        id: string; title: string; template: string;
+        variables: { key: string; label: string; required?: boolean }[] | null;
+      }[];
+
+      const brief = String(input.brief ?? '').trim();
+      const prompt = wanted ? matchPrompt(library.filter((p) => isRenderable(p.title)), wanted) : null;
+
+      // No library prompt, but a brief: draw it anyway. The library covers
+      // the boards this studio makes weekly; it was never the limit of what
+      // a designer can be asked for.
+      if (!prompt && !brief) {
+        return {
+          not_found: wanted || '(nothing named)',
+          renderable: library.filter((p) => isRenderable(p.title)).map((p) => p.title),
+          note: 'Either name one of these, or pass `brief` describing the board in your own words — do not report that no prompt exists.',
+        };
+      }
+
+      const raw = (input.variables ?? {}) as Record<string, unknown>;
+      const values: Record<string, string> = {};
+      for (const [k, v] of Object.entries(raw)) {
+        if (typeof v === 'string') values[k] = v;
+        else if (v != null) values[k] = String(v);
+      }
+
+      if (prompt) {
+        const missing = missingInputs(prompt.variables, values);
+        if (missing.length) {
+          return { prompt: prompt.title, missing_inputs: missing, note: 'Ask for these before drawing it.' };
+        }
+      }
+
+      // Whatever they attached to this question becomes the reference
+      // imagery — the approved template board, the plan, the materials.
+      // Without it the board is drawn from nothing but words.
+      const references: ImageReference[] = [];
+      for (const { grant } of ctx.attached ?? []) {
+        try {
+          const file = await fetchGrantedFile(grant);
+          references.push({ mimeType: file.mimeType, bytes: file.bytes, label: grant.name });
+        } catch {
+          // One unreadable attachment should not stop the board.
+        }
+      }
+
+      const instruction = prompt
+        ? boardPrompt(prompt.title, fillTemplate(prompt.template, values))
+        : freeformBoard(brief);
+      if (!instruction) return { refused: true, reason: 'That prompt cannot be rendered.' };
+      const label = prompt ? BOARD_PROMPTS[prompt.title].label : 'Board';
+
+      let render;
+      try {
+        render = await renderImage(instruction, references, {
+          feature: 'image.render',
+          orgId: ctx.orgId,
+          actor: ctx.userId,
+          entity: 'prompts',
+          entityId: prompt?.id ?? null,
+        });
+      } catch (err) {
+        return {
+          prompt: prompt?.title ?? 'a board drawn from your brief',
+          failed: (err as Error).message,
+          note: 'Tell them what went wrong in plain words, and offer to write the board out instead.',
+        };
+      }
+
+      const name = `${label} — ${new Date().toISOString().slice(0, 10)}.${
+        render.mimeType.includes('svg') ? 'svg' : 'png'
+      }`;
+      const { path } = await storeUpload({
+        orgId: ctx.orgId,
+        userId: ctx.userId,
+        name,
+        mimeType: render.mimeType as UploadType,
+        bytes: render.bytes,
+      });
+      const token = sealFileGrant(
+        { source: 'upload', orgId: ctx.orgId, path, mimeType: render.mimeType, name, size: render.bytes.length },
+        UPLOAD_GRANT_TTL_MS,
+      );
+
+      await db.from('prompt_runs').insert({
+        org_id: ctx.orgId,
+        prompt_id: prompt?.id ?? null,
+        project_id: typeof input.project_id === 'string' ? input.project_id : null,
+        user_id: ctx.userId,
+        input: { ...values, ...(brief ? { brief } : {}), board_path: path, board_model: render.model },
+        output: render.note ?? `Rendered ${name}`,
+      });
+
+      // Handed back as a file row with a preview, the same way an
+      // attachment is: the board appears in the answer rather than being
+      // described in it.
+      const ref = refs.add('F', {
+        kind: 'file',
+        title: name,
+        preview: 'image',
+        file: {
+          name,
+          mimeType: render.mimeType,
+          size: render.bytes.length,
+          source: 'upload',
+          token,
+          downloadable: true,
+          webUrl: null,
+        },
+      });
+
+      return {
+        ref,
+        prompt: prompt?.title ?? 'drawn from your brief',
+        drawn_from: references.length
+          ? references.map((r) => r.label)
+          : 'nothing attached — drawn from the written inputs alone',
+        note: render.note,
+        instruction: `Put { "ref": "${ref}" } in the answer's items so the board is shown. Keep the lead to one sentence.`,
+      };
+    }
+
+    case 'run_studio_prompt': {
+      if (!canWith(ctx.permissions, ctx.role, 'prompts', 'update')) {
+        return {
+          refused: true,
+          reason: 'Running the studio prompts is not something this role may do. Say so plainly rather than writing the work another way.',
+        };
+      }
+
+      const wanted = String(input.prompt ?? '').trim();
+      const library = (await rows(
+        db.from('prompts').select('id, title, template, variables'),
+        'prompts',
+      )) as unknown as {
+        id: string; title: string; template: string;
+        variables: { key: string; label: string; required?: boolean }[] | null;
+      }[];
+
+      const prompt = matchPrompt(library, wanted);
+      if (!prompt) {
+        return {
+          not_found: wanted,
+          available: library.map((p) => p.title),
+        };
+      }
+
+      const raw = (input.variables ?? {}) as Record<string, unknown>;
+      const values: Record<string, string> = {};
+      for (const [k, v] of Object.entries(raw)) {
+        if (typeof v === 'string') values[k] = v;
+        else if (v != null) values[k] = String(v);
+      }
+
+      const missing = missingInputs(prompt.variables, values);
+      if (missing.length) {
+        return {
+          prompt: prompt.title,
+          missing_inputs: missing,
+          note: 'Ask the person for these before running it again — do not invent them.',
+        };
+      }
+
+      let output: string;
+      try {
+        output = await runLibraryPrompt(db, prompt, values, {
+          orgId: ctx.orgId,
+          userId: ctx.userId,
+          projectId: typeof input.project_id === 'string' ? input.project_id : null,
+        });
+      } catch (err) {
+        // Reported rather than thrown: a timeout here should end with Jenny
+        // saying what happened, not with the whole turn failing.
+        if (isTimeoutError(err)) {
+          return {
+            prompt: prompt.title,
+            failed: 'It took longer than the time limit to write.',
+            note: 'Tell them plainly, and offer to run it again or to narrow it to one room.',
+          };
+        }
+        throw err;
+      }
+
+      // Kept whether or not the model remembers to pass it on.
+      session.produced = { title: prompt.title, body: output };
+
+      return {
+        prompt: prompt.title,
+        filled_from: Object.keys(values),
+        // Named so the model does not paraphrase it into `lead`.
+        document: output,
+        instruction: "This is the work. Put it in the answer's `document` unchanged, title it with the prompt's name, and keep `lead` to one sentence saying what you made.",
+      };
     }
 
     case 'get_weekly_report': {
@@ -2960,14 +3349,27 @@ function spokenSection(ctx: AssistantContext): string {
     .join('\n');
 }
 
-function systemPrompt(ctx: AssistantContext, snapshot: string, page: string | null = null): string {
+/**
+ * The half of the system prompt that does not move.
+ *
+ * Split from the rest so it can be cached. What stays here changes at most
+ * once a day and usually never: who she is, who she is speaking to, and the
+ * rules. What changes per question — the screen they are on, the live
+ * figures, what is waiting to be confirmed — lives in `situation()` and is
+ * appended after the cache breakpoint, where editing it costs nothing.
+ *
+ * Measured: caching the tool block alone took a turn from $0.0096 to
+ * $0.0050, with about a quarter of the input still arriving fresh. This is
+ * that quarter.
+ */
+function systemPrompt(ctx: AssistantContext): string {
   const first = ctx.name.split(/[\s@]/)[0] || ctx.name;
   const seat = ctx.seat ? SEATS[ctx.seat] : null;
   return `You are ${ASSISTANT_NAME}, the personal assistant to everyone at Janelle Interiors, a small
 interior design studio. When someone greets you or asks who you are, say you are ${ASSISTANT_NAME}.
 You are speaking with ${ctx.name} (role: ${ctx.role ?? 'unknown'}${seat ? `; seat: ${seat.label}, which owns ${seat.owns}` : ''}).
 Call them ${first}. Today is ${new Date().toISOString().slice(0, 10)}.
-${page ? `\nWhere they are right now: ${page}\n` : ''}${pendingSection(ctx)}${spokenSection(ctx)}
+
 Being their assistant, not a search box:
 - "My", "me" and "I" mean ${ctx.name}. "My tasks" are the ones assigned to ${ctx.name} — filter by
   that name rather than asking whose.
@@ -2980,11 +3382,33 @@ Being their assistant, not a search box:
 - Every answer carries up to three suggestions: the next things ${first} would plausibly ask, specific
   to what you just said, each something your tools can actually do.
 
-${studioRules(ctx, snapshot)}`;
+${studioRules(ctx)}`;
+}
+
+/**
+ * The half that changes with every question, appended after the cached
+ * block so it never invalidates it.
+ */
+function situation(
+  ctx: AssistantContext,
+  snapshot: string,
+  page: string | null,
+  filesNote: string,
+): string {
+  return [
+    page ? `Where they are right now: ${page}` : '',
+    pendingSection(ctx),
+    spokenSection(ctx),
+    snapshot,
+    filesNote,
+  ]
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 /** What the studio is, what can be seen, and how every answer is shaped. */
-function studioRules(ctx: AssistantContext, snapshot: string): string {
+function studioRules(ctx: AssistantContext): string {
   return `
 
 You exist because the founder is the bottleneck: she is in client meetings all day and needs to know
@@ -3012,6 +3436,35 @@ What you can see — the whole system, through the tools:
   anything kept in Drive.
 If a question touches any of that, there is a tool for it. Use it before saying you do not know.
 
+Making things, not only finding them:
+- You can WRITE the studio's design work: a moodboard, a design direction, a material selection
+  package, a finish or FF&E schedule, an elevation brief, a design review, a completeness audit.
+  Janelle wrote the prompts for these herself. list_studio_prompts shows them; run_studio_prompt
+  produces the work.
+- Always work from her prompt rather than a version of your own. The prompt is the studio's
+  standard, and it is what makes two designers' boards read as one house.
+- THE PROMPT LIBRARY IS A SHORTCUT, NOT A LICENCE. It holds the deliverables this studio makes every
+  week. Asked for something it does not cover — a flooring-plan board, a lighting plan, a window
+  schedule — do the work anyway, to the same standard, from your own knowledge as a senior designer:
+  write it into the answer's document field, or pass a brief to render_board to have it drawn. NEVER answer that the
+  studio has no prompt for it. That is a fact about a database table, not about what you can do.
+- DESIGN WORK DOES NOT NEED A RECORD. "Design a kitchen", "make a moodboard", "draw the board for a
+  new project" ask for your professional judgement, not for a lookup. If they name no project, or name
+  one the system has never heard of, DO THE WORK ANYWAY — from what they told you plus what a senior
+  designer would assume of a room like that. Never require a project to exist first, never ask them to
+  create one, and never send them away to fetch a brief. A project record is only where a run gets
+  filed; it is not permission to design.
+- State your assumptions instead of asking for them. A room and a direction are enough to start: assume
+  a typical size, ceiling and layout, say plainly what you assumed, and let them correct it. One
+  question is the most you may ask, and only when the answer changes the design rather than decorating
+  it — "which room" is worth asking, "what is the budget level" is not.
+- Fill the prompt's inputs from what they told you and from what you can read — the project, the
+  room, the approved direction, the selections already on file. Never invent a dimension, product or
+  SKU and present it as chosen: an assumption is written as one.
+- What comes back IS the work. Put it in the answer's document, whole and unedited, with a title;
+  keep the lead to one sentence saying what you made. Never retype it into the lead or into rows,
+  and never summarise it away.
+
 Handing things over:
 - When someone asks for a file — an attachment, a drawing, a quote, a photo, a spreadsheet — GIVE THEM
   THE FILE. Find it, then put its ref in items; the row becomes Download and Open buttons. Never
@@ -3027,8 +3480,6 @@ Handing things over:
 - You cannot send email, and you cannot change anything in Drive. To get an email written, use
   propose_draft: the person confirms, it goes to Drafts, and they send it themselves from there.
   Say it is prepared — never that it was sent.
-
-${snapshot}
 
 How to behave:
 - You CAN look things up. When asked for anything held in the studio’s records — a project,
@@ -3149,6 +3600,7 @@ export async function ask(
     refs: new RefRegistry(),
     google: new GoogleAccess(ctx.orgId),
     settled: [],
+    produced: null,
   };
   const settled = session.settled;
 
@@ -3193,7 +3645,10 @@ export async function ask(
     });
 
   const messages: Anthropic.MessageParam[] = [
-    ...history.slice(-8).map((t) => ({ role: t.role, content: t.content })),
+    // Four turns rather than eight. The tail of a conversation is what
+    // "that vendor" and "the first one" refer to; the head of it is paid
+    // for on every question and almost never read.
+    ...history.slice(-4).map((t) => ({ role: t.role, content: t.content })),
     { role: 'user' as const, content: message },
   ];
 
@@ -3217,13 +3672,27 @@ export async function ask(
         ]
       : []),
   ].join('\n');
-  const system = `${systemPrompt(ctx, snapshot, page)}${filesNote}`;
+  // Two blocks, not one string: everything up to the breakpoint is cached
+  // and re-read at a tenth of the price, and what follows is free to differ
+  // on every question.
+  const system: Anthropic.TextBlockParam[] = [
+    { type: 'text', text: systemPrompt(ctx), cache_control: { type: 'ephemeral' } },
+  ];
+  const now = situation(ctx, snapshot, page, filesNote);
+  if (now) system.push({ type: 'text', text: now });
 
   // Six turns of tool use is minutes of work, and the function is killed
   // long before that — the caller then gets no response at all, not even an
   // error, which reads in the browser as "could not reach the server". So
   // the loop watches the clock as well as the turn count, keeping back the
   // time the slowest turn took so far, since a turn cannot be interrupted
+  // Every way this turn can end goes out through here, so nothing the
+  // session made is lost on the way.
+  const done = (answer: AssistantAnswer): AssistantResult => {
+    const full = withProduced(answer, session.produced);
+    return { reply: answerToText(full), answer: full, proposed, used, settled };
+  };
+
   // once it has started.
   const deadline = Date.now() + ASSISTANT_BUDGET_MS;
   const timeLeft = () => deadline - Date.now();
@@ -3235,7 +3704,7 @@ export async function ask(
     // is what forces one, and it is a cheaper call than a tool turn.
     if (turn > 0 && timeLeft() <= slowestTurn) {
       const answer = await finalAnswer(ctx, system, messages, used, session.refs);
-      return { reply: answerToText(answer), answer, proposed, used, settled };
+      return done(answer);
     }
 
     // After the first turn the model has results in hand; what it does next
@@ -3249,7 +3718,7 @@ export async function ask(
         // whose input is long prose rather than a few words.
         max_tokens: 4096,
         system,
-        tools: TOOLS,
+        tools: CACHED_TOOLS,
         // Every turn is a tool call, and the last is always `answer`. Left
         // free to reply in plain text, the model sometimes did — and a plain
         // reply has no rows, no suggestions, and is where "would you like me
@@ -3268,7 +3737,7 @@ export async function ask(
     const answered = toolUses.find((t) => t.name === 'answer');
     if (answered && toolUses.length === 1) {
       const answer = toAnswer((answered.input ?? {}) as Record<string, unknown>, used, session.refs);
-      return { reply: answerToText(answer), answer, proposed, used, settled };
+      return done(answer);
     }
 
     if (toolUses.length === 0 || res.stop_reason !== 'tool_use') {
@@ -3279,7 +3748,7 @@ export async function ask(
         .map((b) => b.text)
         .join('\n')
         .trim();
-      return { reply, answer: answerFromText(reply, used), proposed, used, settled };
+      return done(answerFromText(reply, used));
     }
 
     messages.push({ role: 'assistant', content: res.content });
@@ -3330,7 +3799,7 @@ export async function ask(
   // Six turns and still no answer. Everything looked up is already in
   // `messages`, so ask for the answer itself rather than giving up on it.
   const answer = await finalAnswer(ctx, system, messages, used, session.refs);
-  return { reply: answerToText(answer), answer, proposed, used, settled };
+  return done(answer);
 }
 
 /**
@@ -3347,7 +3816,7 @@ export async function ask(
  */
 async function finalAnswer(
   ctx: AssistantContext,
-  system: string,
+  system: Anthropic.TextBlockParam[],
   messages: Anthropic.MessageParam[],
   used: string[],
   refs: RefRegistry,
@@ -3357,14 +3826,21 @@ async function finalAnswer(
       { feature: 'assistant.answer', orgId: ctx.orgId, actor: ctx.userId },
       {
         max_tokens: 1536,
-        system: `${system}
-
-You are out of time to look anything else up. Answer now, with the answer tool, from what you
+        // The same blocks the turns above used, so the cache they paid to
+        // write is read rather than rewritten, with the extra sentence
+        // appended after it.
+        system: [
+          ...system,
+          {
+            type: 'text' as const,
+            text: `You are out of time to look anything else up. Answer now, with the answer tool, from what you
 already have. If what you have is not enough, say in the caveat which part you could not check.`,
+          },
+        ],
         // The whole tool list, with `answer` forced. The history is full of
         // calls to the other tools, and they stay defined so it reads as the
         // conversation it was; tool_choice is what rules out another lookup.
-        tools: TOOLS,
+        tools: CACHED_TOOLS,
         tool_choice: { type: 'tool', name: 'answer' },
         messages,
       },

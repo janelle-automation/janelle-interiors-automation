@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, NetworkError } from './api';
+import { api, apiBlob, apiUpload, NetworkError } from './api';
 import type {
   Action, AiSettingsView, AiUsageReport, AssistantAnswer, DashboardSummary, IngestSettingsView,
   Prompt, ProjectStage, PoStatus,
@@ -20,6 +20,8 @@ export interface ProjectView {
 export interface PoView {
   id: string; po: string; vendor: string; project: string;
   amount: number; status: PoStatus; eta: string;
+  /** Who the order is with, for filtering by the selected vendor. '' when unlinked. */
+  vendorId: string;
 }
 export interface FollowUpView {
   id: string; type: 'vendor_silence' | 'client_approval_overdue' | 'date_slipping' | 'spec_gap';
@@ -30,10 +32,20 @@ export interface VendorView {
   openPOs: number;
   /** Total value of those open orders. */
   openValue: number;
+  /** The vendor's own site, normalized to a full URL; '' when unknown. */
+  website: string;
+  /** First contact address on file, for the directory subtitle; '' when none. */
+  email: string;
 }
 export interface EmailView {
   id: string; from: string; subject: string; snippet: string;
   cls: string; project: string; when: string;
+  /** Sender split out of the RFC header, so a table can show a name, not an address. */
+  fromName: string; fromEmail: string;
+  /** The vendor the mail was linked to; '' when none. */
+  vendor: string;
+  /** Full ISO timestamp, for the exact date on hover. */
+  receivedAt: string;
 }
 export interface DocSource {
   kind: 'gmail' | 'drive';
@@ -47,6 +59,8 @@ export interface DocSource {
 export interface DocView {
   id: string; type: string; vendor: string; project: string;
   total: number; confidence: number; when: string;
+  /** Full ISO timestamp of the parse, for the exact date on hover. */
+  createdAt: string;
   source: DocSource | null;
 }
 export interface ActivityView { id: string; action: string; detail: string; when: string }
@@ -141,7 +155,8 @@ export function useProject(id: string | undefined) {
 
 // ── Vendors ─────────────────────────────────────────────────
 interface VendorRow {
-  id: string; name: string; category: string | null;
+  id: string; name: string; category: string | null; website?: string | null;
+  contacts?: { name?: string; email?: string; phone?: string }[] | null;
   open_pos?: number; open_value?: number;
 }
 export function useVendors() {
@@ -150,19 +165,50 @@ export function useVendors() {
     queryFn: async (): Promise<VendorView[]> => {
       const rows = await api<VendorRow[]>('/vendors');
       return rows.map((r) => ({
-        id: r.id, name: r.name, category: r.category ?? '—',
+        id: r.id, name: r.name,
+        // '' not '—' now: the row decides whether there is anything to show,
+        // and an em dash on its own line was most of what the list displayed.
+        category: r.category ?? '',
         openPOs: r.open_pos ?? 0,
         openValue: r.open_value ?? 0,
+        website: r.website ?? '',
+        email: (r.contacts ?? []).find((c) => c.email)?.email ?? '',
       }));
     },
   });
   return { ...q, data: q.data ?? [] };
 }
 
+/** What the signed-in role may do to the vendor directory. */
+export function useVendorAbilities() {
+  return useQuery({
+    queryKey: ['vendors', 'can'],
+    queryFn: () => api<{ create: boolean; update: boolean; delete: boolean }>('/vendors/can'),
+    staleTime: 60_000,
+  });
+}
+
+export interface NewVendor {
+  name: string; website: string; email: string; phone: string;
+  contact_name: string; category: string; notes: string;
+}
+export function useCreateVendor() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: NewVendor) => api<VendorRow>('/vendors', { method: 'POST', body: JSON.stringify(v) }),
+    // The dashboard counts vendors too, so it goes stale on the same event.
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['vendors'] });
+      qc.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+}
+
 // ── Purchase orders ─────────────────────────────────────────
 interface PoRow {
   id: string; po_number: string | null; amount: number | null; status: PoStatus;
-  eta: string | null; vendors: { name: string } | null; projects: { name: string } | null;
+  eta: string | null; vendor_id: string | null;
+  vendors: { name: string } | null; projects: { name: string } | null;
 }
 export function usePurchaseOrders() {
   const q = useQuery({
@@ -170,8 +216,9 @@ export function usePurchaseOrders() {
     queryFn: async (): Promise<PoView[]> => {
       const rows = await api<PoRow[]>('/purchase-orders');
       return rows.map((r) => ({
-        id: r.id, po: r.po_number ?? '—', vendor: r.vendors?.name ?? '—',
-        project: r.projects?.name ?? '—', amount: r.amount ?? 0, status: r.status, eta: r.eta ?? '',
+        id: r.id, po: r.po_number ?? '', vendor: r.vendors?.name ?? '',
+        project: r.projects?.name ?? '', amount: r.amount ?? 0, status: r.status, eta: r.eta ?? '',
+        vendorId: r.vendor_id ?? '',
       }));
     },
   });
@@ -409,18 +456,51 @@ export function useConfirmAction() {
 // ── Inbox / documents / activity ────────────────────────────
 interface EmailRow {
   id: string; from_addr: string | null; subject: string | null; snippet: string | null;
-  received_at: string | null; class: string; projects: { name: string } | null;
+  received_at: string | null; class: string;
+  projects: { name: string } | null; vendors: { name: string } | null;
 }
+
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ndash: '–', mdash: '—',
+  lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”', hellip: '…', trade: '™', reg: '®', copy: '©',
+};
+
+/**
+ * Gmail hands us HTML-escaped snippets, which were being rendered verbatim —
+ * "I&#39;d love for you to quote" is what the Inbox actually showed. Decoded
+ * by lookup rather than the usual innerHTML round-trip, which would parse
+ * untrusted mail as markup just to unescape it.
+ */
+export function decodeEntities(s: string): string {
+  return s.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (whole, body: string) => {
+    if (body[0] === '#') {
+      const code = body[1] === 'x' || body[1] === 'X'
+        ? parseInt(body.slice(2), 16)
+        : parseInt(body.slice(1), 10);
+      return Number.isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+    }
+    return NAMED_ENTITIES[body.toLowerCase()] ?? whole;
+  });
+}
+
 export function useEmails() {
   const q = useQuery({
     queryKey: ['emails'],
     queryFn: async (): Promise<EmailView[]> => {
       const rows = await api<EmailRow[]>('/emails');
-      return rows.map((r) => ({
-        id: r.id, from: r.from_addr ?? '—', subject: r.subject ?? '(no subject)',
-        snippet: r.snippet ?? '', cls: r.class, project: r.projects?.name ?? '—',
-        when: r.received_at ? ageFrom(r.received_at) : '—',
-      }));
+      return rows.map((r) => {
+        const who = parseAddress(r.from_addr);
+        return {
+          id: r.id, from: r.from_addr ?? '', subject: decodeEntities(r.subject ?? '(no subject)'),
+          snippet: decodeEntities(r.snippet ?? ''), cls: r.class,
+          // '' not '—' — the table hides a column nothing fills rather than
+          // printing a dash down every row of it.
+          project: r.projects?.name ?? '', vendor: r.vendors?.name ?? '',
+          fromName: who.name, fromEmail: who.email,
+          receivedAt: r.received_at ?? '',
+          when: r.received_at ? ageFrom(r.received_at) : '—',
+        };
+      });
     },
   });
   return { ...q, data: q.data ?? [] };
@@ -451,9 +531,13 @@ export function useDocuments() {
     queryFn: async (): Promise<DocView[]> => {
       const rows = await api<DocRow[]>('/documents');
       return rows.map((r) => ({
-        id: r.id, type: r.type, vendor: r.parsed_json?.vendor ?? '—',
-        project: r.projects?.name ?? '—', total: r.parsed_json?.total ?? 0,
+        id: r.id, type: r.type,
+        // '' not '—' — the table hides a column nothing fills rather than
+        // printing a dash down every row of it.
+        vendor: r.parsed_json?.vendor ?? '',
+        project: r.projects?.name ?? '', total: r.parsed_json?.total ?? 0,
         confidence: r.confidence ?? 0, when: ageFrom(r.created_at),
+        createdAt: r.created_at ?? '',
         source: toDocSource(r.source),
       }));
     },
@@ -481,6 +565,70 @@ export function useActivity() {
 export function usePromptLibrary() {
   const q = useQuery({ queryKey: ['prompts'], queryFn: () => api<Prompt[]>('/prompts') });
   return { ...q, data: q.data ?? [] };
+}
+
+/** A reference picture on its way to a render: uploaded, and named. */
+export interface BoardReference {
+  token: string;
+  name: string;
+  label: string;
+  mimeType: string;
+  /** A local object URL for the thumbnail; revoked when the modal closes. */
+  preview: string;
+}
+
+export interface RenderedBoard {
+  token: string;
+  name: string;
+  mimeType: string;
+  model: string;
+  note: string | null;
+  references: number;
+}
+
+/**
+ * Which prompts make a picture, what to attach to each, and whether the
+ * studio has an image key at all. Asked once: the answer changes only when
+ * someone edits Settings.
+ */
+export function useRenderable() {
+  return useQuery({
+    queryKey: ['prompts', 'renderable'],
+    queryFn: () =>
+      api<{ ready: boolean; prompts: Record<string, { label: string; references: string[] }> }>(
+        '/prompts/renderable',
+      ),
+    staleTime: 60_000,
+  });
+}
+
+/** Put a reference image in the studio's bucket and get a grant for it back. */
+export async function uploadReference(file: File, label: string): Promise<BoardReference> {
+  const stored = await apiUpload<{ token: string; name: string; mimeType: string }>(
+    `/assistant/upload?name=${encodeURIComponent(file.name)}`,
+    file,
+  );
+  return { ...stored, label, preview: URL.createObjectURL(file) };
+}
+
+export function useRenderBoard() {
+  return useMutation({
+    mutationFn: (v: {
+      id: string;
+      variables: Record<string, string>;
+      files: { token: string; label: string }[];
+      projectId?: string;
+    }) =>
+      api<RenderedBoard>(`/prompts/${v.id}/render`, {
+        method: 'POST',
+        body: JSON.stringify({ variables: v.variables, files: v.files, projectId: v.projectId }),
+      }),
+  });
+}
+
+/** The rendered board's bytes, as something an <img> can show. */
+export function boardImageUrl(token: string): Promise<string> {
+  return apiBlob(`/assistant/file?token=${encodeURIComponent(token)}`).then((b) => URL.createObjectURL(b));
 }
 
 // ── Reports ─────────────────────────────────────────────────

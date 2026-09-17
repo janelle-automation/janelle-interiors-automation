@@ -491,6 +491,8 @@ export interface Vendor {
   category: string | null;
   contacts: { name?: string; email?: string; phone?: string }[];
   notes: string | null;
+  /** The vendor's own site, e.g. "https://houzz.com". Null until someone adds it. */
+  website: string | null;
 }
 
 export interface PurchaseOrder {
@@ -644,11 +646,13 @@ export type AiFeature =
   | 'report.narrative'
   | 'prompt.run'
   | 'assistant.answer'
-  | 'document.read';
+  | 'document.read'
+  | 'image.render';
 
 export const AI_FEATURES: AiFeature[] = [
   'email.extract', 'task.extract', 'document.extract', 'followup.draft',
   'reply.draft', 'digest.summary', 'report.narrative', 'prompt.run', 'assistant.answer', 'document.read',
+  'image.render',
 ];
 
 export const AI_FEATURE_LABELS: Record<AiFeature, string> = {
@@ -662,6 +666,7 @@ export const AI_FEATURE_LABELS: Record<AiFeature, string> = {
   'prompt.run': 'Prompt Studio',
   'assistant.answer': 'Assistant answers',
   'document.read': 'Reading documents on request',
+  'image.render': 'Presentation boards',
 };
 
 /** Whether the spend was the agent working, or a person pressing a button. */
@@ -676,6 +681,7 @@ export const AI_FEATURE_TRIGGER: Record<AiFeature, 'agent' | 'person'> = {
   'prompt.run': 'person',
   'assistant.answer': 'person',
   'document.read': 'person',
+  'image.render': 'person',
 };
 
 /**
@@ -694,6 +700,70 @@ export const MODEL_PRICING: Record<string, { input: number; output: number }> = 
   'claude-sonnet-4-6': { input: 3, output: 15 },
   'claude-haiku-4-5': { input: 1, output: 5 },
 };
+
+/**
+ * The image models, priced PER IMAGE rather than per token.
+ *
+ * Kept beside the Claude rates because they land on the same spend report:
+ * a studio looking at what the month cost should not have to know that one
+ * number came from tokens and the other from a count of pictures.
+ *
+ * Board work defaults to Pro. The whole point of the house template is that
+ * every room's board looks like the same drawing set, and holding a supplied
+ * reference exactly is what the premium tier is actually better at.
+ */
+export interface ImageModel {
+  id: string;
+  label: string;
+  usdPerImage: number;
+  note: string;
+  /**
+   * How it makes the page.
+   *
+   * `raster` models photograph it — the elevation looks built, the swatches
+   * look like real tile, and it costs per image on a billed account.
+   * `vector` models are text models that draw SVG instead: flat and
+   * illustrated, but the typography is exact and there is no image billing,
+   * which matters because Google gives image generation no free tier at all.
+   */
+  kind: 'raster' | 'vector';
+}
+
+export const IMAGE_MODELS: ImageModel[] = [
+  {
+    id: 'gemini-3-pro-image',
+    label: 'Gemini 3 Pro Image',
+    usdPerImage: 0.18,
+    kind: 'raster',
+    note: 'Photoreal. Best at holding the house template and the supplied materials. Needs image billing.',
+  },
+  {
+    id: 'gemini-3.1-flash-image',
+    label: 'Gemini 3.1 Flash Image',
+    usdPerImage: 0.067,
+    kind: 'raster',
+    note: 'Photoreal, a third of the price and quicker. Needs image billing.',
+  },
+  {
+    id: 'gemini-flash-lite-latest',
+    label: 'Gemini Flash Lite (drawn)',
+    usdPerImage: 0,
+    kind: 'vector',
+    note: 'Draws the board as SVG on the free tier: exact type, illustrated rather than photographed.',
+  },
+];
+
+/** Whether this model photographs the page or draws it. Unknown ids are assumed raster. */
+export function imageModelKind(id: string): 'raster' | 'vector' {
+  return IMAGE_MODELS.find((m) => m.id === id)?.kind ?? 'raster';
+}
+
+export const DEFAULT_IMAGE_MODEL = 'gemini-3-pro-image';
+
+/** What a render cost, in USD. An unpriced model reports 0 rather than guessing. */
+export function imageCostUsd(model: string, images = 1): number {
+  return (IMAGE_MODELS.find((m) => m.id === model)?.usdPerImage ?? 0) * images;
+}
 
 export const CACHE_WRITE_MULTIPLIER = 1.25;
 export const CACHE_READ_MULTIPLIER = 0.1;
@@ -1007,6 +1077,18 @@ export interface AssistantAnswer {
    * the worst of them. Making either serve both makes both worse.
    */
   speech: string;
+  /**
+   * Long-form work the answer produced — a moodboard, a finish schedule, a
+   * design direction — as Markdown, shown under the lead.
+   *
+   * `lead` is deliberately a sentence or two: it is also what gets read
+   * aloud, and a schedule read aloud is noise. Work that runs to headings
+   * and tables needs somewhere of its own to go, or the assistant either
+   * crushes it into prose or does not attempt it at all.
+   */
+  document?: string | null;
+  /** What that work is called, for its heading and for the draft it can become. */
+  documentTitle?: string | null;
   /** Which parts of the studio's records the answer came from. */
   sources: string[];
   /**
