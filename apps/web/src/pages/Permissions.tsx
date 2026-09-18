@@ -262,8 +262,12 @@ export default function Permissions() {
                 the change. Locked switches are greyed out.
               </div>
               <div>
-                Viewing is never taken away, and a principal always keeps people and studio rules —
-                otherwise nobody could grant access again.
+                Turning off View closes the module completely: it disappears from that role's
+                sidebar and the API refuses it, whatever the other three switches say.
+              </div>
+              <div>
+                A principal always keeps Team &amp; roles and Studio settings — otherwise nobody
+                could grant access again.
               </div>
               {error && <div className="text-crit">{error.message}</div>}
             </div>

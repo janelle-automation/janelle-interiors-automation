@@ -2,7 +2,10 @@ import { createContext, useCallback, useContext, useEffect, useState, type React
 import type { Session } from '@supabase/supabase-js';
 import { supabase, supabaseConfigured } from '../lib/supabase';
 import { api } from '../lib/api';
-import type { Seat, UserRole } from '@janelle/shared';
+import type { Action, Resource, Seat, UserRole } from '@janelle/shared';
+
+/** What this person may do, per module, with the studio's overrides applied. */
+export type Access = Partial<Record<Resource, Record<Action, boolean>>>;
 
 interface Profile {
   id: string;
@@ -32,6 +35,12 @@ interface AuthCtx {
   user: SessionUser | null;
   /** Set when the profile could not be loaded (e.g. API unreachable). */
   profileError: string | null;
+  /**
+   * Whether this person may do something. Defaults to allowed while `/me`
+   * is still loading, so the shell does not flicker every module away and
+   * back on each refresh.
+   */
+  may: (resource: Resource, action?: Action) => boolean;
   refresh: () => Promise<void>;
   signOut: () => Promise<void>;
 }
@@ -42,15 +51,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [access, setAccess] = useState<Access | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
 
   /** Load the profile for the current session, bootstrapping if needed. */
   const loadProfile = useCallback(async () => {
     setProfileError(null);
     try {
-      const me = await api<{ profile: Profile | null }>('/me');
+      const me = await api<{ profile: Profile | null; access?: Access }>('/me');
       if (me.profile?.org_id) {
         setProfile(me.profile);
+        setAccess(me.access ?? null);
         return;
       }
       // No profile yet — provision org + profile on first sign-in.
@@ -93,8 +104,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (supabase) await supabase.auth.signOut();
     setSession(null);
     setProfile(null);
+    setAccess(null);
     setProfileError(null);
   };
+
+  // Unknown means allowed: a slow /me must never look like a revoked module.
+  const may = (resource: Resource, action: Action = 'read') =>
+    access?.[resource]?.[action] ?? true;
 
   const user: SessionUser | null =
     session && profile
@@ -109,7 +125,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   return (
     <Ctx.Provider
-      value={{ configured: supabaseConfigured, loading, session, profile, user, profileError, refresh: loadProfile, signOut }}
+      value={{ configured: supabaseConfigured, loading, session, profile, user, profileError, may, refresh: loadProfile, signOut }}
     >
       {children}
     </Ctx.Provider>

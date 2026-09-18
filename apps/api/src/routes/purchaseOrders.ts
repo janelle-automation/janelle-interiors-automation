@@ -1,9 +1,14 @@
 import { Router } from 'express';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 
 export const purchaseOrdersRouter = Router();
 purchaseOrdersRouter.use(requireAuth);
+// Closing a module to a role has to mean something: until now nothing
+// anywhere checked `read`, so revoking it would have been a switch that
+// changed nothing. No view, no module — writes are still checked
+// separately below.
+purchaseOrdersRouter.use(requirePermission('purchase_orders', 'read'));
 
 purchaseOrdersRouter.get(
   '/',

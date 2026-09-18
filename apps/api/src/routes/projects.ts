@@ -6,6 +6,11 @@ import { PROJECT_STAGES } from '@janelle/shared';
 export const projectsRouter = Router();
 
 projectsRouter.use(requireAuth);
+// Closing a module to a role has to mean something: until now nothing
+// anywhere checked `read`, so revoking it would have been a switch that
+// changed nothing. No view, no module — writes are still checked
+// separately below.
+projectsRouter.use(requirePermission('projects', 'read'));
 
 // Update editable fields of a project (client, budget, dates, stage…).
 projectsRouter.patch(
@@ -106,7 +111,13 @@ projectsRouter.get(
 
     const [{ data: project }, { data: pos }, { data: gaps }, { data: emails }, { data: documents }] = await Promise.all([
       db.from('projects').select('*').eq('id', id).maybeSingle(),
-      db.from('purchase_orders').select('*').eq('project_id', id),
+      // With the vendor and the line count: an order the studio has not yet
+      // numbered showed as a row of dashes, when the records already knew it
+      // was Logan Gould Cabinetry and twenty items.
+      db
+        .from('purchase_orders')
+        .select('*, vendors(name), line_items(id)')
+        .eq('project_id', id),
       db.from('spec_gaps').select('*').eq('project_id', id).eq('resolved', false),
       db.from('emails').select('id, subject, class, received_at, from_addr').eq('project_id', id).order('received_at'),
       db.from('documents').select('id, type, parsed_json, created_at').eq('project_id', id).order('created_at'),

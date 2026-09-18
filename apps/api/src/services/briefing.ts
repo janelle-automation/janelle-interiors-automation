@@ -27,7 +27,7 @@ import { purchaseOrderRow, taskRow, type AssistantContext } from './assistant.js
 const LIVE = ['open', 'in_progress', 'blocked'];
 
 /** How many rows of one kind the briefing shows before counting the rest. */
-const SHOW = { overdue: 5, dueToday: 3, latePos: 4 };
+const SHOW = { overdue: 5, dueToday: 3, latePos: 4, unassigned: 5, inProgress: 4, open: 4 };
 
 type Db = AssistantContext['db'];
 
@@ -100,7 +100,13 @@ export async function buildBriefing(ctx: AssistantContext, opts: BriefingOptions
     vendors: { name: string } | null; projects: { name: string } | null;
   };
 
-  const [mine, unowned, noNextStep, drafts, escalations, clientsWaiting, latePos, specGaps] = await Promise.all([
+  type BoardRowData = TaskRowData & {
+    kind: string;
+    next_step: string | null;
+    profiles: { full_name: string | null } | null;
+  };
+
+  const [mine, board, noNextStep, drafts, escalations, clientsWaiting, latePos, specGaps] = await Promise.all([
     rowsOf<TaskRowData>(() =>
       db
         .from('tasks')
@@ -110,7 +116,23 @@ export async function buildBriefing(ctx: AssistantContext, opts: BriefingOptions
         .order('due_date', { ascending: true, nullsFirst: false })
         .limit(60),
     ),
-    runsBoard ? count(() => head('tasks').in('status', LIVE).is('assigned_to', null)) : Promise.resolve(0),
+    // The live board, not just this person's own row of it.
+    //
+    // A principal owns almost nothing on the board — the work is assigned to
+    // the people who do it — so a briefing built only from `assigned_to = me`
+    // told whoever runs the studio that nothing needed them, while eleven
+    // live tasks sat there and one of them had no owner at all. Whoever runs
+    // the board is briefed on the board.
+    runsBoard
+      ? rowsOf<BoardRowData>(() =>
+          db
+            .from('tasks')
+            .select('id, title, kind, status, due_date, next_step, projects(name), profiles(full_name)')
+            .in('status', LIVE)
+            .order('due_date', { ascending: true, nullsFirst: false })
+            .limit(80),
+        )
+      : Promise.resolve([] as BoardRowData[]),
     chasesHygiene
       ? rowsOf<{ next_step: string | null }>(() => db.from('tasks').select('next_step').in('status', LIVE)).then(
           (r) => r.filter((t) => !(t.next_step ?? '').trim()).length,
@@ -142,6 +164,36 @@ export async function buildBriefing(ctx: AssistantContext, opts: BriefingOptions
   const overdue = mine.filter((t) => (t.due_date && t.due_date < today) || t.status === 'blocked');
   const dueToday = mine.filter((t) => t.due_date === today && t.status !== 'blocked');
 
+  // The board, split the way the board is read. Anything already listed as
+  // this person's own is left out rather than said twice.
+  const alreadyShown = new Set([...overdue.slice(0, SHOW.overdue), ...dueToday.slice(0, SHOW.dueToday)].map((t) => t.id));
+  const boardRest = board.filter((t) => !alreadyShown.has(t.id));
+  const unassigned = boardRest.filter((t) => !t.profiles?.full_name);
+  const inProgress = boardRest.filter((t) => t.status === 'in_progress' && t.profiles?.full_name);
+  const openTasks = boardRest.filter((t) => t.status === 'open' && t.profiles?.full_name);
+
+  /** A board row, with the owner named and the next step spelled out. */
+  const asBoardTask = (t: BoardRowData): AssistantItem => {
+    const row = taskRow({
+      id: t.id,
+      title: t.title,
+      status: t.status,
+      due_date: t.due_date,
+      owner: t.profiles?.full_name ?? 'Nobody yet',
+      project: t.projects?.name ?? null,
+    });
+    // The studio's SOP says a task names its next action, and that is the
+    // useful line — it is what the person would otherwise open the task to
+    // find. Always present, even when empty: the renderer only lays these
+    // out as a table when every row carries the same columns, and an em
+    // dash is dropped from the card view anyway.
+    const next = (t.next_step ?? '').trim();
+    return {
+      ...row,
+      fields: [...(row.fields ?? []), { label: 'Next', value: next || '—' }],
+    };
+  };
+
   // Every one of these is theirs, so an Owner column would repeat their own
   // name down the whole list.
   const asTask = (t: TaskRowData) => {
@@ -170,7 +222,14 @@ export async function buildBriefing(ctx: AssistantContext, opts: BriefingOptions
   // the studio, then work that has stalled, then the routine.
   if (clientsWaiting) items.push(summaryRow('follow_up', `${plural(clientsWaiting, 'client is', 'clients are')} waiting on the studio`, 'crit'));
   if (escalations) items.push(summaryRow('follow_up', `${plural(escalations, 'escalation', 'escalations')} to look at`, 'crit'));
-  if (unowned) items.push(summaryRow('task', `${plural(unowned, 'task has', 'tasks have')} nobody on ${unowned === 1 ? 'it' : 'them'}`, 'warn'));
+
+  // Needing an owner comes before anything in flight: it is the only one
+  // where nothing at all is happening until this person acts.
+  items.push(
+    ...unassigned.slice(0, SHOW.unassigned).map((t) => ({ ...asBoardTask(t), meta: 'needs an owner', tone: 'warn' as const })),
+    ...inProgress.slice(0, SHOW.inProgress).map((t) => ({ ...asBoardTask(t), meta: 'in progress' })),
+    ...openTasks.slice(0, SHOW.open).map((t) => ({ ...asBoardTask(t), meta: 'open' })),
+  );
   if (noNextStep) items.push(summaryRow('task', `${plural(noNextStep, 'task is', 'tasks are')} missing a next step`, 'neutral'));
   if (specGaps) items.push(summaryRow('project', `${plural(specGaps, 'spec gap is', 'spec gaps are')} still open`, 'warn'));
   if (drafts) items.push(summaryRow('draft', `${plural(drafts, 'draft is', 'drafts are')} ready to review and send`, 'neutral'));
@@ -178,11 +237,20 @@ export async function buildBriefing(ctx: AssistantContext, opts: BriefingOptions
   const hidden =
     Math.max(0, overdue.length - SHOW.overdue) +
     Math.max(0, dueToday.length - SHOW.dueToday) +
-    Math.max(0, latePos.length - SHOW.latePos);
+    Math.max(0, latePos.length - SHOW.latePos) +
+    Math.max(0, unassigned.length - SHOW.unassigned) +
+    Math.max(0, inProgress.length - SHOW.inProgress) +
+    Math.max(0, openTasks.length - SHOW.open);
 
   // "Things", counted as a person would: each late task is one, each
   // count row is one — five drafts waiting is one thing to go and do.
-  const things = overdue.length + dueToday.length + latePos.length + items.filter((i) => !i.id).length;
+  //
+  // Work in flight is not counted. It is listed because whoever runs the
+  // board should see it, but a task someone else is already doing is not a
+  // thing that needs this person today, and counting it would turn a
+  // truthful "two things" into an alarming and meaningless thirteen.
+  const things =
+    overdue.length + dueToday.length + latePos.length + unassigned.length + items.filter((i) => !i.id).length;
   const hello = `${greeting(opts.hour ?? null)}, ${first}.`;
 
   let lead: string;
@@ -197,7 +265,9 @@ export async function buildBriefing(ctx: AssistantContext, opts: BriefingOptions
       ? ` The most pressing is “${worst.title}”${worst.status === 'blocked' ? ', which is blocked' : lateBy}.`
       : latePos[0]
         ? ` The most pressing is ${latePos[0].po_number ?? 'an order'} from ${latePos[0].vendors?.name ?? 'a vendor'}, past its delivery date.`
-        : '';
+        : unassigned.length
+          ? ` ${plural(unassigned.length, 'task has', 'tasks have')} nobody on ${unassigned.length === 1 ? 'it' : 'them'} — “${unassigned[0].title}” first.`
+          : '';
     lead = `${hello} ${spoken(things)} ${things === 1 ? 'thing needs' : 'things need'} you today.${pressing}`;
     speech = lead.replace(/[“”]/g, '');
   }
@@ -208,6 +278,8 @@ export async function buildBriefing(ctx: AssistantContext, opts: BriefingOptions
   if (supervises) suggestions.push("Read me this morning's digest");
   if (watchesOrders) suggestions.push('Which orders are late, and who do I chase?');
   if (watchesSpecs) suggestions.push('Which spec gaps are blocking orders?');
+  if (unassigned.length) suggestions.push('Who should take the unassigned tasks?');
+  if (inProgress.length) suggestions.push("What's in progress right now?");
   if (chasesHygiene && noNextStep) suggestions.push('Which tasks are missing a next step?');
   suggestions.push("What's on my plate this week?");
 
@@ -217,7 +289,12 @@ export async function buildBriefing(ctx: AssistantContext, opts: BriefingOptions
     more: hidden,
     caveat: null,
     speech,
-    sources: ['your tasks', ...(latePos.length ? ['purchase orders'] : []), ...(drafts ? ['drafts'] : [])],
+    sources: [
+      'your tasks',
+      ...(board.length ? ['the task board'] : []),
+      ...(latePos.length ? ['purchase orders'] : []),
+      ...(drafts ? ['drafts'] : []),
+    ],
     suggestions: [...new Set(suggestions)].slice(0, 3),
   };
 }

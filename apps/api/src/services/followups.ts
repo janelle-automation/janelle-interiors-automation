@@ -1,13 +1,17 @@
 import { DEFAULT_SLA, TASK_HYGIENE_SEAT, type FollowUpType, type SlaSettings } from '@janelle/shared';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { hasSeatColumn } from '../lib/columns.js';
+import { orgSourceUserId } from '../lib/tokens.js';
 import { generate, isAiReady } from './anthropic.js';
+import { gmailFor, readSentMail } from './gmail.js';
 
 export interface FollowUpResult {
   ok: boolean;
   reason?: string;
   raised: number;
   drafted: number;
+  /** Follow-ups the engine closed before raising anything new. */
+  resolved?: number;
 }
 
 interface Trigger {
@@ -129,12 +133,202 @@ async function resolveRecipient(
   return { to, cc, threadId: e?.thread_id ?? null, subject: e?.subject ?? null };
 }
 
+// ────────────────────────────────────────────────────────────
+//  Closing what has already been answered
+//
+//  The page tells you to review the draft, edit it in Gmail and send it —
+//  and then nothing watched Gmail, so the only way a follow-up ever left the
+//  queue was somebody pressing Done. A nudge sent by hand, a vendor who
+//  replied, a PO that arrived, a task someone finished: all of it left the
+//  row sitting under "Awaiting your review" with a draft nobody needed any
+//  more. Every one of those is a fact the system already holds, or can read.
+// ────────────────────────────────────────────────────────────
+
+interface OpenFollowUp {
+  id: string;
+  type: FollowUpType;
+  target: string | null;
+  project_id: string | null;
+  vendor_id: string | null;
+  task_id: string | null;
+  draft_id: string | null;
+  created_at: string;
+}
+
+/** Ids of the given set whose linked row says the reason is gone. */
+async function causeIsGone(orgId: string, rows: OpenFollowUp[]): Promise<Set<string>> {
+  const done = new Set<string>();
+  if (!supabaseAdmin) return done;
+
+  // A task-linked nudge dies with its task: nothing to chase once it is
+  // closed, and the queue was keeping the reminder alive past the work.
+  const taskIds = [...new Set(rows.map((r) => r.task_id).filter((id): id is string => !!id))];
+  if (taskIds.length) {
+    const { data: closed } = await supabaseAdmin
+      .from('tasks')
+      .select('id')
+      .in('id', taskIds)
+      .in('status', ['done', 'cancelled']);
+    const closedIds = new Set((closed ?? []).map((t) => (t as { id: string }).id));
+    for (const r of rows) if (r.task_id && closedIds.has(r.task_id)) done.add(r.id);
+  }
+
+  // A chase about an order stops when the order lands or is called off, and
+  // when a slipped date has been moved to a date still ahead of us.
+  const poRows = rows.filter((r) => r.type === 'vendor_silence' || r.type === 'date_slipping');
+  if (poRows.length) {
+    const today = todayIso();
+    for (const r of poRows) {
+      let q = supabaseAdmin
+        .from('purchase_orders')
+        .select('id, status, eta')
+        .eq('org_id', orgId);
+      if (r.vendor_id) q = q.eq('vendor_id', r.vendor_id);
+      if (r.project_id) q = q.eq('project_id', r.project_id);
+      const { data: pos } = await q;
+      const live = (pos ?? []) as { status: string; eta: string | null }[];
+      if (!live.length) continue;
+      const stillWaiting = live.some((p) =>
+        r.type === 'vendor_silence'
+          ? p.status === 'placed'
+          : !['received', 'cancelled'].includes(p.status) && !!p.eta && p.eta < today,
+      );
+      if (!stillWaiting) done.add(r.id);
+    }
+  }
+
+  // A spec gap that has been filled in, and a project that has moved on from
+  // waiting for the client.
+  for (const r of rows) {
+    if (r.type === 'spec_gap' && r.project_id) {
+      const { data: gaps } = await supabaseAdmin
+        .from('spec_gaps')
+        .select('id')
+        .eq('project_id', r.project_id)
+        .eq('resolved', false)
+        .limit(1);
+      if (!gaps?.length) done.add(r.id);
+    }
+    if (r.type === 'client_approval_overdue' && r.project_id) {
+      const { data: project } = await supabaseAdmin
+        .from('projects')
+        .select('stage')
+        .eq('id', r.project_id)
+        .maybeSingle();
+      if (project && (project as { stage: string }).stage !== 'approval') done.add(r.id);
+    }
+  }
+
+  return done;
+}
+
+/**
+ * Close the follow-ups that have already been answered, and drop the drafts
+ * they were waiting on. Runs before the engine raises anything, so a nudge
+ * is never re-drafted for something that has since been dealt with.
+ */
+export async function resolveFollowUps(orgId: string): Promise<number> {
+  if (!supabaseAdmin) return 0;
+
+  const { data } = await supabaseAdmin
+    .from('follow_ups')
+    .select('id, type, target, project_id, vendor_id, task_id, draft_id, created_at')
+    .eq('org_id', orgId)
+    .in('status', ['open', 'drafted']);
+  const rows = (data ?? []) as unknown as OpenFollowUp[];
+  if (!rows.length) return 0;
+
+  const done = await causeIsGone(orgId, rows);
+
+  // Someone outside the studio wrote back after we raised it.
+  //
+  // Matched two ways, because a vendor rarely replies from the address on
+  // the quote: the exact address we nudged closes any follow-up, and for
+  // vendor_silence — where the claim is literally "they have gone quiet" —
+  // any mail at all from that vendor is enough to disprove it.
+  const oldest = rows.reduce((min, r) => (r.created_at < min ? r.created_at : min), rows[0].created_at);
+  const { data: replies } = await supabaseAdmin
+    .from('emails')
+    .select('from_addr, vendor_id, received_at')
+    .eq('org_id', orgId)
+    .gte('received_at', oldest);
+  for (const row of (replies ?? []) as { from_addr: string | null; vendor_id: string | null; received_at: string | null }[]) {
+    if (!row.received_at) continue;
+    const from = (row.from_addr ?? '').toLowerCase();
+    for (const r of rows) {
+      if (row.received_at <= r.created_at) continue;
+      const sameAddress = !!from && r.target?.toLowerCase() === from;
+      const sameVendor = r.type === 'vendor_silence' && !!r.vendor_id && row.vendor_id === r.vendor_id;
+      if (sameAddress || sameVendor) done.add(r.id);
+    }
+  }
+
+  // And the case this whole pass exists for: the studio sent the nudge from
+  // Gmail instead of pressing Done. Only worth a round trip when something
+  // is still open and addressed to somebody.
+  const sent = new Set<string>();
+  const stillOpen = rows.filter((r) => !done.has(r.id) && r.target);
+  if (stillOpen.length) {
+    try {
+      const userId = await orgSourceUserId(orgId);
+      const gmail = userId ? await gmailFor(userId) : null;
+      if (gmail) {
+        const oldest = stillOpen.reduce((min, r) => (r.created_at < min ? r.created_at : min), stillOpen[0].created_at);
+        const days = Math.ceil((Date.now() - new Date(oldest).getTime()) / 86400_000) + 1;
+        const { byAddress: writtenTo } = await readSentMail(gmail, Math.min(days, 30));
+        for (const r of stillOpen) {
+          const when = writtenTo.get((r.target ?? '').toLowerCase());
+          if (when && when > r.created_at) sent.add(r.id);
+        }
+      }
+    } catch (err) {
+      // No Google connection, an expired token, a rate limit: the rest of
+      // the resolution still stands.
+      console.error('[followups] sent-mail check failed', (err as Error).message);
+    }
+  }
+
+  const changes: { ids: string[]; status: 'done' | 'sent' }[] = [
+    { ids: [...done], status: 'done' },
+    { ids: [...sent], status: 'sent' },
+  ];
+  let resolved = 0;
+  for (const { ids, status } of changes) {
+    if (!ids.length) continue;
+    await supabaseAdmin.from('follow_ups').update({ status }).in('id', ids);
+    resolved += ids.length;
+
+    // The draft was a suggestion for a message that has now been sent, or is
+    // no longer needed. Leaving it in Drafts is how that page filled with
+    // answers to conversations that had already moved on.
+    const draftIds = rows
+      .filter((r) => ids.includes(r.id) && r.draft_id)
+      .map((r) => r.draft_id as string);
+    if (draftIds.length) await supabaseAdmin.from('drafts').delete().in('id', draftIds);
+  }
+
+  if (resolved) {
+    await supabaseAdmin.from('activity_log').insert({
+      org_id: orgId,
+      action: 'followups.resolved',
+      entity: 'follow_ups',
+      meta: { done: done.size, sent: sent.size },
+    });
+  }
+  return resolved;
+}
+
 /**
  * Scan an org for overdue/quiet items, raise follow-ups (deduped), and
  * draft Gmail messages where a recipient is known. Nothing is sent.
  */
 export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
   if (!supabaseAdmin) return { ok: false, reason: 'supabase_not_configured', raised: 0, drafted: 0 };
+
+  // Clear the answered ones first: the dedupe below skips a trigger that
+  // already has an open follow-up, so a stale row would otherwise suppress
+  // the fresh nudge the studio actually needs.
+  const resolved = await resolveFollowUps(orgId);
 
   const { data: org } = await supabaseAdmin
     .from('organizations')
@@ -383,13 +577,19 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
   let drafted = 0;
 
   for (const t of triggers) {
-    // Dedupe against an existing open follow-up of the same kind.
+    // Dedupe against an existing open follow-up of the same kind — and
+    // against one recently marked sent, which is new. A nudge the studio
+    // posted from Gmail now closes itself, and without this the engine would
+    // raise the identical chase again the following night: a vendor who
+    // never confirms would earn a fresh draft every 24 hours. Wait out the
+    // same silence window before asking again.
+    const sentCutoff = daysAgoIso(vendorDays);
     const dedupe = supabaseAdmin
       .from('follow_ups')
       .select('id')
       .eq('org_id', orgId)
       .eq('type', t.type)
-      .in('status', ['open', 'drafted']);
+      .or(`status.in.(open,drafted),and(status.eq.sent,updated_at.gte.${sentCutoff})`);
     if (t.taskId) dedupe.eq('task_id', t.taskId);
     else if (t.projectId) dedupe.eq('project_id', t.projectId);
     if (!t.taskId && t.vendorId) dedupe.eq('vendor_id', t.vendorId);
@@ -472,8 +672,8 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
     org_id: orgId,
     action: 'followups.run',
     entity: 'follow_ups',
-    meta: { raised, drafted },
+    meta: { raised, drafted, resolved },
   });
 
-  return { ok: true, raised, drafted };
+  return { ok: true, raised, drafted, resolved };
 }

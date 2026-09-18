@@ -32,7 +32,7 @@ const catTone: Record<PromptCategory, 'brass' | 'good' | 'warn' | 'neutral'> = {
  * project state runs to paragraphs, and a one-line box hides it.
  */
 const LONG_FORM =
-  /brief|direction|selection|state|notes|presentation|plan|elevation|design|hours|material|supplied|spec|inspiration|request|condition|item|option/i;
+  /brief|direction|selection|state|notes|presentation|plan|elevation|design|hours|material|supplied|spec|inspiration|request|condition|item|option|address|terms|ship_to|memo|contact/i;
 
 function rowsFor(key: string, label: string): number {
   return LONG_FORM.test(key) || LONG_FORM.test(label) ? 4 : 1;
@@ -45,7 +45,9 @@ function RunModal({ prompt, onClose }: { prompt: Prompt; onClose: () => void }) 
   const [showTemplate, setShowTemplate] = useState(false);
   const run = useRunPrompt();
   const draft = useCreateDraft();
-  const { data: projects } = useProjects();
+  // Archived jobs are finished: nothing is drafted against them.
+  const { data: allProjects } = useProjects();
+  const projects = allProjects.filter((p) => !p.archived);
 
   // Rendering: only some prompts make a picture, and only when the studio
   // has an image key. Both are answered by one call, cached for the session.
@@ -253,12 +255,19 @@ function RunModal({ prompt, onClose }: { prompt: Prompt; onClose: () => void }) 
             {projects.length > 0 && (
               <label className="block">
                 <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-faint">
-                  Save to project (optional)
+                  Project (optional)
                 </span>
                 <select value={projectId} onChange={(e) => setProjectId(e.target.value)} className="input w-full">
                   <option value="">— none —</option>
                   {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
+                {/* It files the run, but it also answers the run: the client,
+                    the vendor contact and the PO numbers come from the project
+                    rather than being left as blanks to fill in by hand. */}
+                <span className="mt-1 block text-[12px] leading-relaxed text-ink-faint">
+                  Picks up the client, vendor contact and existing PO numbers from the studio's records, and files
+                  the run against the project.
+                </span>
               </label>
             )}
           </div>

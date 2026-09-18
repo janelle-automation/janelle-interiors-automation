@@ -12,7 +12,7 @@ import {
 import { PageHeading, Card, Pill, shortDate } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import {
-  useAddSubtask, useBackfillTasks, useTaskDetail, useTasks, useTeam, useUpdateTask,
+  useAddSubtask, useBackfillTasks, useDeleteTask, useTaskDetail, useTasks, useTeam, useUpdateTask,
   type TaskView, type TeamMember,
 } from '../lib/queries';
 
@@ -318,6 +318,7 @@ const BoardCard = memo(function BoardCard({
   onAssign,
   onDue,
   onOpen,
+  onDelete,
 }: {
   t: TaskView;
   mayEdit: boolean;
@@ -326,6 +327,8 @@ const BoardCard = memo(function BoardCard({
   onAssign: (id: string, assignedTo: string | null) => void;
   onDue: (id: string, due: string | null) => void;
   onOpen: (id: string) => void;
+  /** Absent when this role may not delete tasks. */
+  onDelete?: (t: TaskView) => void;
 }) {
   const unowned = !t.assignedTo;
   return (
@@ -345,6 +348,27 @@ const BoardCard = memo(function BoardCard({
       <div className="mb-1.5 flex items-center gap-2">
         <Pill tone={tone[t.kind]}>{TASK_KIND_LABELS[t.kind]}</Pill>
         {t.overdue && <Pill tone="crit">Overdue</Pill>}
+        {/* The board says these are raised from email. A card that was not
+            is the exception, and worth being able to see at a glance rather
+            than having to open it. */}
+        {!t.fromEmail && <Pill tone="neutral">Added by hand</Pill>}
+
+        {onDelete && (
+          <button
+            type="button"
+            aria-label={`Delete "${t.title}"`}
+            title="Delete this task"
+            className="focusable ml-auto rounded px-1 text-[13px] leading-none text-ink-faint hover:text-crit"
+            draggable={false}
+            onDragStart={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(t);
+            }}
+          >
+            ✕
+          </button>
+        )}
       </div>
 
       <p className="text-[13.5px] font-medium leading-snug text-ink">{t.title}</p>
@@ -421,6 +445,7 @@ function Board({
   onAssign,
   onDue,
   onOpen,
+  onDelete,
 }: {
   tasks: TaskView[];
   team: TeamMember[];
@@ -429,6 +454,7 @@ function Board({
   onAssign: (id: string, assignedTo: string | null) => void;
   onDue: (id: string, due: string | null) => void;
   onOpen: (id: string) => void;
+  onDelete?: (t: TaskView) => void;
 }) {
   const dragged = useRef<string | null>(null);
   const [over, setOver] = useState<TaskStatus | null>(null);
@@ -502,6 +528,7 @@ function Board({
                   onAssign={onAssign}
                   onDue={onDue}
                   onOpen={onOpen}
+                  onDelete={onDelete}
                 />
               ))}
               {items.length === 0 && (
@@ -524,8 +551,9 @@ export default function Tasks() {
   const { data: tasks, isLoading } = useTasks();
   const { data: team } = useTeam();
   const update = useUpdateTask();
+  const remove = useDeleteTask();
   const backfill = useBackfillTasks();
-  const { user } = useAuth();
+  const { user, may } = useAuth();
   const [showDone, setShowDone] = useState(false);
   // Which task's detail panel is open, if any.
   //
@@ -582,6 +610,18 @@ export default function Tasks() {
    *  supervisor can move work between other people. */
   const mayEdit = (assignedTo: string | null) =>
     supervisor || !assignedTo || assignedTo === user?.id;
+
+  /**
+   * Removing a task for good is the studio's decision, not a teammate's —
+   * the server holds the same rule, this only decides whether to offer it.
+   * Confirmed first: there is no undo, and the card sits under the cursor
+   * during a drag.
+   */
+  const mayDelete = may('tasks', 'delete');
+  const onDelete = (t: TaskView) => {
+    if (!window.confirm(`Delete "${t.title}"? This cannot be undone.`)) return;
+    remove.mutate(t.id);
+  };
 
   return (
     <>
@@ -640,6 +680,7 @@ export default function Tasks() {
               onAssign={(id, assigned_to) => update.mutate({ id, assigned_to })}
               onDue={(id, due_date) => update.mutate({ id, due_date })}
               onOpen={setOpenTask}
+              onDelete={mayDelete ? onDelete : undefined}
             />
           )}
           {update.isError && (

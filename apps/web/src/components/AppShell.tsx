@@ -5,53 +5,80 @@ import { useAuth } from '../context/AuthContext';
 import { useFollowUps, useDrafts, ageFrom } from '../lib/queries';
 import { useAssistant } from '../context/AssistantContext';
 import { AssistantLauncher, AssistantPanel } from './AssistantPanel';
-import { ASSISTANT_NAME, ROLE_LABELS } from '@janelle/shared';
+import { ASSISTANT_NAME, ROLE_LABELS, canSupervise, type Resource } from '@janelle/shared';
 import {
   IconDashboard, IconProjects, IconVendors, IconInbox, IconDoc,
   IconPrompt, IconBell, IconTask, IconAssistant, IconTeam, IconKey, IconReport, IconActivity, IconSettings, IconSun, IconMoon,
   IconLogout, IconArrow,
 } from './icons';
 
-type NavItem = { to: string; label: string; Icon: typeof IconDashboard; end?: boolean };
+type NavItem = {
+  to: string;
+  label: string;
+  Icon: typeof IconDashboard;
+  end?: boolean;
+  /** The module this page is. Hidden when the role may not view it. */
+  needs?: Resource;
+  /**
+   * For a screen that exists to CHANGE something rather than to read it.
+   *
+   * Team & roles and Permissions are administration, and every role can view
+   * both by default — which is why a designer saw the whole Admin section.
+   * Gating them on the ability to view was the wrong test: the roster itself
+   * has to stay readable (it is where assignee names come from everywhere
+   * else), so what decides is whether this person can change it.
+   */
+  needsWrite?: Resource;
+  /** Supervisors only — the audit trail, per SUPERVISOR_ROLES. */
+  supervisorOnly?: boolean;
+  /**
+   * The principal's alone, whatever the permission matrix says.
+   *
+   * Permissions is the module that grants every other module. Gating it on a
+   * cell inside itself would let it be handed to someone else, and the point
+   * of it being the owner's is that it cannot be.
+   */
+  principalOnly?: boolean;
+};
 
 const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: 'Studio',
     items: [
       { to: '/', label: 'Dashboard', Icon: IconDashboard, end: true },
-      { to: '/projects', label: 'Projects', Icon: IconProjects },
-      { to: '/vendors', label: 'Vendors & POs', Icon: IconVendors },
+      { to: '/projects', label: 'Projects', Icon: IconProjects, needs: 'projects' },
+      { to: '/vendors', label: 'Vendors & POs', Icon: IconVendors, needs: 'vendors' },
     ],
   },
   {
     title: 'Intelligence',
     items: [
-      { to: '/inbox', label: 'Inbox', Icon: IconInbox },
-      { to: '/documents', label: 'Documents', Icon: IconDoc },
-      { to: '/prompts', label: 'Prompt Studio', Icon: IconPrompt },
+      { to: '/inbox', label: 'Inbox', Icon: IconInbox, needs: 'emails' },
+      { to: '/documents', label: 'Documents', Icon: IconDoc, needs: 'documents' },
+      { to: '/prompts', label: 'Prompt Studio', Icon: IconPrompt, needs: 'prompts' },
     ],
   },
   {
     title: 'Automation',
     items: [
       { to: '/assistant', label: ASSISTANT_NAME, Icon: IconAssistant },
-      { to: '/tasks', label: 'Tasks', Icon: IconTask },
-      { to: '/follow-ups', label: 'Follow-ups', Icon: IconBell },
-      { to: '/drafts', label: 'Drafts', Icon: IconDoc },
-      { to: '/reports', label: 'Reports', Icon: IconReport },
-      { to: '/activity', label: 'Audit Log', Icon: IconActivity },
+      { to: '/tasks', label: 'Tasks', Icon: IconTask, needs: 'tasks' },
+      { to: '/follow-ups', label: 'Follow-ups', Icon: IconBell, needs: 'follow_ups' },
+      { to: '/drafts', label: 'Drafts', Icon: IconDoc, needs: 'drafts' },
+      { to: '/reports', label: 'Reports', Icon: IconReport, needs: 'reports' },
+      { to: '/activity', label: 'Audit Log', Icon: IconActivity, supervisorOnly: true },
     ],
   },
   {
     title: 'Admin',
     items: [
-      { to: '/team', label: 'Team & Roles', Icon: IconTeam },
-      { to: '/permissions', label: 'Permissions', Icon: IconKey },
+      { to: '/team', label: 'Team & Roles', Icon: IconTeam, needsWrite: 'team' },
+      { to: '/permissions', label: 'Permissions', Icon: IconKey, principalOnly: true },
     ],
   },
 ];
 
-const SETTINGS_ITEM: NavItem = { to: '/settings', label: 'Settings', Icon: IconSettings };
+const SETTINGS_ITEM: NavItem = { to: '/settings', label: 'Settings', Icon: IconSettings, needs: 'settings' };
 
 const PAGE_TITLES: Record<string, string> = {
   '/': 'Dashboard',
@@ -140,6 +167,19 @@ function DoubleChevron({ flipped }: { flipped: boolean }) {
 }
 
 function Sidebar({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: () => void }) {
+  // A module the studio has closed to this role is not shown at all — a link
+  // that always ends in "Insufficient permissions" is worse than no link.
+  const { may, user } = useAuth();
+  const supervisor = canSupervise(user?.role ?? null);
+  const allowed = (i: NavItem) =>
+    (!i.needs || may(i.needs)) &&
+    (!i.needsWrite || may(i.needsWrite, 'update')) &&
+    (!i.supervisorOnly || supervisor) &&
+    (!i.principalOnly || user?.role === 'principal');
+  const groups = NAV_GROUPS
+    .map((g) => ({ ...g, items: g.items.filter(allowed) }))
+    .filter((g) => g.items.length > 0);
+
   return (
     <div className="flex h-full flex-col bg-nav">
       <div className={`flex items-center border-b border-white/10 px-3 py-3 ${collapsed ? 'justify-center' : ''}`}>
@@ -147,7 +187,7 @@ function Sidebar({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: (
       </div>
 
       <nav className={`flex-1 space-y-5 overflow-y-auto px-3 pt-4 ${collapsed ? 'space-y-3' : ''}`}>
-        {NAV_GROUPS.map((g) => (
+        {groups.map((g) => (
           <div key={g.title}>
             {collapsed ? (
               <div className="mx-auto mb-2 h-px w-6 bg-white/10" aria-hidden="true" />
@@ -163,9 +203,11 @@ function Sidebar({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: (
         ))}
       </nav>
 
-      <div className="border-t border-white/10 px-3 py-3">
-        <NavItemLink item={SETTINGS_ITEM} collapsed={collapsed} onNavigate={onNavigate} />
-      </div>
+      {may('settings') && (
+        <div className="border-t border-white/10 px-3 py-3">
+          <NavItemLink item={SETTINGS_ITEM} collapsed={collapsed} onNavigate={onNavigate} />
+        </div>
+      )}
     </div>
   );
 }

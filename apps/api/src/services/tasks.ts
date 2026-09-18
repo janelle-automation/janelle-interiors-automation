@@ -10,7 +10,8 @@ import { loadStudioNames } from '../lib/studioNames.js';
 import { STUDIO_TEAM, isAutomatedAddress, isStudioAddress, isStudioMailbox } from '../lib/studioTeam.js';
 import { matchProjectId } from './promote.js';
 import { matchPerson } from './proposals.js';
-import type { ParsedEmail } from './gmail.js';
+import { gmailFor, readSentMail, type ParsedEmail } from './gmail.js';
+import { orgSourceUserId } from '../lib/tokens.js';
 
 /**
  * Classes that never imply internal work.
@@ -383,6 +384,111 @@ export async function mergeDuplicateTasks(orgId: string): Promise<TaskDedupe> {
  * Safe to run repeatedly: emails that already have a task are skipped, and
  * the unique index is the backstop.
  */
+// ────────────────────────────────────────────────────────────
+//  Open → In progress, from the conversation itself
+//
+//  Every task on the board sat in Open, because the only thing that ever
+//  moved one was a person changing the dropdown. A task is raised from an
+//  email; the moment anybody writes on that thread again — the studio
+//  answering it, or the vendor coming back — the work has started, and the
+//  board should say so rather than waiting to be told.
+//
+//  Deliberately one-way and only out of `open`: blocked, done and cancelled
+//  are judgements a person made, and a stray reply must not undo them.
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Move tasks whose source thread has moved to `in_progress`.
+ *
+ * Returns how many were advanced. Never throws: this runs behind ingestion
+ * and must not be able to fail it.
+ */
+export async function advanceActiveTasks(orgId: string): Promise<number> {
+  if (!supabaseAdmin) return 0;
+
+  try {
+    const { data: openTasks } = await supabaseAdmin
+      .from('tasks')
+      .select('id, title, source_email_id, created_at')
+      .eq('org_id', orgId)
+      .eq('status', 'open')
+      .not('source_email_id', 'is', null);
+
+    const tasks = (openTasks ?? []) as unknown as {
+      id: string; title: string; source_email_id: string; created_at: string;
+    }[];
+    if (!tasks.length) return 0;
+
+    // The thread each task came out of.
+    const { data: sources } = await supabaseAdmin
+      .from('emails')
+      .select('id, thread_id')
+      .in('id', tasks.map((t) => t.source_email_id));
+    const threadOf = new Map(
+      ((sources ?? []) as { id: string; thread_id: string | null }[])
+        .filter((e) => e.thread_id)
+        .map((e) => [e.id, e.thread_id as string]),
+    );
+
+    const threads = [...new Set([...threadOf.values()])];
+    if (!threads.length) return 0;
+
+    // Anything ingested on those threads since — a reply in, or another
+    // message in the conversation.
+    const { data: later } = await supabaseAdmin
+      .from('emails')
+      .select('thread_id, received_at')
+      .eq('org_id', orgId)
+      .in('thread_id', threads);
+    const lastInbound = new Map<string, string>();
+    for (const row of (later ?? []) as { thread_id: string | null; received_at: string | null }[]) {
+      if (!row.thread_id || !row.received_at) continue;
+      const seen = lastInbound.get(row.thread_id);
+      if (!seen || seen < row.received_at) lastInbound.set(row.thread_id, row.received_at);
+    }
+
+    // And the half ingestion cannot see: the studio replying from Gmail,
+    // which is the most direct evidence there is that someone picked the
+    // task up.
+    let sentOnThread = new Map<string, string>();
+    try {
+      const oldest = tasks.reduce((min, t) => (t.created_at < min ? t.created_at : min), tasks[0].created_at);
+      const days = Math.ceil((Date.now() - new Date(oldest).getTime()) / 86400_000) + 1;
+      const userId = await orgSourceUserId(orgId);
+      const gmail = userId ? await gmailFor(userId) : null;
+      if (gmail) sentOnThread = (await readSentMail(gmail, Math.min(days, 30))).byThread;
+    } catch (err) {
+      console.error('[tasks] sent-mail check failed', (err as Error).message);
+    }
+
+    const moving = tasks.filter((t) => {
+      const thread = threadOf.get(t.source_email_id);
+      if (!thread) return false;
+      const replied = sentOnThread.get(thread);
+      const arrived = lastInbound.get(thread);
+      return (!!replied && replied > t.created_at) || (!!arrived && arrived > t.created_at);
+    });
+    if (!moving.length) return 0;
+
+    await supabaseAdmin
+      .from('tasks')
+      .update({ status: 'in_progress' })
+      .in('id', moving.map((t) => t.id));
+
+    await supabaseAdmin.from('activity_log').insert({
+      org_id: orgId,
+      action: 'tasks.advanced',
+      entity: 'tasks',
+      meta: { count: moving.length, titles: moving.slice(0, 5).map((t) => t.title) },
+    });
+
+    return moving.length;
+  } catch (err) {
+    console.error('[tasks] advancing failed', (err as Error).message);
+    return 0;
+  }
+}
+
 export async function backfillTasks(
   orgId: string,
   limit = 50,

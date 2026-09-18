@@ -1,10 +1,15 @@
 import { Router } from 'express';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requireRole, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { runReport } from '../services/report.js';
 
 export const reportsRouter = Router();
 reportsRouter.use(requireAuth);
+// Closing a module to a role has to mean something: until now nothing
+// anywhere checked `read`, so revoking it would have been a switch that
+// changed nothing. No view, no module — writes are still checked
+// separately below.
+reportsRouter.use(requirePermission('reports', 'read'));
 
 // List past reports, newest first.
 reportsRouter.get(

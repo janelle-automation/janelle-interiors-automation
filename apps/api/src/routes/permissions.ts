@@ -8,7 +8,7 @@ import {
   isLockedPermission,
   type UserRole,
 } from '@janelle/shared';
-import { requireAuth, requirePermission } from '../middleware/auth.js';
+import { requireAuth, requirePermission, requireRole } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { listOverrides, validateCell, writeOverride } from '../lib/permissions.js';
@@ -17,10 +17,20 @@ export const permissionsRouter = Router();
 permissionsRouter.use(requireAuth);
 
 /**
+ * The principal's module, and nobody else's.
+ *
+ * This used to be readable by the whole org, on the reasoning that everyone
+ * should be able to see the rules they work under — which is defensible, but
+ * it is not what this studio wants: who may do what is the owner's business,
+ * and a designer reading the full matrix learns exactly where the gaps are.
+ * Hard-wired to the role rather than to a permission cell, so it cannot be
+ * granted away from the one person who can grant it back.
+ */
+permissionsRouter.use(requireRole('principal'));
+
+/**
  * The permission matrix as it actually stands: the default for every cell,
  * the studio's override where it has set one, and which cells are locked.
- * Readable by the whole org — everyone should be able to see the rules
- * they work under, even though only a principal may change them.
  */
 permissionsRouter.get(
   '/',

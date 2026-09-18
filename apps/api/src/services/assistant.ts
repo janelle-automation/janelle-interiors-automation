@@ -389,12 +389,16 @@ const TOOLS: Anthropic.Tool[] = [
   {
     name: 'list_projects',
     description:
-      "List the studio's projects with stage, client, target install date AND money: each project's budget, the total value of its purchase orders (on_order), how many POs are open, and how many spec gaps are unresolved. Use for \"what is happening with X\", \"how many projects are in production\", and for any question about cost, value, budget or which project is biggest — sort_by: 'cost' answers that directly.",
+      "List the studio's live projects with stage, client, target install date AND money: each project's budget, the total value of its purchase orders (on_order), how many POs are open, and how many spec gaps are unresolved. Archived projects are left out unless include_archived is set. Use for \"what is happening with X\", \"how many projects are in production\", and for any question about cost, value, budget or which project is biggest — sort_by: 'cost' answers that directly.",
     input_schema: {
       type: 'object',
       properties: {
         search: { type: 'string', description: 'Optional name or client to filter on (case-insensitive substring).' },
         stage: { type: 'string', description: 'Limit to one pipeline stage, e.g. "production".' },
+        include_archived: {
+          type: 'boolean',
+          description: 'Include archived (closed) projects. Only when the person asks about old or finished work.',
+        },
         sort_by: {
           type: 'string',
           enum: ['cost', 'recent', 'install'],
@@ -598,7 +602,7 @@ const TOOLS: Anthropic.Tool[] = [
   {
     name: 'run_studio_prompt',
     description:
-      "Produce design work by running one of the studio's prompts. This WRITES the moodboard, schedule, direction or review — it is how you make something rather than look something up. It needs NO project record: a room and a direction are enough, and a project that does not exist in the system is not a reason to refuse. Fill every input from what the person told you, from what you have read, and otherwise from what a senior designer would assume of a room like that — the prompts themselves say to mark an assumption rather than hide it. Put what comes back in the answer's `document`, whole and unedited.",
+      "Produce studio work by running one of the studio's prompts. This WRITES the moodboard, schedule, direction, review, purchase order or comparison — it is how you make something rather than look something up. It needs NO project record: a room and a direction are enough, and a project that does not exist in the system is not a reason to refuse. Put what comes back in the answer's `document`, whole and unedited.\n\nFILLING THE INPUTS — the rule differs by category, and getting it wrong is costly.\nDESIGN prompts: fill every input from what the person told you, from what you have read, and otherwise from what a senior designer would assume of a room like that. The prompts themselves say to mark an assumption rather than hide it, so an assumed ceiling height is useful work.\nPROCUREMENT and CLIENT prompts (purchase orders, vendor comparisons, FF&E schedules, approval requests): pass ONLY what the person gave you or what you read in the studio's own records. Never supply a PO number, a price, a quantity, a SKU, a lead time, a ship-to address, a date or a vendor contact that was not stated — an invented figure on a purchase order is an order the studio did not place, and an invented price is one it did not agree. Leave the input out entirely and let the prompt mark it TBD; the prompt is written to do that and to list what is missing at the end. If a required input is genuinely unknown, ask the person for it instead of running.",
     input_schema: {
       type: 'object',
       properties: {
@@ -1716,9 +1720,16 @@ async function runTool(
       let q = db
         .from('projects')
         .select('id, name, client_name, stage, status, budget, target_install, updated_at')
+        // Ordered before the cap, or the 60 that survive it are whichever
+        // 60 the database felt like returning.
+        .order('updated_at', { ascending: false })
         .limit(60);
       if (input.search) q = q.or(`name.ilike.${ilike(String(input.search))},client_name.ilike.${ilike(String(input.search))}`);
       if (input.stage) q = q.eq('stage', String(input.stage));
+      // An archived job is finished. It was being counted in "how many
+      // projects do we have" and listed beside live work as though the
+      // studio still owed someone a delivery.
+      if (!input.include_archived) q = q.neq('status', 'archived');
 
       // Money lives on purchase_orders, not projects, so a question about
       // cost is unanswerable without joining them. Aggregated in one pass.
@@ -1759,7 +1770,11 @@ async function runTool(
 
       if (input.limit) list = list.slice(0, Math.max(1, Number(input.limit)));
       return {
-        note: 'All amounts are US dollars. on_order is the total value of the project\'s purchase orders; budget is the separately recorded budget figure and is often not set. To show projects, answer with their refs.',
+        note:
+          'All amounts are US dollars. on_order is the total value of the project\'s purchase orders; budget is the separately recorded budget figure and is often not set. To show projects, answer with their refs.' +
+          (input.include_archived
+            ? ' Archived projects are included here — say which are archived.'
+            : ' Archived projects are excluded; this is the live pipeline.'),
         total: list.length,
         projects: list.map((p) => {
           const row = p as unknown as Parameters<typeof projectRow>[0];
@@ -1809,16 +1824,22 @@ async function runTool(
 
     case 'get_project_status': {
       const needle = ilike(String(input.name ?? ''));
-      const projects = await rows(
+      // More than one, then pick: a bare "OVIS" matches OVIS GOLF, OVIS
+      // Cabana and a closed job, and taking whichever row came back first
+      // answered about the wrong one. Live work wins over archived.
+      const matches = (await rows(
         db
           .from('projects')
           .select('id, name, client_name, stage, status, budget, target_install, notes')
           .or(`name.ilike.${needle},client_name.ilike.${needle}`)
-          .limit(1),
+          .order('updated_at', { ascending: false })
+          .limit(5),
         'projects',
-      );
-      const project = projects[0] as { id: string } | undefined;
+      )) as { id: string; name: string; status: string }[];
+      const live = matches.filter((p) => p.status !== 'archived');
+      const project = (live[0] ?? matches[0]) as { id: string } | undefined;
       if (!project) return { found: false, note: 'No project matched that name.' };
+      const alsoMatched = (live.length ? live : matches).slice(1).map((p) => p.name);
 
       const [pos, tasks, gaps, emails] = await Promise.all([
         rows(db.from('purchase_orders').select('po_number, status, amount, eta').eq('project_id', project.id), 'purchase orders'),
@@ -1828,7 +1849,10 @@ async function runTool(
       ]);
       return {
         found: true,
-        project: projects[0],
+        project,
+        note: alsoMatched.length
+          ? `That name also matches ${alsoMatched.join(', ')} — say which one this answer is about.`
+          : undefined,
         purchase_orders: pos,
         open_tasks: tasks.map((t) => {
           const r = t as unknown as { title: string; kind: string; status: string; due_date: string | null; profiles: { full_name: string | null } | null };
@@ -2320,7 +2344,7 @@ async function runTool(
 
       const wanted = String(input.prompt ?? '').trim();
       const library = (await rows(
-        db.from('prompts').select('id, title, template, variables'),
+        db.from('prompts').select('id, title, category, template, variables'),
         'prompts',
       )) as unknown as {
         id: string; title: string; template: string;
@@ -2454,10 +2478,10 @@ async function runTool(
 
       const wanted = String(input.prompt ?? '').trim();
       const library = (await rows(
-        db.from('prompts').select('id, title, template, variables'),
+        db.from('prompts').select('id, title, category, template, variables'),
         'prompts',
       )) as unknown as {
-        id: string; title: string; template: string;
+        id: string; title: string; category: string | null; template: string;
         variables: { key: string; label: string; required?: boolean }[] | null;
       }[];
 
@@ -2484,6 +2508,12 @@ async function runTool(
           note: 'Ask the person for these before running it again — do not invent them.',
         };
       }
+
+      // Said again at the moment of the run, not only in the tool's
+      // description. The description is read once with every other tool's;
+      // this arrives attached to the purchase order actually being written,
+      // which is where a fabricated price or PO number would do its damage.
+      const ordersMoney = prompt.category === 'procurement' || prompt.category === 'client';
 
       let output: string;
       try {
@@ -2513,7 +2543,11 @@ async function runTool(
         filled_from: Object.keys(values),
         // Named so the model does not paraphrase it into `lead`.
         document: output,
-        instruction: "This is the work. Put it in the answer's `document` unchanged, title it with the prompt's name, and keep `lead` to one sentence saying what you made.",
+        instruction:
+          "This is the work. Put it in the answer's `document` unchanged, title it with the prompt's name, and keep `lead` to one sentence saying what you made." +
+          (ordersMoney
+            ? ' This one commits the studio to money: do not fill in, correct or tidy any TBD it contains, and do not add a figure, a number or a date of your own when you present it. Where it says something is missing, say so too.'
+            : ''),
       };
     }
 

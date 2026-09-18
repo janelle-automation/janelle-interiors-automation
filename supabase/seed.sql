@@ -34,15 +34,11 @@ begin
        'Draft a material/finish specification for {{item}} on {{project}}. Include material, finish, dimensions, and any note the maker needs. Flag anything still unknown.',
        '[{"key":"item","label":"Item","required":true},{"key":"project","label":"Project","required":true}]'),
 
-      (org, 'Purchase order draft', 'procurement',
-       'Compose a clean PO message to a vendor from the item list.',
-       'Draft a purchase order email to {{vendor}} for {{project}}. Items:\n{{items}}\nRequest written confirmation of price, lead time, and ship date.',
-       '[{"key":"vendor","label":"Vendor","required":true},{"key":"project","label":"Project","required":true},{"key":"items","label":"Items","required":true}]'),
-
-      (org, 'Vendor option comparison', 'procurement',
-       'Compare quotes and recommend one.',
-       'Compare these vendor options for {{item}} and recommend one for the client, weighing price, lead time, and quality:\n{{options}}',
-       '[{"key":"item","label":"Item","required":true},{"key":"options","label":"Options","required":true}]'),
+      -- 'Purchase order draft' and 'Vendor option comparison' used to sit here.
+      -- They now live in scripts/prompt-library.mjs with the rest of the
+      -- procurement library, because a purchase order needs an order number,
+      -- a sidemark and a ship-to, and two copies of that prompt drift apart.
+      -- Load them with `npm run seed-prompts`.
 
       (org, 'Client approval request', 'client',
        'Ask the client to approve a selection, clearly and briefly.',

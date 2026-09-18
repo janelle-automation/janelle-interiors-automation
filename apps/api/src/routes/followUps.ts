@@ -5,15 +5,28 @@ import { runFollowUps } from '../services/followups.js';
 
 export const followUpsRouter = Router();
 followUpsRouter.use(requireAuth);
+// Closing a module to a role has to mean something: until now nothing
+// anywhere checked `read`, so revoking it would have been a switch that
+// changed nothing. No view, no module — writes are still checked
+// separately below.
+followUpsRouter.use(requirePermission('follow_ups', 'read'));
 
-// List follow-ups, newest first, with related names.
+// The review queue, newest first, with related names.
+//
+// Only what is still waiting on somebody. The heading says "Awaiting your
+// review" and this returned every follow-up ever raised, so a nudge marked
+// done — by a person or by the engine noticing it had been answered — stayed
+// on the page exactly as before. `?status=all` for the whole history.
 followUpsRouter.get(
   '/',
   asyncHandler(async (req, res) => {
-    const { data, error } = await req.auth!.db
+    let q = req.auth!.db
       .from('follow_ups')
       .select('id, type, project_id, vendor_id, target, reason, due_date, status, draft_id, created_at, projects(name), vendors(name)')
       .order('created_at', { ascending: false });
+    if (String(req.query.status ?? '') !== 'all') q = q.in('status', ['open', 'drafted']);
+
+    const { data, error } = await q;
     if (error) throw new Error(error.message);
     res.json({ data });
   }),

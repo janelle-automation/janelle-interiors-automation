@@ -16,6 +16,8 @@ export interface ProjectView {
   /** Total value of the project's purchase orders. */
   committed: number;
   specGaps: number;
+  /** Closed work. Kept, but never mixed in with the live pipeline unasked. */
+  archived: boolean;
 }
 export interface PoView {
   id: string; po: string; vendor: string; project: string;
@@ -117,6 +119,7 @@ export function useDashboard() {
 // ── Projects ────────────────────────────────────────────────
 interface ProjectRow {
   id: string; name: string; client_name: string | null; stage: ProjectStage;
+  status: string;
   budget: number | null; target_install: string | null;
   open_pos: number; po_total: number; spec_gaps: number;
 }
@@ -129,6 +132,7 @@ export function useProjects() {
         id: r.id, name: r.name, client: r.client_name ?? '—', stage: r.stage,
         budget: r.budget, install: r.target_install ?? '',
         openPOs: r.open_pos ?? 0, committed: r.po_total ?? 0, specGaps: r.spec_gaps ?? 0,
+        archived: r.status === 'archived',
       }));
     },
   });
@@ -140,7 +144,11 @@ export interface ProjectDetail {
     id: string; name: string; client_name: string | null; stage: ProjectStage;
     status: string; budget: number | null; target_install: string | null; notes: string | null;
   };
-  purchase_orders: { id: string; po_number: string | null; amount: number | null; status: string; eta: string | null }[];
+  purchase_orders: {
+    id: string; po_number: string | null; amount: number | null; status: string; eta: string | null;
+    vendors: { name: string } | null;
+    line_items: { id: string }[] | null;
+  }[];
   spec_gaps: { id: string; item: string; missing_fields: string[] }[];
   emails: { id: string; subject: string | null; class: string; received_at: string | null; from_addr: string | null }[];
   documents: { id: string; type: string; parsed_json: { vendor?: string; total?: number } | null; created_at: string }[];
@@ -255,10 +263,17 @@ export interface TaskView {
   seat: Seat | null;
   /** Past its due date and still live — the board tints these. */
   overdue: boolean;
+  /**
+   * Whether an email raised this task. Every task on the board should have
+   * one — they are read out of the studio's mail — so a card without it was
+   * added by hand and is worth being able to tell apart.
+   */
+  fromEmail: boolean;
 }
 interface TaskRow {
   id: string; title: string; detail: string | null; kind: TaskKind; status: TaskStatus;
   assigned_to: string | null; due_date: string | null; created_at: string;
+  source_email_id?: string | null;
   next_step?: string | null; seat?: Seat | null;
   projects: { name: string } | null; vendors: { name: string } | null;
   profiles: { full_name: string | null } | null;
@@ -280,6 +295,7 @@ export function useTasks() {
           !!r.due_date &&
           r.due_date < new Date().toISOString().slice(0, 10) &&
           !['done', 'cancelled'].includes(r.status),
+        fromEmail: Boolean(r.source_email_id),
       }));
     },
   });
@@ -914,6 +930,33 @@ export function useUpdateTask() {
 
     // Reconcile with the server either way — the optimistic row is a guess
     // at what it stored, not a replacement for it.
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['tasks'] });
+      qc.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+}
+
+/**
+ * Delete a task outright.
+ *
+ * Principals and coordinators only, by default — the server decides, this
+ * just asks. Optimistic, because a card that lingers after you removed it
+ * reads as a failure.
+ */
+export function useDeleteTask() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api(`/tasks/${id}`, { method: 'DELETE' }),
+    onMutate: async (id) => {
+      await qc.cancelQueries({ queryKey: ['tasks'] });
+      const previous = qc.getQueryData<TaskView[]>(['tasks']);
+      qc.setQueryData<TaskView[]>(['tasks'], (old) => (old ?? []).filter((t) => t.id !== id));
+      return { previous };
+    },
+    onError: (_err, _id, ctx) => {
+      if (ctx?.previous) qc.setQueryData(['tasks'], ctx.previous);
+    },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['tasks'] });
       qc.invalidateQueries({ queryKey: ['dashboard'] });

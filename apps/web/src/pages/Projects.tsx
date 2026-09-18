@@ -1,6 +1,6 @@
 import { Fragment, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { PageHeading, Card, StageBadge, money, shortDate } from '../components/ui';
+import { PageHeading, Card, Pill, StageBadge, money, shortDate } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import { useImportHouzz, useProjects } from '../lib/queries';
 import { PROJECT_STAGES, STAGE_LABELS, canSupervise, type ProjectStage } from '@janelle/shared';
@@ -95,9 +95,16 @@ function HouzzImport() {
 }
 
 export default function Projects() {
-  const { data: projects, isLoading } = useProjects();
+  const { data: allProjects, isLoading } = useProjects();
   const { user } = useAuth();
   const [open, setOpen] = useState<Set<string>>(new Set());
+
+  // Closed jobs were sitting in the middle of the list looking exactly like
+  // live ones — five archived projects reading as work in hand. They are
+  // still here, behind a count, and labelled when shown.
+  const [showArchived, setShowArchived] = useState(false);
+  const archivedCount = allProjects.filter((p) => p.archived).length;
+  const projects = showArchived ? allProjects : allProjects.filter((p) => !p.archived);
 
   const supervisor = canSupervise(user?.role ?? null);
 
@@ -112,12 +119,21 @@ export default function Projects() {
     <>
       <PageHeading
         title="Projects"
-        sub="Every project across the studio pipeline. Expand a row to see its progress, or open it for POs, spec gaps and timeline."
+        sub="The live studio pipeline. Expand a row to see its progress, or open it for POs, spec gaps and timeline."
         action={supervisor && <HouzzImport />}
       />
 
       {isLoading && <div className="py-12 text-center text-[13px] font-medium text-ink-faint">Loading projects…</div>}
-      {!isLoading && projects.length === 0 && (
+
+      {!isLoading && archivedCount > 0 && (
+        <div className="mb-3 flex justify-end">
+          <button type="button" onClick={() => setShowArchived((v) => !v)} className="btn-secondary btn-sm">
+            {showArchived ? 'Hide archived' : `Show ${archivedCount} archived`}
+          </button>
+        </div>
+      )}
+
+      {!isLoading && allProjects.length === 0 && (
         <div className="rounded-xl border border-dashed border-line py-14 text-center text-[14px] text-ink-soft">
           No projects yet. They appear here as the system reads project email — or export your list from
           Houzz Pro (Projects → Export) and use “Import from Houzz” above.
@@ -152,6 +168,7 @@ export default function Projects() {
                           <span className="inline-flex items-center gap-2">
                             <span className="text-ink-faint"><Chevron open={isOpen} /></span>
                             {p.name}
+                            {p.archived && <Pill tone="neutral">Archived</Pill>}
                           </span>
                         </td>
                         <td className="px-5 py-3">{p.client}</td>

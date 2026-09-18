@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
+import Anthropic, { toFile } from '@anthropic-ai/sdk';
 import { estimateCostUsd, type AiFeature } from '@janelle/shared';
 import { env, isAnthropicConfigured } from '../env.js';
 import { UserFacingError } from '../middleware/error.js';
@@ -107,6 +107,83 @@ export async function clientFor(
 /** Whether this studio can call Claude at all. */
 export async function isAiReady(orgId?: string | null): Promise<boolean> {
   return Boolean(await clientFor(orgId));
+}
+
+/** The beta flag the installed SDK's Files API still requires. */
+const FILES_BETA = 'files-api-2025-04-14';
+
+/**
+ * Hand a document to Claude by reference instead of by value.
+ *
+ * A base64 document rides inside the request body, which caps what can be
+ * read: the encoding is a third larger than the file, the SDK builds a JSON
+ * string around that, and the whole thing has to fit in the 32MB request
+ * limit and in the function's memory at once. Uploading first sidesteps all
+ * of it — the file goes up as bytes, and the request that reads it carries
+ * only an id.
+ *
+ * Returns null when Claude is not configured, so callers fall back to the
+ * inline path rather than failing.
+ */
+export async function uploadDocument(
+  bytes: Buffer,
+  filename: string,
+  mimeType: string,
+  orgId?: string | null,
+): Promise<string | null> {
+  const resolved = await clientFor(orgId);
+  if (!resolved) return null;
+  // `client.beta.files` on the installed SDK (0.68): the Files API is out of
+ // beta upstream, but the stable `client.files` namespace only exists in
+ // later versions, and moving the dependency is not this change's business.
+  const file = await resolved.client.beta.files.upload({
+    file: await toFile(bytes, filename, { type: mimeType }),
+    betas: [FILES_BETA],
+  });
+  return file.id;
+}
+
+/**
+ * Delete uploads left behind by a pass that did not finish.
+ *
+ * Each upload is deleted by the read that made it, but only when that read
+ * returns — a pass killed mid-document (a time budget, a redeploy, a crash)
+ * leaves its file behind, and nothing else ever refers to it. Observed:
+ * after one ingestion two 20MB+ files were still in storage with their
+ * documents already parsed.
+ *
+ * Every upload here is transient by construction, so anything older than the
+ * window is finished with, whatever happened to the pass that made it.
+ * Returns how many were removed. Never throws.
+ */
+export async function sweepStaleUploads(orgId?: string | null, olderThanMs = 3600_000): Promise<number> {
+  try {
+    const resolved = await clientFor(orgId);
+    if (!resolved) return 0;
+    const cutoff = Date.now() - olderThanMs;
+    const listed = await resolved.client.beta.files.list({ betas: [FILES_BETA] });
+    let removed = 0;
+    for (const file of listed.data ?? []) {
+      if (new Date(file.created_at).getTime() > cutoff) continue;
+      await deleteDocument(file.id, orgId);
+      removed++;
+    }
+    if (removed) console.log(`[anthropic] cleared ${removed} leftover upload(s)`);
+    return removed;
+  } catch (err) {
+    console.warn('[anthropic] upload sweep failed', (err as Error).message);
+    return 0;
+  }
+}
+
+/** Remove an uploaded document. Never throws: a leftover file is not an outage. */
+export async function deleteDocument(fileId: string, orgId?: string | null): Promise<void> {
+  try {
+    const resolved = await clientFor(orgId);
+    await resolved?.client.beta.files.delete(fileId, { betas: [FILES_BETA] });
+  } catch (err) {
+    console.warn('[anthropic] could not delete uploaded file', fileId, (err as Error).message);
+  }
 }
 
 export class AnthropicNotConfigured extends Error {
@@ -303,16 +380,29 @@ export async function extractJson<T>(
   system: string,
   user: UserContent,
   ctx: CallContext,
+  /**
+   * Longer than the 25s reading calls get by default.
+   *
+   * That bound is right for an email and wrong for a bid set: a document of
+   * a few hundred pages takes longer to read than a paragraph, and capping
+   * it at 25s would fail every large PDF on the clock — looking exactly
+   * like the size limit that used to skip them.
+   */
+  timeoutMs?: number,
 ): Promise<T | null> {
-  const message = await recorded(ctx, {
-    max_tokens: 4096,
-    // Reading, not writing: the same document should give the same fields
-    // every time. At the default temperature one estimate named its job on
-    // one read and not on the next.
-    temperature: 0,
-    system: `${system}\n\nRespond with ONLY a single JSON object. No prose, no code fences.`,
-    messages: [{ role: 'user', content: user }],
-  });
+  const message = await recorded(
+    ctx,
+    {
+      max_tokens: 4096,
+      // Reading, not writing: the same document should give the same fields
+      // every time. At the default temperature one estimate named its job on
+      // one read and not on the next.
+      temperature: 0,
+      system: `${system}\n\nRespond with ONLY a single JSON object. No prose, no code fences.`,
+      messages: [{ role: 'user', content: user }],
+    },
+    timeoutMs ? { timeoutMs } : undefined,
+  );
   return firstJson<T>(textOf(message));
 }
 

@@ -1,6 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { SEATS, SEAT_KEYS, type EmailClass, type DocumentType, type TaskKind, type Seat } from '@janelle/shared';
-import { extractJson, type CallContext } from './anthropic.js';
+import { deleteDocument, extractJson, uploadDocument, type CallContext } from './anthropic.js';
 import type { ParsedEmail } from './gmail.js';
 import { studioNamesBlock, type StudioNames } from '../lib/studioNames.js';
 
@@ -102,7 +102,7 @@ Return JSON with exactly these keys:
 - "vendor_contact_email": that vendor's own email address as it appears in the email (a From, To or Cc line,
   forwarded headers or a signature). Never the client's, never the studio's; null when the vendor's own
   address does not appear
-- "po_number": a purchase order number if present, else null
+- "po_number": the vendor's or studio's purchase order number, only when the document labels it as one ("PO #", "Purchase Order No.", "Order #"). A quote has no PO number — the studio assigns one when it raises the order — so a quote number, an estimate number, an invoice number, a SKU, a model code, a project name or the word TBD is null, not a PO number. Null unless you are sure.
 - "amount": a total amount as a number if present, else null
 - "dates": array of ISO dates (YYYY-MM-DD) mentioned as ship/ETA/deadline dates
 - "summary": one concise sentence describing the email
@@ -346,7 +346,7 @@ Return JSON with exactly these keys:
 - "confidence": number 0..1
 - "vendor": the supplier that ISSUED a quote, order or invoice, else null — a design presentation or
   drawing set has no vendor
-- "po_number": purchase order number if present, else null
+- "po_number": the vendor's or studio's purchase order number, only when the document labels it as one ("PO #", "Purchase Order No.", "Order #"). A quote has no PO number — the studio assigns one when it raises the order — so a quote number, an estimate number, an invoice number, a SKU, a model code, a project name or the word TBD is null, not a PO number. Null unless you are sure.
 - "total": grand total as a number, else null
 - "order_date": ISO date (YYYY-MM-DD) or null
 - "eta": estimated ship/delivery ISO date or null
@@ -355,18 +355,33 @@ Return JSON with exactly these keys:
 ${PROJECT_NAME_RULES}`;
 
 /**
- * The largest PDF worth reading.
+ * The point at which a PDF is uploaded rather than inlined.
  *
- * Reading one holds the file three times over — the downloaded buffer, its
- * base64 form (a third larger again), and the JSON request body the SDK
- * builds around it. On a 1024MB function a big attachment can exhaust the
- * memory and take the whole invocation down, which reaches the browser as a
- * dropped connection rather than an error, losing everything that pass had
- * read. Claude refuses documents over 32MB anyway, so an oversized file
- * costs the download and the memory and then fails regardless. Quotes and
- * order confirmations are comfortably under this.
+ * A base64 document rides inside the request body, and reading one that way
+ * holds the file three times over — the downloaded buffer, its base64 form
+ * (a third larger again), and the JSON the SDK builds around it. On a 1024MB
+ * function a big attachment can exhaust the memory and take the whole
+ * invocation down, which reaches the browser as a dropped connection rather
+ * than an error, losing everything that pass had read. Quotes and order
+ * confirmations sit comfortably under this and go inline, in one call.
  */
-export const MAX_PDF_BYTES = 12 * 1024 * 1024;
+const INLINE_PDF_BYTES = 12 * 1024 * 1024;
+
+/**
+ * The largest PDF worth reading at all.
+ *
+ * This used to be the inline limit, and anything above it was dropped with a
+ * console warning nobody saw — which is how five Drive files, among them
+ * every Bernthal cabinet bid booklet and the OVI Golf bid set at 19–24MB,
+ * had never once been read. They are exactly the documents worth reading.
+ *
+ * Above the inline threshold the file is uploaded first and the request
+ * carries only its id, so neither the 32MB request limit nor the base64
+ * inflation applies; the Files API itself accepts up to 500MB. What still
+ * costs is the download and the buffer, hence a ceiling — generous enough
+ * for a bid set, low enough that one file cannot take the pass down.
+ */
+export const MAX_PDF_BYTES = 64 * 1024 * 1024;
 
 export async function extractPdf(
   pdf: Buffer,
@@ -378,18 +393,46 @@ export async function extractPdf(
     console.warn(`[extract] skipping ${filename}: ${Math.round(pdf.byteLength / 1e6)}MB is over the read limit`);
     return null;
   }
+  // Uploaded for the big ones, inline for the rest. An upload that fails —
+  // no key, a network fault — falls back to inline, which will itself fail
+  // for an oversized file, and that is the same outcome as before.
+  let fileId: string | null = null;
+  if (pdf.byteLength > INLINE_PDF_BYTES) {
+    try {
+      fileId = await uploadDocument(pdf, filename, 'application/pdf', ctx.orgId);
+    } catch (err) {
+      console.warn(`[extract] could not upload ${filename}:`, (err as Error).message);
+    }
+  }
+
   const content: Anthropic.ContentBlockParam[] = [
-    {
-      type: 'document',
-      source: { type: 'base64', media_type: 'application/pdf', data: pdf.toString('base64') },
-    },
+    fileId
+      ? // Referencing an uploaded file is generally available on the wire,
+        // but the installed SDK (0.68) only types it under `Beta`, where the
+        // rest of this call does not live. The cast is the version gap, not
+        // a guess about the API; it goes when the dependency moves.
+        ({ type: 'document', source: { type: 'file', file_id: fileId } } as unknown as Anthropic.ContentBlockParam)
+      : { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdf.toString('base64') } },
     {
       type: 'text',
       text: `${names ? `${studioNamesBlock(names)}\n\n` : ''}Filename: ${filename}\nExtract the structured contents as instructed.`,
     },
   ];
-  const parsed = await extractJson<DocumentExtraction>(DOC_SYSTEM, content, { feature: 'document.extract', ...ctx });
-  return parsed ? withJobFromSummary(parsed) : null;
+
+  try {
+    // A big document gets the long clock; a quote keeps the short one.
+    const parsed = await extractJson<DocumentExtraction>(
+      DOC_SYSTEM,
+      content,
+      { feature: 'document.extract', ...ctx },
+      fileId ? 180_000 : undefined,
+    );
+    return parsed ? withJobFromSummary(parsed) : null;
+  } finally {
+    // The upload was for this one read. Left behind it would count against
+    // the studio's storage for ever, and nothing else refers to it.
+    if (fileId) await deleteDocument(fileId, ctx.orgId);
+  }
 }
 
 /** "the Bernthal Residence", "Ojai Valley Inn's Oak Kitchen" — a property named the way a job is. */
