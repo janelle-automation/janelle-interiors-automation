@@ -34,6 +34,28 @@ export interface StudioPerson {
 /** How the studio names itself on paper. */
 export const STUDIO_NAME = 'Janelle Interiors';
 
+/**
+ * The letterhead, read off the studio's own Houzz Pro purchase orders.
+ *
+ * A purchase order is a document with a sender, and drafting one from a form
+ * meant the address, the phone number and the correspondence mailbox were
+ * either typed again each time or left as [Studio Name]. They do not change
+ * between orders, so they are not questions to ask.
+ *
+ * `correspondence` is where vendors are told to write — the monitored inbox,
+ * not whichever teammate pressed Run, and not the shared account Gmail is
+ * connected through.
+ */
+export const STUDIO_LETTERHEAD = {
+  name: STUDIO_NAME,
+  address: ['221 E. Matilija St, Unit B', 'Ojai, California 93023'],
+  website: 'www.janelleinteriors.com',
+  phone: '805.640.0194',
+  correspondence: 'info@janelleinteriors.com',
+  /** How the studio signs a purchase order. */
+  signOff: 'Janelle Interiors Design Team',
+} as const;
+
 /** Any address here is the studio writing, whoever signs it. */
 export const STUDIO_DOMAINS = ['janelleinteriors.com'];
 

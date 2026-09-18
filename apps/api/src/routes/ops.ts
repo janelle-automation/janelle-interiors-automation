@@ -4,10 +4,10 @@ import { asyncHandler } from '../middleware/error.js';
 import { backfillEmailBodies, refileFromAttachments, runIngest } from '../services/ingest.js';
 import { autoMergeDuplicates, promoteAll, removeVendorProjects } from '../services/promote.js';
 import { importHouzzProjects } from '../services/houzz.js';
-import { runFollowUps } from '../services/followups.js';
+import { runFollowUps, resolveFollowUps } from '../services/followups.js';
 import { runReport } from '../services/report.js';
 import { runDigest } from '../services/digest.js';
-import { backfillTasks, mergeDuplicateTasks } from '../services/tasks.js';
+import { advanceActiveTasks, backfillTasks, mergeDuplicateTasks } from '../services/tasks.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 
 export const opsRouter = Router();
@@ -78,7 +78,21 @@ async function forEachOrg<T>(fn: (orgId: string, budgetMs: number) => Promise<T>
 }
 
 // Vercel Cron issues GET requests; POST is allowed for manual curl testing.
-cronRouter.all('/ingest', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id, budgetMs) => runIngest(id, { budgetMs })) })));
+cronRouter.all(
+  '/ingest',
+  // Reading the mail and acting on what it says are one job: a hosted cron
+  // must not leave the board and the follow-up queue behind the inbox.
+  asyncHandler(async (_req, res) =>
+    res.json({
+      data: await forEachOrg(async (id, budgetMs) => {
+        const result = await runIngest(id, { budgetMs });
+        await resolveFollowUps(id);
+        await advanceActiveTasks(id);
+        return result;
+      }),
+    }),
+  ),
+);
 cronRouter.all('/follow-ups', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => runFollowUps(id)) })));
 cronRouter.all('/report', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => runReport(id)) })));
 cronRouter.all('/digest', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => runDigest(id)) })));
@@ -97,7 +111,11 @@ opsRouter.post(
   requireRole('principal', 'coordinator'),
   asyncHandler(async (req, res) => {
     if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
-    res.json({ data: await backfillTasks(req.auth!.orgId) });
+    const result = await backfillTasks(req.auth!.orgId);
+    // Tasks raised from old mail are often already under way: advance them
+    // in the same pass rather than showing a board of stale Open cards.
+    const advanced = await advanceActiveTasks(req.auth!.orgId);
+    res.json({ data: { ...result, advanced } });
   }),
 );
 
@@ -186,6 +204,8 @@ opsRouter.post(
       folderId: typeof req.body?.folderId === 'string' ? req.body.folderId : undefined,
       budgetMs: JOB_BUDGET_MS,
     });
-    res.json({ data: result });
+    await resolveFollowUps(req.auth!.orgId);
+    const advanced = await advanceActiveTasks(req.auth!.orgId);
+    res.json({ data: { ...result, advanced } });
   }),
 );

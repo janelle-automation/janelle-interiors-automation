@@ -65,6 +65,13 @@ export interface ChatMessage {
   dismissed?: string[];
   /** A briefing is her speaking first; an error is a failure with a retry. */
   kind?: 'briefing' | 'error';
+  /**
+   * The day's opening briefing, as opposed to the one every new conversation
+   * starts with. Only this one names the conversation after itself — without
+   * the distinction the list became a column of identical "Briefing · Sep 18"
+   * rows, one for every chat anybody started.
+   */
+  daily?: boolean;
   /** For an error: the question to ask again. */
   retry?: string;
   /** For an error: the files that question carried. */
@@ -283,7 +290,7 @@ function titleOf(c: Conversation): string {
   if (said) return said.length > 64 ? `${said.slice(0, 61).trimEnd()}…` : said;
   if (first?.files?.length) return first.files.map((f) => f.name).join(', ');
   const at = new Date(c.messages[0]?.at ?? c.createdAt);
-  return c.messages.some((m) => m.kind === 'briefing')
+  return c.messages.some((m) => m.kind === 'briefing' && m.daily)
     ? `Briefing · ${at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
     : 'New conversation';
 }
@@ -562,7 +569,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const openRef = useRef(open);
   openRef.current = open;
 
-  const fetchBriefing = useCallback(async () => {
+  const fetchBriefing = useCallback(async (conversationId?: string, daily = false) => {
     if (briefingInFlight.current) return;
     briefingInFlight.current = true;
     setBriefingLoading(true);
@@ -581,11 +588,12 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
             at: Date.now(),
             role: 'assistant',
             kind: 'briefing',
+            daily,
             content: answer.lead,
             answer,
           },
         ],
-      }));
+      }), conversationId);
     } catch {
       // No briefing is a quiet absence, not an error to show: the backend
       // may simply not be configured yet. The next load tries again.
@@ -599,7 +607,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   // what lets the launcher show a count before anyone thinks to ask.
   useEffect(() => {
     if (!userId || store.briefedOn === localDay()) return;
-    void fetchBriefing();
+    void fetchBriefing(undefined, true);
   }, [userId, store.briefedOn, fetchBriefing]);
 
   // ── Asking ────────────────────────────────────────────────
@@ -742,17 +750,31 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const newConversation = useCallback(() => {
     abortRef.current?.abort();
     stopSpeaking();
-    // The last one is kept in the list, today's briefing with it. A new
-    // conversation starts clean — with what she can do — rather than with
-    // the same briefing again: that comes once a day.
-    setStore((s) => {
-      const current = activeOf(s);
-      // One with nothing in it yet is reused, not piled up.
-      if (!current.messages.length) return { ...s, unseen: 0 };
-      const fresh = blankConversation();
-      return { ...s, conversations: [fresh, ...s.conversations], activeId: fresh.id, unseen: 0 };
-    });
-  }, []);
+
+    // Every conversation opens with where the studio stands.
+    //
+    // This used to start blank on the reasoning that the briefing comes once
+    // a day and repeating it would be noise. But opening a new chat is
+    // exactly the moment someone wants the current picture, and by the
+    // afternoon this morning's copy is stale anyway. So it is fetched again
+    // rather than replayed: it is a database read with no model call behind
+    // it, so it costs a moment and nothing else.
+    //
+    // The target conversation is worked out here, from the ref, rather than
+    // inside the updater — a state updater does not run until the next
+    // render, so anything read back from it straight afterwards is still the
+    // old value, and the briefing would land in the conversation we just
+    // left.
+    const current = activeOf(storeRef.current);
+    // One with nothing in it yet is reused, not piled up.
+    const fresh = current.messages.length ? blankConversation() : null;
+    setStore((s) =>
+      fresh
+        ? { ...s, conversations: [fresh, ...s.conversations], activeId: fresh.id, unseen: 0 }
+        : { ...s, unseen: 0 },
+    );
+    void fetchBriefing(fresh ? fresh.id : current.id);
+  }, [fetchBriefing]);
 
   const openConversation = useCallback((id: string) => {
     if (id === storeRef.current.activeId) return;

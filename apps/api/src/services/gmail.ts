@@ -217,6 +217,74 @@ export function linksIn(body: string): EmailLink[] {
   return [...found.values()];
 }
 
+/** What the studio has sent lately: latest time per recipient, and per thread. */
+export interface SentMail {
+  /** Lower-cased address → the last time the studio wrote to it. */
+  byAddress: Map<string, string>;
+  /** Gmail thread id → the last time the studio wrote on that thread. */
+  byThread: Map<string, string>;
+}
+
+/**
+ * The studio's own outgoing mail, as metadata.
+ *
+ * Ingestion runs `-in:sent` on purpose — outgoing mail is not intelligence
+ * to classify, and drafting a reply to it would be absurd. But it is the
+ * only record that a person actually did the thing: that a nudge went out,
+ * that somebody answered the email a task was raised from. Without it a
+ * follow-up settled in Gmail sat in the review queue for ever, and a task
+ * being actively worked stayed in Open.
+ *
+ * One sweep serves both, because they want the same messages read two ways.
+ * Recipients and dates only — never a body.
+ */
+export async function readSentMail(
+  gmail: gmail_v1.Gmail,
+  days: number,
+  max = 60,
+): Promise<SentMail> {
+  const byAddress = new Map<string, string>();
+  const byThread = new Map<string, string>();
+  const res = await gmail.users.messages.list({
+    userId: 'me',
+    q: `in:sent newer_than:${Math.max(1, Math.round(days))}d`,
+    maxResults: max,
+  });
+  for (const m of res.data.messages ?? []) {
+    if (!m.id) continue;
+    try {
+      const msg = await gmail.users.messages.get({
+        userId: 'me',
+        id: m.id,
+        format: 'metadata',
+        metadataHeaders: ['To', 'Cc', 'Bcc'],
+      });
+      const sentAt = msg.data.internalDate
+        ? new Date(Number(msg.data.internalDate)).toISOString()
+        : new Date().toISOString();
+
+      const threadId = msg.data.threadId ?? m.threadId ?? '';
+      if (threadId) {
+        const seen = byThread.get(threadId);
+        if (!seen || seen < sentAt) byThread.set(threadId, sentAt);
+      }
+
+      const payload = msg.data.payload;
+      for (const address of [
+        ...addressesOf(header(payload, 'To')),
+        ...addressesOf(header(payload, 'Cc')),
+        ...addressesOf(header(payload, 'Bcc')),
+      ]) {
+        const seen = byAddress.get(address);
+        if (!seen || seen < sentAt) byAddress.set(address, sentAt);
+      }
+    } catch {
+      // One unreadable message must not cost the whole sweep.
+    }
+  }
+  return { byAddress, byThread };
+}
+
 /** List message ids matching a Gmail search query (e.g. "newer_than:2d"). */
 export async function listMessageIds(
   gmail: gmail_v1.Gmail,

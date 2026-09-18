@@ -16,8 +16,9 @@ import {
   promoteDocument, promoteEmail, removeVendorProjects,
 } from './promote.js';
 import { loadStudioNames, type StudioNames } from '../lib/studioNames.js';
+import { isStudioAddress } from '../lib/studioTeam.js';
 import { createTaskFromEmail, mergeDuplicateTasks } from './tasks.js';
-import { isAiReady } from './anthropic.js';
+import { isAiReady, sweepStaleUploads } from './anthropic.js';
 import { readIngestSettings } from '../lib/ingestSettings.js';
 import { bodyColumnsReady, bodyFields, readStoredText } from '../lib/emailStore.js';
 
@@ -645,6 +646,13 @@ async function ingestInternal(
             const forwarder = isForward ? addressOf(email.from || '') : '';
             const isMine = (a: string) => !a || a === selfEmail || a === forwarder;
 
+            // The studio writes from eight addresses, three of them personal
+            // Gmail, and only the connected one was ruled out here — which is
+            // how a thread between colleagues produced a reply draft
+            // addressed to janelle@ and cc'd to the rest of the team. A reply
+            // goes to someone outside the studio or it is not a reply.
+            const isOurs = (a: string) => isMine(a) || isStudioAddress(a);
+
             // Who to reply to: prefer the extracted counterparty, then the
             // Reply-To / From headers — skipping our own addresses.
             const toCandidates = [
@@ -652,7 +660,7 @@ async function ingestInternal(
               addressOf(email.replyTo || ''),
               addressOf(email.from || ''),
             ];
-            const to = toCandidates.find((a) => a.includes('@') && !isMine(a));
+            const to = toCandidates.find((a) => a.includes('@') && !isOurs(a));
 
             if (!to) {
               console.warn('[ingest] no external recipient for reply on', email.gmailId);
@@ -662,13 +670,24 @@ async function ingestInternal(
               const subject = email.subject.toLowerCase().startsWith('re:') ? email.subject : `Re: ${email.subject}`;
               const { data: existingDraft } = await supabaseAdmin
                 .from('drafts')
-                .select('id')
+                .select('id, created_at')
                 .eq('org_id', orgId)
                 .eq('subject', subject)
                 .limit(1)
                 .maybeSingle();
 
-              if (!existingDraft) {
+              // A thread's draft used to be written once, from whichever
+              // message happened to be read first, then left alone however
+              // far the conversation moved on — which is how an answer to a
+              // superseded quote was still sitting in Drafts days later.
+              // Still one draft per thread, but it answers the newest
+              // message in it.
+              const stale =
+                !!existingDraft &&
+                !!email.receivedAt &&
+                new Date(email.receivedAt) > new Date(existingDraft.created_at as string);
+
+              if (!existingDraft || stale) {
                 // CCs: everyone else on the correspondence, minus self and the recipient.
                 const cc = [...new Set([...(extracted.cc_emails ?? []).map((c) => c.toLowerCase()), ...addressesOf(email.cc)])]
                   .filter((a) => a.includes('@') && !isMine(a) && a !== to);
@@ -677,11 +696,23 @@ async function ingestInternal(
                 if (reply) {
                   const ccLine = cc.length ? `\nCc: ${cc.join(', ')}` : '';
                   const composed = `To: ${to}${ccLine}\n\n${reply.body}`;
-                  await supabaseAdmin.from('drafts').insert({
-                    org_id: orgId,
-                    subject: reply.subject,
-                    body_preview: composed,
-                  });
+                  if (existingDraft) {
+                    // created_at moves with the message it answers, so the
+                    // age shown in Drafts is the age of the answer.
+                    await supabaseAdmin
+                      .from('drafts')
+                      .update({
+                        body_preview: composed,
+                        created_at: email.receivedAt ?? new Date().toISOString(),
+                      })
+                      .eq('id', existingDraft.id as string);
+                  } else {
+                    await supabaseAdmin.from('drafts').insert({
+                      org_id: orgId,
+                      subject: reply.subject,
+                      body_preview: composed,
+                    });
+                  }
                   replyCount++;
                 }
               }
@@ -837,6 +868,11 @@ async function ingestInternal(
       console.error('[ingest] removing vendor-projects failed:', (err as Error).message);
     }
   }
+
+  // Uploads from a pass that did not get to delete its own. Cheap — file
+  // operations are free — and it keeps a killed run from leaving 20MB
+  // documents in the studio's storage indefinitely.
+  await sweepStaleUploads(orgId);
 
   await supabaseAdmin.from('activity_log').insert({
     org_id: orgId,

@@ -1,10 +1,15 @@
 import { Router } from 'express';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requireRole, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { runDigest } from '../services/digest.js';
 
 export const digestsRouter = Router();
 digestsRouter.use(requireAuth);
+// Closing a module to a role has to mean something: until now nothing
+// anywhere checked `read`, so revoking it would have been a switch that
+// changed nothing. No view, no module — writes are still checked
+// separately below.
+digestsRouter.use(requirePermission('digests', 'read'));
 
 // Today's digest (or the most recent one, so the page is never blank).
 digestsRouter.get(

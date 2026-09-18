@@ -4,6 +4,11 @@ import { asyncHandler } from '../middleware/error.js';
 
 export const draftsRouter = Router();
 draftsRouter.use(requireAuth);
+// Closing a module to a role has to mean something: until now nothing
+// anywhere checked `read`, so revoking it would have been a switch that
+// changed nothing. No view, no module — writes are still checked
+// separately below.
+draftsRouter.use(requirePermission('drafts', 'read'));
 
 // List drafts kept in the system (reply drafts, follow-up nudges, saved
 // prompt output). These are reviewed in the app, not in Gmail.

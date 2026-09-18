@@ -10,6 +10,11 @@ import { readUpload, storeUpload, type UploadType } from '../lib/uploads.js';
 
 export const promptsRouter = Router();
 promptsRouter.use(requireAuth);
+// Closing a module to a role has to mean something: until now nothing
+// anywhere checked `read`, so revoking it would have been a switch that
+// changed nothing. No view, no module — writes are still checked
+// separately below.
+promptsRouter.use(requirePermission('prompts', 'read'));
 
 // The prompt library, grouped by category on the client.
 promptsRouter.get(
@@ -37,7 +42,7 @@ promptsRouter.post(
 
     const { data: prompt, error } = await db
       .from('prompts')
-      .select('id, title, template, variables')
+      .select('id, title, category, template, variables')
       .eq('id', req.params.id)
       .maybeSingle();
     if (error) throw new Error(error.message);
@@ -113,7 +118,7 @@ promptsRouter.post(
 
     const { data: prompt, error } = await db
       .from('prompts')
-      .select('id, title, template, variables')
+      .select('id, title, category, template, variables')
       .eq('id', req.params.id)
       .maybeSingle();
     if (error) throw new Error(error.message);

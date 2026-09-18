@@ -392,8 +392,13 @@ export const SUPERVISOR_ROLES: UserRole[] = ['principal', 'coordinator'];
 
 export function can(role: UserRole | null, resource: Resource, action: Action): boolean {
   if (!role) return false;
-  // Settings and team membership are never readable by everyone — they are
-  // how the studio's rules and people are changed.
+  // Settings and team membership are CHANGED only by a principal, and read
+  // by anyone. The comment here used to claim the opposite of the code —
+  // "never readable by everyone" over a line returning true — which read as
+  // a bug and is not one: the roster is where every assignee name in the app
+  // comes from, and revoking it would empty the owner dropdown on the task
+  // board rather than hide an admin screen. The screens themselves are
+  // hidden by whether the person may change them, not read them.
   if (resource === 'settings' || resource === 'team') {
     return action === 'read' ? true : WRITERS[resource].includes(role);
   }
@@ -596,11 +601,18 @@ export function permissionKey(role: UserRole, resource: Resource, action: Action
 /**
  * Cells that may never be revoked. Without them a studio can lock itself
  * out of its own permission screen, with no way back short of editing the
- * database by hand. Reads are locked open for the same reason they are
- * open by default: seeing the studio's work is the point of the system.
+ * database by hand.
+ *
+ * That risk is exactly one thing: the principal losing the two screens that
+ * hand access back. Every read used to be locked too, on the reasoning that
+ * seeing the studio's work is the point of the system — but "the assistant
+ * should not see purchase order values" is a legitimate decision a studio
+ * gets to make, and the whole VIEW column being greyed out gave it no way to
+ * make it. A principal can now close a module to a role, and can still
+ * always reach Team & roles and Studio settings to reopen it.
  */
 export function isLockedPermission(role: UserRole, resource: Resource, action: Action): boolean {
-  if (action === 'read') return true;
+  void action;
   if (role !== 'principal') return false;
   return resource === 'team' || resource === 'settings';
 }

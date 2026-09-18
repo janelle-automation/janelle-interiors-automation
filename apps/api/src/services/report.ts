@@ -31,7 +31,11 @@ export async function runReport(orgId: string): Promise<ReportResult> {
   ]);
 
   const byStage = Object.fromEntries(PROJECT_STAGES.map((s) => [s, 0])) as Record<string, number>;
-  for (const p of projects.data ?? []) byStage[(p as { stage: string }).stage] = (byStage[(p as { stage: string }).stage] ?? 0) + 1;
+  // Archived jobs keep the stage they closed at; counted here they padded
+  // the weekly pipeline figures with work nobody is doing.
+  const liveProjects = ((projects.data ?? []) as { stage: string; status: string }[])
+    .filter((p) => p.status !== 'archived');
+  for (const p of liveProjects) byStage[p.stage] = (byStage[p.stage] ?? 0) + 1;
 
   const posThisWeek = (pos.data ?? []).filter((o) => (o as { updated_at?: string }).updated_at! >= weekAgo);
   const committed = (pos.data ?? []).reduce((s, o) => s + Number((o as { amount?: number }).amount ?? 0), 0);

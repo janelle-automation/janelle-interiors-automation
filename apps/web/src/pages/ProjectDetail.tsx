@@ -183,16 +183,24 @@ export default function ProjectDetail() {
             <table className="w-full text-[14px]">
               <thead>
                 <tr className="border-b border-line-soft text-left text-[11.5px] font-semibold uppercase tracking-[0.06em] text-ink-faint">
-                  <th className="px-5 py-3 font-medium">PO</th><th className="px-5 py-3 font-medium">Status</th>
+                  <th className="px-5 py-3 font-medium">Vendor</th><th className="px-5 py-3 font-medium">PO</th>
+                  <th className="px-5 py-3 font-medium">Status</th><th className="px-5 py-3 text-right font-medium">Items</th>
                   <th className="px-5 py-3 text-right font-medium">Amount</th><th className="px-5 py-3 text-right font-medium">ETA</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-line-soft">
-                {pos.length === 0 && <tr><td colSpan={4} className="px-5 py-8 text-center text-[13px] text-ink-faint">No purchase orders yet.</td></tr>}
+                {pos.length === 0 && <tr><td colSpan={6} className="px-5 py-8 text-center text-[13px] text-ink-faint">No purchase orders yet.</td></tr>}
                 {pos.map((o) => (
                   <tr key={o.id} className="text-ink-soft">
-                    <td className="px-5 py-3 text-[13px] text-ink">{o.po_number ?? '—'}</td>
+                    <td className="px-5 py-3 text-[13px] font-medium text-ink">{o.vendors?.name ?? '—'}</td>
+                    {/* Most of these orders came out of a vendor quote, which
+                        carries no PO number — the studio assigns one when it
+                        raises the order. Saying so beats another dash. */}
+                    <td className="px-5 py-3 text-[13px] text-ink">
+                      {o.po_number ?? <span className="text-ink-faint">not yet numbered</span>}
+                    </td>
                     <td className="px-5 py-3"><Pill tone={o.status === 'received' ? 'good' : o.status === 'shipped' ? 'brass' : 'neutral'}>{o.status.replace('_', ' ')}</Pill></td>
+                    <td className="px-5 py-3 text-right tabular-nums text-ink-soft">{o.line_items?.length || '—'}</td>
                     <td className="px-5 py-3 text-right tabular-nums text-ink">{money(o.amount)}</td>
                     <td className="px-5 py-3 text-right tabular-nums">{shortDate(o.eta)}</td>
                   </tr>

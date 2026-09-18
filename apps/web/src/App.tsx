@@ -1,4 +1,6 @@
+import type { ReactNode } from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { canSupervise, type Action, type Resource } from '@janelle/shared';
 import { useAuth } from './context/AuthContext';
 import { AppShell } from './components/AppShell';
 import { AssistantProvider } from './context/AssistantContext';
@@ -49,6 +51,42 @@ function BackendError({ message, onRetry, onSignOut }: { message: string; onRetr
   );
 }
 
+/**
+ * A page the studio has closed to this role.
+ *
+ * The sidebar already hides these, but a bookmark, a link in a digest or a
+ * typed URL still lands here — and without this the page rendered and every
+ * query behind it came back 403, which reads as "the system is broken"
+ * rather than "this is not yours to see".
+ */
+function Viewable({
+  needs,
+  action = 'read',
+  supervisorOnly,
+  principalOnly,
+  children,
+}: {
+  needs?: Resource;
+  /** 'update' for the administration screens — see NavItem.needsWrite. */
+  action?: Action;
+  supervisorOnly?: boolean;
+  /** Permissions only: the module that grants the others is not grantable. */
+  principalOnly?: boolean;
+  children: ReactNode;
+}) {
+  const { may, user } = useAuth();
+  const allowed =
+    (!needs || may(needs, action)) &&
+    (!supervisorOnly || canSupervise(user?.role ?? null)) &&
+    (!principalOnly || user?.role === 'principal');
+  if (allowed) return <>{children}</>;
+  return (
+    <div className="rounded-xl border border-dashed border-line py-14 text-center text-[14px] text-ink-soft">
+      This part of the studio is not open to your role. Ask a principal if you need it.
+    </div>
+  );
+}
+
 export default function App() {
   const { configured, loading, session, user, profileError, refresh, signOut } = useAuth();
   const { pathname } = useLocation();
@@ -79,21 +117,21 @@ export default function App() {
     <AppShell>
       <Routes>
         <Route path="/" element={<Dashboard />} />
-        <Route path="/projects" element={<Projects />} />
-        <Route path="/projects/:id" element={<ProjectDetail />} />
-        <Route path="/vendors" element={<Vendors />} />
-        <Route path="/inbox" element={<Inbox />} />
-        <Route path="/documents" element={<Documents />} />
-        <Route path="/prompts" element={<Prompts />} />
+        <Route path="/projects" element={<Viewable needs="projects"><Projects /></Viewable>} />
+        <Route path="/projects/:id" element={<Viewable needs="projects"><ProjectDetail /></Viewable>} />
+        <Route path="/vendors" element={<Viewable needs="vendors"><Vendors /></Viewable>} />
+        <Route path="/inbox" element={<Viewable needs="emails"><Inbox /></Viewable>} />
+        <Route path="/documents" element={<Viewable needs="documents"><Documents /></Viewable>} />
+        <Route path="/prompts" element={<Viewable needs="prompts"><Prompts /></Viewable>} />
         <Route path="/assistant" element={<Assistant />} />
-        <Route path="/tasks" element={<Tasks />} />
-        <Route path="/follow-ups" element={<FollowUps />} />
-        <Route path="/drafts" element={<Drafts />} />
-        <Route path="/reports" element={<Reports />} />
-        <Route path="/activity" element={<Activity />} />
-        <Route path="/team" element={<Team />} />
-        <Route path="/permissions" element={<Permissions />} />
-        <Route path="/settings" element={<Settings />} />
+        <Route path="/tasks" element={<Viewable needs="tasks"><Tasks /></Viewable>} />
+        <Route path="/follow-ups" element={<Viewable needs="follow_ups"><FollowUps /></Viewable>} />
+        <Route path="/drafts" element={<Viewable needs="drafts"><Drafts /></Viewable>} />
+        <Route path="/reports" element={<Viewable needs="reports"><Reports /></Viewable>} />
+        <Route path="/activity" element={<Viewable supervisorOnly><Activity /></Viewable>} />
+        <Route path="/team" element={<Viewable needs="team" action="update"><Team /></Viewable>} />
+        <Route path="/permissions" element={<Viewable principalOnly><Permissions /></Viewable>} />
+        <Route path="/settings" element={<Viewable needs="settings"><Settings /></Viewable>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AppShell>

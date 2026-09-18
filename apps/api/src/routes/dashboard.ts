@@ -64,7 +64,10 @@ dashboardRouter.get(
       string,
       number
     >;
-    for (const p of projectRows) byStage[p.stage]++;
+    // An archived job still carries the stage it closed at, so counting it
+    // here put finished work in the pipeline chart and in "installs soon".
+    const liveProjects = projectRows.filter((p) => p.status !== 'archived');
+    for (const p of liveProjects) byStage[p.stage]++;
 
     const mine = taskRows.filter((t) => t.assigned_to === userId);
 
@@ -83,7 +86,7 @@ dashboardRouter.get(
         (o) => !['received', 'cancelled'].includes(o.status),
       ).length,
       activeProjects: projectRows.filter((p) => p.status === 'active').length,
-      installsSoon: projectRows.filter((p) => ['shipping', 'install'].includes(p.stage)).length,
+      installsSoon: liveProjects.filter((p) => ['shipping', 'install'].includes(p.stage)).length,
       emailsRead: emails.count ?? 0,
       documentsParsed: documents.count ?? 0,
       escalations: followUpRows.filter((f) => f.type === 'task_escalation').length,

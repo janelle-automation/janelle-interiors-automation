@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { supabaseAdmin } from '../lib/supabase.js';
-import { runFollowUps } from './followups.js';
+import { runFollowUps, resolveFollowUps } from './followups.js';
+import { advanceActiveTasks } from './tasks.js';
 import { runReport } from './report.js';
 import { runIngest } from './ingest.js';
 import { runDigest } from './digest.js';
@@ -50,6 +51,17 @@ async function ingestDueOrgs(): Promise<void> {
 
       lastIngest.set(orgId, Date.now());
       await runIngest(orgId);
+
+      // Straight after reading the mail, while the replies that answer a
+      // nudge are the newest thing in the system. Waiting for the 2am engine
+      // meant a follow-up settled at nine in the morning sat in the review
+      // queue all day.
+      await resolveFollowUps(orgId);
+
+      // Same moment, same reason: a thread that moved since a task was
+      // raised means somebody is on it, and the board should show that
+      // without being told.
+      await advanceActiveTasks(orgId);
     } catch (err) {
       console.error(`[scheduler] ingest failed for org ${orgId}:`, (err as Error).message);
     }

@@ -20,6 +20,7 @@
     "db:apply:seed": "node scripts/db-apply.mjs --seed",
     "db:status": "node scripts/db-apply.mjs --status",
     "create-admin": "node scripts/create-admin.mjs",
+    "seed-team": "node scripts/seed-team.mjs",
     "seed-prompts": "node scripts/seed-prompts.mjs",
     "ai-usage": "node scripts/ai-usage.mjs"
   },

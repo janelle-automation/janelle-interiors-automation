@@ -6,6 +6,11 @@ import { hasSubtasks } from '../lib/columns.js';
 
 export const tasksRouter = Router();
 tasksRouter.use(requireAuth);
+// Closing a module to a role has to mean something: until now nothing
+// anywhere checked `read`, so revoking it would have been a switch that
+// changed nothing. No view, no module — writes are still checked
+// separately below.
+tasksRouter.use(requirePermission('tasks', 'read'));
 
 // List tasks, newest first, with the names needed to render a row.
 tasksRouter.get(
@@ -246,5 +251,49 @@ tasksRouter.post(
       .maybeSingle();
     if (error) throw new Error(error.message);
     res.json({ data: { id: data?.id } });
+  }),
+);
+
+/**
+ * Delete a task outright.
+ *
+ * The board could only ever move a task between statuses, so a card raised
+ * from a misread email — or a duplicate of one already being worked — could
+ * be cancelled but never removed, and sat in the list for ever. Principals
+ * and coordinators hold this by default; every other role reaches it only
+ * if the studio grants it on Permissions.
+ *
+ * Logged, because the work itself is gone afterwards and the audit trail is
+ * the only remaining record that it existed.
+ */
+tasksRouter.delete(
+  '/:id',
+  requirePermission('tasks', 'delete'),
+  asyncHandler(async (req, res) => {
+    const { db, orgId, userId } = req.auth!;
+
+    const { data: task } = await db
+      .from('tasks')
+      .select('id, title, source_email_id')
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+
+    const { error } = await db.from('tasks').delete().eq('id', req.params.id);
+    if (error) throw new Error(error.message);
+
+    await db.from('activity_log').insert({
+      org_id: orgId,
+      actor: userId,
+      action: 'task.delete',
+      entity: 'tasks',
+      entity_id: (task as { id: string }).id,
+      meta: {
+        title: (task as { title: string }).title,
+        from_email: Boolean((task as { source_email_id: string | null }).source_email_id),
+      },
+    });
+
+    res.json({ data: { ok: true } });
   }),
 );

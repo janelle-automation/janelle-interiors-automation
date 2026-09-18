@@ -7,6 +7,11 @@ import { hasSeatColumn, profileColumns } from '../lib/columns.js';
 
 export const teamRouter = Router();
 teamRouter.use(requireAuth);
+// Closing a module to a role has to mean something: until now nothing
+// anywhere checked `read`, so revoking it would have been a switch that
+// changed nothing. No view, no module — writes are still checked
+// separately below.
+teamRouter.use(requirePermission('team', 'read'));
 
 // The people in this org, for assignee pickers and the admin screen.
 // RLS scopes it to the caller's org.

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { orgSourceUserId } from '../lib/tokens.js';
 import { gmailFor, downloadAttachment } from '../services/gmail.js';
@@ -7,6 +7,11 @@ import { driveFor, downloadFile } from '../services/drive.js';
 
 export const documentsRouter = Router();
 documentsRouter.use(requireAuth);
+// Closing a module to a role has to mean something: until now nothing
+// anywhere checked `read`, so revoking it would have been a switch that
+// changed nothing. No view, no module — writes are still checked
+// separately below.
+documentsRouter.use(requirePermission('documents', 'read'));
 
 interface EmailSource { gmail_id: string; from_addr: string | null; subject: string | null; received_at: string | null }
 

@@ -26,6 +26,21 @@ const NO_INVENTING =
   'Where information has not been supplied, write TBD — DESIGN TEAM TO COMPLETE rather than guessing.';
 
 /**
+ * The other half of NO_INVENTING, and the one that was missing.
+ *
+ * Told not to invent, a prompt with half its inputs answers with the list of
+ * things it would need — which is a form, not work. Somebody pasted one
+ * quote into the vendor comparison and got back eleven bullet points asking
+ * for the quote they had just pasted. The studio knows what is missing; what
+ * it cannot do itself is the part that needs a procurement manager.
+ */
+const NEVER_A_QUESTIONNAIRE =
+  'NEVER answer with a request for information. Whatever has been supplied, produce the deliverable ' +
+  'below with it: every section, in order, with TBD in the cells nothing was given for. A list of ' +
+  'what you would need instead of the work is not an acceptable answer, however incomplete the input. ' +
+  'Gaps belong in the closing section, named and assigned, after the work — never in place of it.';
+
+/**
  * What a review prompt does when there is nothing to review.
  *
  * Someone types "Kitchen western style" into Kitchen design review, because
@@ -359,6 +374,8 @@ BATHROOM
     ],
     template: `Act as a senior FF&E designer and procurement specialist.
 
+${NEVER_A_QUESTIONNAIRE}
+
 Create a room-by-room FF&E schedule using the approved design direction and product selections below.
 
 Track: Room, Item, Category, Manufacturer, Product, SKU, Finish, Dimensions, Quantity, Vendor, Product link, Retail price, Trade price, Client price, Lead time, Availability, Status, Client approval, Notes.
@@ -391,6 +408,8 @@ SELECTIONS
     ],
     template: `Act as a senior FF&E procurement manager.
 
+${NEVER_A_QUESTIONNAIRE}
+
 Review all approved design selections and determine whether each item is ready for procurement.
 
 Check: manufacturer, product, SKU, finish, dimensions, quantity, vendor, quote, availability, lead time, freight, client approval, Lead Designer approval, GC quantity approval and delivery location.
@@ -410,6 +429,161 @@ PROJECT
 
 SELECTIONS AND QUOTE STATUS
 {{selections}}`,
+  },
+
+  {
+    title: 'Purchase order draft',
+    category: 'procurement',
+    description: 'A purchase order laid out the way the studio issues them in Houzz Pro, with the covering email and every blank listed before it goes out.',
+    variables: [
+      { key: 'vendor', label: 'Vendor company', required: true },
+      { key: 'vendor_contact', label: 'Vendor contact', required: false },
+      { key: 'project', label: 'Project', required: true },
+      { key: 'client', label: 'Client / sidemark', required: false },
+      { key: 'po_number', label: 'PO number', required: false },
+      { key: 'po_date', label: 'PO date', required: false },
+      { key: 'account_number', label: 'Account #', required: false },
+      { key: 'owner', label: 'Owner', required: false },
+      { key: 'items', label: 'Items', required: true },
+      { key: 'ship_to', label: 'Ship to', required: false },
+      { key: 'needed_by', label: 'Required on site by', required: false },
+      { key: 'freight', label: 'Shipping & tax', required: false },
+      { key: 'terms', label: 'Terms', required: false },
+      { key: 'memo', label: 'Memo', required: false },
+    ],
+    template: `Act as a senior FF&E procurement manager issuing a purchase order to a trade vendor.
+
+${NEVER_A_QUESTIONNAIRE}
+
+Produce two things, in this order.
+
+1. THE COVERING EMAIL — four sentences at most. Name the project and the sidemark, say the purchase order is attached below, and ask for a written order acknowledgement within 48 hours confirming unit pricing, extended total, lead time, estimated ship date, freight cost and carrier, and the vendor's own order number. Subject line: PO <number> — <project> — <vendor>.
+
+2. THE PURCHASE ORDER, laid out exactly as the studio issues them:
+
+PURCHASE ORDER <number>
+The studio's name, address, website and phone as given under STUDIO RECORDS.
+
+PURCHASE ORDER DETAILS — as a two-column list, in this order and with these labels:
+Vendor's Contact · Vendor's Company · Vendor's Address · Vendor's Email · Shipping Address · Purchase Order Date · Account # · Terms · Owner
+
+ITEMS — a table with these columns and no others:
+Item | Est. Ship Date | Quantity | Rate | Total Price
+The Item cell carries the product name on the first line, then its detail beneath, one per line, using only what was supplied: Location, quantity breakdown by location, Dimensions, Condition, Finish / COM, SKU or model, Lead time, Ships from.
+Rate is the unit price and Total Price is Rate x Quantity. Do the multiplication; do not restate a supplied total that contradicts it — flag the discrepancy instead.
+
+TOTALS — Subtotal, Shipping, Taxes, Total, in that order, each on its own line.
+
+MEMO — the memo supplied, then these two standing lines:
+All correspondence should be emailed to the studio's correspondence address.
+Please inform the studio of any back-ordered items immediately.
+
+Close with "Thank You," and the studio's sign-off and phone number as given under STUDIO RECORDS.
+
+RULES
+Every order carries a reference the vendor can put on its paperwork: the PO number and the sidemark. Where no PO number has been supplied, write PO NUMBER TBD — ASSIGN BEFORE SENDING wherever the number belongs, including the subject line, rather than inventing one; where the client or sidemark is unknown, write SIDEMARK TBD — CONFIRM CLIENT.
+Quantities, rates, SKUs and dates are copied exactly as supplied. A field with nothing behind it reads TBD — DESIGN TEAM TO COMPLETE. Keep the field on the page: a purchase order missing a line is harder to check than one that says the line is blank.
+Never write a bracketed placeholder such as [Studio Name], [Phone] or [Email]. The studio's own details are under STUDIO RECORDS; a vendor detail that is genuinely unknown is TBD, never invented.
+${NO_INVENTING}
+
+BEFORE IT GOES OUT
+End with a section headed MISSING BEFORE SENDING listing only the blanks the studio must still fill, each with who fills it. Where nothing is missing, say so in one line.
+
+VENDOR COMPANY
+{{vendor}}
+
+VENDOR CONTACT — name, email, phone, address
+{{vendor_contact}}
+
+PROJECT
+{{project}}
+
+CLIENT / SIDEMARK
+{{client}}
+
+PO NUMBER
+{{po_number}}
+
+PO DATE
+{{po_date}}
+
+ACCOUNT #
+{{account_number}}
+
+OWNER — the studio person this order belongs to
+{{owner}}
+
+ITEMS
+{{items}}
+
+SHIP TO — receiver or site name, then the address
+{{ship_to}}
+
+REQUIRED ON SITE BY
+{{needed_by}}
+
+SHIPPING & TAX
+{{freight}}
+
+TERMS
+{{terms}}
+
+MEMO
+{{memo}}`,
+  },
+
+  {
+    title: 'Vendor option comparison',
+    category: 'procurement',
+    description: 'Quotes side by side against the allowance and the install date, with one recommendation and the reasoning behind it.',
+    variables: [
+      { key: 'item', label: 'Item', required: true },
+      { key: 'options', label: 'Vendor options & quotes', required: true },
+      { key: 'project', label: 'Project', required: false },
+      { key: 'client', label: 'Client', required: false },
+      { key: 'budget', label: 'Allowance for this item', required: false },
+      { key: 'needed_by', label: 'Required on site by', required: false },
+    ],
+    template: `Act as a senior FF&E procurement manager choosing between vendors for one item.
+
+${NEVER_A_QUESTIONNAIRE}
+
+IF THERE IS ONLY ONE OPTION
+One quote is the normal starting point, not a reason to stop. Lay that option out in the comparison table exactly as below, in its own column, and say in one line that this is a single-source quote and not yet a comparison. Then do the work that one option still allows: landed cost against the allowance, ship date against the required date, and what the studio is accepting by taking it unchallenged — single-source pricing, no fallback if it goes out of stock, no leverage on freight or lead time.
+Then, under SOURCE THE COMPARISON, name three to five specific further places to quote — the kind of supplier, not invented company names unless the studio named them — say what to ask each for, and give the one question that would most change the decision. End with the same BEFORE ORDERING section.
+Do not ask the studio to resubmit.
+
+COMPARISON
+A table, one column per option: Vendor, Manufacturer & product, SKU, Finish, Dimensions, Quantity available, Trade price, Freight, Landed cost, Lead time, Ship date against the required date, Sample availability, Return and cancellation terms, Warranty.
+Any cell the studio has not supplied reads TBD — CONFIRM WITH VENDOR. Do not fill one option's blank from another option's answer. Where the item description already carries a detail — a dimension, a finish, a condition, a lead time, where it ships from — read it into the right row rather than calling it missing.
+
+THEN
+- Landed cost against the allowance, each option marked under, at or over.
+- Lead time against the required-on-site date, each option marked as making it, tight, or missing it.
+- One line per option on the trade-off: what the studio gives up by choosing it.
+- RECOMMENDATION — one option, with the reasoning, written so it can go to the client as it stands.
+- RISKS — what could go wrong with the recommended option, and what would catch it early.
+- BEFORE ORDERING — what must still be confirmed, and who confirms it.
+
+${NO_INVENTING}
+
+ITEM
+{{item}}
+
+PROJECT
+{{project}}
+
+CLIENT
+{{client}}
+
+ALLOWANCE FOR THIS ITEM
+{{budget}}
+
+REQUIRED ON SITE BY
+{{needed_by}}
+
+OPTIONS AND QUOTES
+{{options}}`,
   },
 
   // ── Client-facing ──────────────────────────────────────────
