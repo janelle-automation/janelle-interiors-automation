@@ -314,6 +314,25 @@ export interface DocumentExtraction {
   line_items: { description: string; sku: string | null; qty: number; unit_price: number | null }[];
   /** As on the email: the proper name of a poorly named listed project. */
   better_project_name?: string | null;
+  /**
+   * A blank master template, or a copy whose placeholders are still in it.
+   *
+   * The studio's Canva master carries a real job as its worked example —
+   * the reference plans name Steve & Deb Lemon at 291 Saddle Lane — so a
+   * copy made for any other client still reads as the Lemon job until the
+   * designer swaps the drawings out. The master itself was read and filed
+   * under Lemon Residence for exactly that reason.
+   */
+  is_template?: boolean;
+  /**
+   * How many pages still carry the red placeholder instruction.
+   *
+   * The studio writes its template instructions in red and tells the
+   * designer to delete them before sharing. That makes a half-finished deck
+   * self-describing: a copy with eight red pages left is not ready to go to
+   * a client, and nothing else in the system would have known.
+   */
+  placeholder_pages?: number | null;
 }
 
 const DOC_SYSTEM = `You are reading a PDF that reached an interior design studio — attached to an email or kept
@@ -351,6 +370,31 @@ Return JSON with exactly these keys:
 - "order_date": ISO date (YYYY-MM-DD) or null
 - "eta": estimated ship/delivery ISO date or null
 - "line_items": array of { "description", "sku" (or null), "qty" (number), "unit_price" (number or null) }
+- "is_template": true when this is a blank master template or a copy still carrying its placeholders; else false
+- "placeholder_pages": roughly how many pages still carry red instruction text — an approximate count is fine, what matters is whether it is 0 (finished) or more (not ready to send); null if you cannot tell
+
+TEMPLATES AND THEIR WORKED EXAMPLE
+The studio presents from a master template, and the master carries a real past job as its worked
+example — its reference plans, drawings, room names and client block belong to THAT job, not to
+whoever the copy is now for. Treat a document as a template when any of these appear:
+- TEXT PRINTED IN RED. The studio writes every template instruction in red and tells the designer to
+  delete it before sharing, so red body text anywhere on a page means that page is not finished. This
+  is the surest sign and it does not depend on the wording. Red is the instruction; black text on the
+  same page — a note like "Contractor to verify all dimensions in field" — is part of the document.
+- placeholder or instruction text left in it: "MASTER TEMPLATE INSTRUCTION", "Replace them with
+  project-specific", "remove this placeholder text", "reference images", "reference drawings";
+- an unfilled title or heading: "NAME OF THE PROJECT", "ROOM NAME", "CLIENT NAME", "PROJECT NAME".
+Decide this BEFORE you decide anything else, and then follow it exactly:
+1. If the document is a template, set "is_template": true.
+2. When "is_template" is true, "project_hint", "client", "better_project_name" and "title" are null.
+   A reference drawing's title block, its client block, its site address and the job named anywhere in
+   the sample content are the EXAMPLE the template was built from. They are never this document's job,
+   however plainly they are printed, and a summary that correctly calls them the worked example must
+   still leave those four fields null. The only thing that can fill them is a heading the designer has
+   actually typed for this job — and a page still headed "NAME OF THE PROJECT" or "ROOM NAME" has not
+   been typed. If in doubt, null.
+3. A finished presentation with no red instruction text and no placeholders left is NOT a template:
+   set "is_template": false and read it normally.
 
 ${PROJECT_NAME_RULES}`;
 
@@ -420,12 +464,18 @@ export async function extractPdf(
   ];
 
   try {
-    // A big document gets the long clock; a quote keeps the short one.
+    // Every PDF gets the long clock, not just the uploaded ones.
+    //
+    // The 25s default is sized for classifying an email. A document read is
+    // a different job: a ten-page presentation with a finish schedule in it
+    // takes longer than that to read and write back, and the studio is about
+    // to send a great many of them. Tying the allowance to how the file was
+    // delivered was arbitrary — what makes it slow is that it is a document.
     const parsed = await extractJson<DocumentExtraction>(
       DOC_SYSTEM,
       content,
       { feature: 'document.extract', ...ctx },
-      fileId ? 180_000 : undefined,
+      fileId ? 240_000 : 120_000,
     );
     return parsed ? withJobFromSummary(parsed) : null;
   } finally {

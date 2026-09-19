@@ -484,6 +484,17 @@ export interface Project {
   target_install: string | null;
   assigned_to: string | null;
   houzz_ref: string | null;
+  /** Town and state, as the studio's project sheet writes it ("Ojai, CA"). */
+  location: string | null;
+  /**
+   * 'Open' or 'In Progress', verbatim from the studio's project sheet.
+   *
+   * Not a second `stage`. The sheet's two words do not map onto the nine
+   * pipeline stages, so the import keeps what the sheet said rather than
+   * guessing a stage per project; `stage` is set by a person in the UI.
+   * Null for a project that did not come from the sheet.
+   */
+  sheet_status: string | null;
   notes: string | null;
   created_at: string;
   updated_at: string;
