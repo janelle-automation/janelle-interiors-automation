@@ -21,6 +21,7 @@ projectsRouter.patch(
     const patch: Record<string, unknown> = {};
 
     if ('client_name' in b) patch.client_name = b.client_name ? String(b.client_name) : null;
+    if ('location' in b) patch.location = b.location ? String(b.location) : null;
     if ('notes' in b) patch.notes = b.notes ? String(b.notes) : null;
     if ('budget' in b) {
       const n = Number(b.budget);

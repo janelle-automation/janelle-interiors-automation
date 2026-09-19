@@ -143,6 +143,10 @@ export interface ProjectDetail {
   project: {
     id: string; name: string; client_name: string | null; stage: ProjectStage;
     status: string; budget: number | null; target_install: string | null; notes: string | null;
+    /** Town and state, as the studio's project sheet writes it. */
+    location: string | null;
+    /** 'Open' or 'In Progress' from that sheet; null for a project not on it. */
+    sheet_status: string | null;
   };
   purchase_orders: {
     id: string; po_number: string | null; amount: number | null; status: string; eta: string | null;

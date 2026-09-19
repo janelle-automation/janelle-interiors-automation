@@ -54,12 +54,24 @@ const LONG_CALL_TIMEOUT_MS = Number(process.env.ANTHROPIC_LONG_TIMEOUT_MS || 120
 const TOKEN_BUDGET = Number(process.env.AI_TOKEN_BUDGET || 5_000);
 const MIN_OUTPUT_TOKENS = 512;
 
-/** Cheap, deliberately pessimistic: ~3.5 characters per token. */
+/**
+ * Cheap, deliberately pessimistic: ~3.5 characters per token.
+ *
+ * An attached document is counted as nothing, and that is deliberate. Its
+ * base64 is characters, not text: a 7MB PDF measured 2.5 MILLION "tokens"
+ * here, which drove the clamp below to the 512 floor and truncated the JSON
+ * coming back — so a finish schedule of any length lost its rows partway
+ * through. The clamp exists to stop a runaway PROMPT, and output is a small
+ * fraction of what a document read costs in any case; the real input is
+ * still measured and billed by the API and recorded in usage.
+ */
 function estimateTokens(params: { system?: unknown; messages?: unknown; tools?: unknown }): number {
   let chars = 0;
+  const withoutPayloads = (_key: string, value: unknown) =>
+    typeof value === 'string' && value.length > 2_000 ? '' : value;
   for (const part of [params.system, params.messages, params.tools]) {
     if (typeof part === 'string') chars += part.length;
-    else if (part) chars += JSON.stringify(part).length;
+    else if (part) chars += JSON.stringify(part, withoutPayloads).length;
   }
   return Math.ceil(chars / 3.5);
 }

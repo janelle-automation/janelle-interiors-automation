@@ -123,6 +123,10 @@ interface ReadAttachment {
 function projectFromDocuments(names: StudioNames, documents: (DocumentExtraction | null)[]): string | null {
   for (const p of documents) {
     if (!p) continue;
+    // A template names the job it was built from, not the one it is being
+    // sent about — attaching the studio's Canva master to a mail about any
+    // other client would otherwise file that mail under Lemon Residence.
+    if (p.is_template) continue;
     const { projectId } = resolveFiling(names, {
       project: namesAProject(p.project_hint, p.vendor) ? p.project_hint : null,
       client: p.client,
@@ -805,12 +809,21 @@ async function ingestInternal(
         const extracted = await extractPdf(bytes, filedIn ? `${filedIn.folder.folderName}/${file.name}` : file.name, { orgId }, driveNames);
         // Where the studio filed it decides the project; what it says only
         // decides for a file outside the project folders.
-        const projectId =
-          filedIn?.projectId ??
-          resolveFiling(driveNames, {
-            project: namesAProject(extracted?.project_hint, extracted?.vendor) ? extracted?.project_hint ?? null : null,
-            client: extracted?.client,
-          }).projectId;
+        //
+        // A template is the exception: the studio's Canva master carries a
+        // real past job as its worked example, so reading its reference
+        // plans filed the blank master under Lemon Residence. A copy still
+        // holding its placeholders would do the same for whoever it is now
+        // for. It keeps the folder it sits in and nothing more — its own
+        // contents are a sample, not this job's facts.
+        const isTemplate = extracted?.is_template === true;
+        const projectId = isTemplate
+          ? filedIn?.projectId ?? null
+          : filedIn?.projectId ??
+            resolveFiling(driveNames, {
+              project: namesAProject(extracted?.project_hint, extracted?.vendor) ? extracted?.project_hint ?? null : null,
+              client: extracted?.client,
+            }).projectId;
 
         const { data: docRow } = await supabaseAdmin
           .from('documents')
@@ -825,7 +838,10 @@ async function ingestInternal(
           .select('id')
           .maybeSingle();
         docCount++;
-        if (docRow) {
+        // Promotion is what turns a document into vendors, projects and
+        // purchase orders. A template has none of those to give — only the
+        // example job it was built from.
+        if (docRow && !isTemplate) {
           await promoteDocument(orgId, { id: docRow.id, type: extracted?.type ?? 'other', parsed_json: extracted ?? null, project_id: projectId });
         }
       } catch (err) {

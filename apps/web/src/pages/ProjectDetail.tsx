@@ -37,13 +37,14 @@ export default function ProjectDetail() {
   const { data, isLoading, isError } = useProject(id);
   const update = useUpdateProject();
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({ client_name: '', budget: '', target_install: '', stage: 'lead' as ProjectStage, notes: '' });
+  const [form, setForm] = useState({ client_name: '', location: '', budget: '', target_install: '', stage: 'lead' as ProjectStage, notes: '' });
 
   useEffect(() => {
     if (data?.project) {
       const p = data.project;
       setForm({
         client_name: p.client_name ?? '',
+        location: p.location ?? '',
         budget: p.budget != null ? String(p.budget) : '',
         target_install: p.target_install ?? '',
         stage: p.stage,
@@ -90,10 +91,22 @@ export default function ProjectDetail() {
         <IconArrow width={14} height={14} className="rotate-180" /> All projects
       </Link>
       <PageHeading
-        eyebrow={p.client_name ?? '—'}
+        // Client and town read as one line — "Ojai Valley Inn & Spa · Ojai, CA"
+        // — because a dozen of these projects share a client and the town is
+        // what tells them apart at a glance.
+        eyebrow={[p.client_name, p.location].filter(Boolean).join(' · ') || '—'}
         title={p.name}
         action={
           <div className="flex items-center gap-3">
+            {/* What the studio's own project sheet calls this, when it came
+                from there. Shown next to the stage rather than instead of it:
+                the two are different vocabularies, and until someone sets a
+                real stage this is the more truthful of the two. */}
+            {p.sheet_status && (
+              <span className="rounded-md bg-ink/5 px-2 py-0.5 text-[11px] font-medium text-ink-soft">
+                Sheet: {p.sheet_status}
+              </span>
+            )}
             <StageBadge stage={p.stage} />
             <button
               onClick={() => setEditing((e) => !e)}
@@ -111,6 +124,9 @@ export default function ProjectDetail() {
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Client">
               <input className={inputCls} value={form.client_name} onChange={(e) => setForm((f) => ({ ...f, client_name: e.target.value }))} placeholder="Client name" />
+            </Field>
+            <Field label="Location">
+              <input className={inputCls} value={form.location} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} placeholder="e.g. Ojai, CA" />
             </Field>
             <Field label="Budget (USD)">
               <input className={inputCls} type="number" value={form.budget} onChange={(e) => setForm((f) => ({ ...f, budget: e.target.value }))} placeholder="e.g. 120000" />
@@ -136,7 +152,7 @@ export default function ProjectDetail() {
               disabled={update.isPending}
               onClick={() =>
                 update.mutate(
-                  { id: p.id, patch: { client_name: form.client_name, budget: form.budget, target_install: form.target_install, stage: form.stage, notes: form.notes } },
+                  { id: p.id, patch: { client_name: form.client_name, location: form.location, budget: form.budget, target_install: form.target_install, stage: form.stage, notes: form.notes } },
                   { onSuccess: () => setEditing(false) },
                 )
               }
