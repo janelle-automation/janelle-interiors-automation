@@ -32,10 +32,6 @@
     {
       "path": "/api/ops/cron/digest",
       "schedule": "5 7 * * *"
-    },
-    {
-      "path": "/api/ops/cron/media",
-      "schedule": "*/5 * * * *"
     }
   ]
 }
