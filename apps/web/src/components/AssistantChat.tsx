@@ -6,6 +6,8 @@ import { api } from '../lib/api';
 import { useConfirmAction } from '../lib/queries';
 import { bestHearing, listen, speak, type StopListening } from '../lib/speech';
 import { AssistantAnswerView, AttachedFiles, answerIsWide, sizeLabel } from './AssistantAnswer';
+import { useImagineOptions } from '../lib/queries';
+import { readableAttachment } from '../lib/attachments';
 import { AssistantGuide } from './AssistantGuide';
 import { IconMic, IconSend, IconStop } from './icons';
 
@@ -37,6 +39,11 @@ const IconX = (p: IconProps) => <svg {...stroke} {...p}><path d="M18 6 6 18M6 6l
 const IconRetry = (p: IconProps) => (
   <svg {...stroke} {...p}><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /></svg>
 );
+
+/** Money as a composer hint: cents when small, whole dollars when not. */
+function usdShort(n: number): string {
+  return n < 1 ? `${Math.round(n * 100)}c` : `$${n.toFixed(2)}`;
+}
 
 export function JennyAvatar({ size = 28 }: { size?: number }) {
   return (
@@ -266,9 +273,36 @@ function MessageView({ message, compact }: { message: ChatMessage; compact: bool
             <p className="whitespace-pre-line">{message.content}</p>
           )}
           <Proposals message={message} />
+          <Rendering message={message} />
         </div>
         <MessageActions message={message} />
       </div>
+    </div>
+  );
+}
+
+/**
+ * A clip still being drawn.
+ *
+ * Shown under the answer that asked for it, because the answer arrived
+ * first and said so. It is replaced by the video itself when the job
+ * finishes — the person does not reload, and does not have to ask again.
+ */
+function Rendering({ message }: { message: ChatMessage }) {
+  const waiting = message.jobs?.length ?? 0;
+  if (!waiting) return null;
+  return (
+    <div
+      className="mt-2.5 flex items-center gap-2.5 rounded-lg border border-line bg-surface px-3 py-2.5 text-[12.5px] text-ink-soft"
+      role="status"
+      aria-live="polite"
+    >
+      <span className="thinking-dots" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </span>
+      {waiting > 1 ? `${waiting} clips are rendering` : 'The clip is rendering'} — it appears here when it is ready.
     </div>
   );
 }
@@ -313,7 +347,9 @@ function Suggestions({ items, onPick, disabled }: { items: string[]; onPick: (q:
 
 /** What Jenny can read. The server checks the bytes too; this only saves a wasted upload. */
 const ACCEPT = ['application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'];
-const ACCEPT_ATTR = '.pdf,image/png,image/jpeg,image/gif,image/webp';
+// Anything picture-shaped is offered: what the server cannot take is
+// converted in the browser first (see lib/attachments).
+const ACCEPT_ATTR = '.pdf,image/*,.heic,.heif,.avif,.svg,.xlsx,.xls,.docx,.csv,.tsv,.txt,.md';
 const MAX_FILES = 4;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 
@@ -330,14 +366,34 @@ interface Attachment {
   controller: AbortController;
 }
 
+/**
+ * Worth trying, rather than known-good.
+ *
+ * What a file really is gets decided from its bytes a moment later, and
+ * anything the browser can display is converted before it is sent — so the
+ * gate here only needs to keep out what is plainly not a document or a
+ * picture at all.
+ */
 const readableType = (f: File) =>
-  ACCEPT.includes(f.type) || (!f.type && /\.(pdf|png|jpe?g|gif|webp)$/i.test(f.name));
+  f.type.startsWith('image/') ||
+  f.type === 'application/pdf' ||
+  ACCEPT.includes(f.type) ||
+  /\.(pdf|png|jpe?g|gif|webp|avif|heic|heif|bmp|tiff?|svg|xlsx?|docx?|csv|tsv|txt|md)$/i.test(f.name);
 
 function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.MutableRefObject<((files: File[]) => void) | null> }) {
   const {
-    send, pending, stop, canListen, lookingAt, focusRequest, setMicError, vocabulary, uploadFile, prefill, attachRequest,
+    send, imagine, pending, stop, canListen, lookingAt, focusRequest, setMicError, vocabulary, uploadFile, prefill, attachRequest,
   } = useAssistant();
+  const { data: canMake } = useImagineOptions();
   const [text, setText] = useState('');
+  /**
+   * Ask, or make.
+   *
+   * Asking goes through Jenny, who decides what to do with it. Making does
+   * not: the person has already decided, so it goes straight to the
+   * provider and costs no model tokens at all.
+   */
+  const [mode, setMode] = useState<'ask' | 'image' | 'video'>('ask');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
@@ -408,10 +464,22 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
         ...list,
         { id, name: f.name, size: f.size, mimeType: f.type || 'application/pdf', status: 'uploading', thumb, controller },
       ]);
-      uploadFile(f, controller.signal)
+      readableAttachment(f)
+        .then((ready) => {
+          // A HEIC shows as a broken thumbnail until it has been converted.
+          if (ready !== f && ready.type.startsWith('image/')) {
+            if (thumb) URL.revokeObjectURL(thumb);
+            patch(id, { thumb: URL.createObjectURL(ready), mimeType: ready.type });
+          }
+          return uploadFile(ready, controller.signal);
+        })
         .then((file) => patch(id, { status: 'ready', file, mimeType: file.mimeType }))
         .catch((err: Error) => {
-          if (err.name !== 'AbortError') patch(id, { status: 'failed', error: err.message });
+          if (err.name === 'AbortError') return;
+          // A format the browser cannot open left a broken thumbnail
+          // behind; the message says what it is, so the box is noise.
+          if (thumb) URL.revokeObjectURL(thumb);
+          patch(id, { status: 'failed', error: err.message, thumb: undefined });
         });
     }
     ref.current?.focus();
@@ -434,8 +502,12 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
 
   function submit() {
     if (!canSend) return;
-    const spoken = heard && text.trim() === heard.best ? { alternatives: heard.alternatives } : {};
-    send(text, { ...spoken, files: ready });
+    if (mode !== 'ask') {
+      imagine(text, mode, { files: ready });
+    } else {
+      const spoken = heard && text.trim() === heard.best ? { alternatives: heard.alternatives } : {};
+      send(text, { ...spoken, files: ready });
+    }
     setText('');
     setHeard(null);
     for (const a of attachments) if (a.thumb) URL.revokeObjectURL(a.thumb);
@@ -540,6 +612,42 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
           ))}
         </ul>
       )}
+      {canMake && (canMake.image.ready || canMake.video.ready) && (
+        <div className="mb-2 flex flex-wrap items-center gap-1.5">
+          <div className="flex gap-0.5 rounded-lg border border-line bg-surface p-0.5" role="group" aria-label="Ask, or make something">
+            {([
+              ['ask', 'Ask', true],
+              ['image', 'Image', canMake.image.ready],
+              ['video', 'Video', canMake.video.ready],
+            ] as const).map(([key, label, enabled]) => (
+              <button
+                key={key}
+                type="button"
+                disabled={!enabled}
+                aria-pressed={mode === key}
+                onClick={() => setMode(key)}
+                className={`focusable rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors disabled:opacity-35 ${
+                  mode === key ? 'bg-brass text-white' : 'text-ink-soft hover:bg-sunk hover:text-ink'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {mode === 'video' && (
+            <span className="text-[11.5px] text-ink-faint">
+              {canMake.video.defaultSeconds}s · about {usdShort(canMake.video.usdPerSecond * canMake.video.defaultSeconds)}
+              {canMake.video.spentTodayUsd > 0 &&
+                ` · ${usdShort(canMake.video.spentTodayUsd)} of ${usdShort(canMake.video.dailyCapUsd)} used today`}
+            </span>
+          )}
+          {mode === 'image' && (
+            <span className="text-[11.5px] text-ink-faint">
+              {attachments.length > 0 ? 'Transforms what you attached' : 'Drawn from your words'} · no tokens spent
+            </span>
+          )}
+        </div>
+      )}
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -605,7 +713,17 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
             }
           }}
           // Short in the panel: a placeholder that wraps makes an empty box two lines tall.
-          placeholder={listening ? 'Listening…' : compact ? `Ask ${ASSISTANT_NAME} anything…` : `Ask ${ASSISTANT_NAME} anything, or say what you need done`}
+          placeholder={
+            listening
+              ? 'Listening…'
+              : mode === 'image'
+                ? 'Describe the picture — the room, the materials, the light'
+                : mode === 'video'
+                  ? 'Describe the clip — the room, the move, the light'
+                  : compact
+                    ? `Ask ${ASSISTANT_NAME} anything…`
+                    : `Ask ${ASSISTANT_NAME} anything, or say what you need done`
+          }
           aria-label={`Message ${ASSISTANT_NAME}`}
           className="max-h-36 min-h-[36px] flex-1 resize-none bg-transparent px-1.5 py-2 text-[14px] leading-5 text-ink outline-none placeholder:text-ink-faint"
         />

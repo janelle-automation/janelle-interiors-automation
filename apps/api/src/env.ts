@@ -63,6 +63,16 @@ export const env = {
     model: optional('GEMINI_IMAGE_MODEL', 'gemini-3-pro-image'),
   },
 
+  // Renderings and short video. A third provider with a third key: Claude
+  // writes, Gemini draws the studio's boards, and this draws and animates
+  // everything the house template never covered. Empty until the studio
+  // sets a key, and every path through it degrades to "not configured".
+  xai: {
+    apiKey: optional('XAI_API_KEY'),
+    imageModel: optional('XAI_IMAGE_MODEL', 'grok-imagine-image-2.0'),
+    videoModel: optional('XAI_VIDEO_MODEL', 'grok-imagine-video-1.5'),
+  },
+
   tokenEncryptionKey: optional('TOKEN_ENCRYPTION_KEY'),
 } as const;
 
@@ -73,6 +83,8 @@ export const isSupabaseConfigured = () =>
   Boolean(env.supabase.url && env.supabase.anonKey && env.supabase.serviceRoleKey);
 
 export const isAnthropicConfigured = () => Boolean(env.anthropic.apiKey);
+
+export const isGrokConfigured = () => Boolean(env.xai.apiKey);
 
 // `required` is kept for values we may enforce later; reference it so
 // strict unused checks stay quiet without changing behaviour.

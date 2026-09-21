@@ -12,6 +12,34 @@ import { matchProjectId } from './promote.js';
 import { matchPerson } from './proposals.js';
 import { gmailFor, readSentMail, type ParsedEmail } from './gmail.js';
 import { orgSourceUserId } from '../lib/tokens.js';
+import { bodyColumnsReady, readStoredText } from '../lib/emailStore.js';
+
+/**
+ * An email whose "does this need a task?" has already been answered NO.
+ *
+ * Without it every scan asked the question again of every email that had
+ * not raised a task — the studio's whole inbox, one Claude call each, on
+ * every press of the button, to get the same "no" as last time. Kept in
+ * `extracted_json` under an underscore key, the convention `emailStore`
+ * already uses for data stored beside the model's own output, so it needs
+ * no migration. Only a definite no is remembered: a call that failed is
+ * worth asking again.
+ */
+const TASK_CHECKED_KEY = '_task_checked';
+
+async function markTaskChecked(emailId: string): Promise<void> {
+  if (!supabaseAdmin) return;
+  try {
+    const { data } = await supabaseAdmin.from('emails').select('extracted_json').eq('id', emailId).maybeSingle();
+    const current = (data as { extracted_json: Record<string, unknown> | null } | null)?.extracted_json ?? {};
+    await supabaseAdmin
+      .from('emails')
+      .update({ extracted_json: { ...current, [TASK_CHECKED_KEY]: new Date().toISOString() } })
+      .eq('id', emailId);
+  } catch {
+    // A missed mark costs one more question on the next scan, nothing more.
+  }
+}
 
 /**
  * Classes that never imply internal work.
@@ -489,43 +517,69 @@ export async function advanceActiveTasks(orgId: string): Promise<number> {
   }
 }
 
+/**
+ * Raise tasks from email already in the system.
+ *
+ * Bounded by a clock, because a person is watching: it used to read every
+ * taskless email in one request, one Claude call apiece, which on a
+ * studio's inbox ran two or three minutes behind a button that said
+ * "Reading email…" — and on the host, where a request dies at 60s, would
+ * never have finished at all. Now it stops starting new emails once the
+ * budget is spent and says how many are left, so each press answers in
+ * seconds and the next press carries on where it stopped.
+ */
 export async function backfillTasks(
   orgId: string,
-  limit = 50,
-): Promise<{ ok: boolean; reason?: string; scanned: number; created: number }> {
-  if (!supabaseAdmin) return { ok: false, reason: 'supabase_not_configured', scanned: 0, created: 0 };
+  opts: { limit?: number; budgetMs?: number } = {},
+): Promise<{ ok: boolean; reason?: string; scanned: number; created: number; remaining: number }> {
+  const limit = opts.limit ?? 50;
+  const deadline = Date.now() + (opts.budgetMs ?? Number.POSITIVE_INFINITY);
+  if (!supabaseAdmin) return { ok: false, reason: 'supabase_not_configured', scanned: 0, created: 0, remaining: 0 };
 
   const { data: existing, error: exErr } = await supabaseAdmin
     .from('tasks')
     .select('source_email_id')
     .eq('org_id', orgId)
     .not('source_email_id', 'is', null);
-  if (exErr) return { ok: false, reason: exErr.message, scanned: 0, created: 0 };
+  if (exErr) return { ok: false, reason: exErr.message, scanned: 0, created: 0, remaining: 0 };
   const done = new Set((existing ?? []).map((r) => (r as { source_email_id: string }).source_email_id));
 
+  // The body has its own column once migration 0010 is in; before that it
+  // lives inside extracted_json, which readStoredText unpacks either way.
+  const withBody = await bodyColumnsReady();
   const { data: emails, error } = await supabaseAdmin
     .from('emails')
-    .select('id, class, subject, from_addr, to_addr, snippet, extracted_json')
+    .select(`id, class, subject, from_addr, to_addr, snippet, extracted_json${withBody ? ', body_text' : ''}`)
     .eq('org_id', orgId)
     .not('class', 'in', `(${IGNORED_CLASSES.map((c) => `"${c}"`).join(',')})`)
     .order('received_at', { ascending: false, nullsFirst: false })
     .limit(limit);
-  if (error) return { ok: false, reason: error.message, scanned: 0, created: 0 };
+  if (error) return { ok: false, reason: error.message, scanned: 0, created: 0, remaining: 0 };
+
+  type Row = {
+    id: string; class: string; subject: string | null;
+    from_addr: string | null; to_addr: string | null; snippet: string | null;
+    body_text?: string | null;
+    extracted_json: ({ summary?: string } & Record<string, unknown>) | null;
+  };
+  // Only what has never been asked: no task yet, and no "no" on record.
+  const todo = ((emails ?? []) as unknown as Row[]).filter(
+    (e) => !done.has(e.id) && !e.extracted_json?.[TASK_CHECKED_KEY],
+  );
 
   let scanned = 0;
   let created = 0;
-  for (const row of emails ?? []) {
-    const e = row as {
-      id: string; class: string; subject: string | null;
-      from_addr: string | null; to_addr: string | null; snippet: string | null;
-      extracted_json: { summary?: string } | null;
-    };
-    if (done.has(e.id)) continue;
+  let remaining = todo.length;
+  for (const e of todo) {
+    if (Date.now() > deadline) break;
+    remaining--;
     scanned++;
     try {
-      // The original body is not stored; the ingest-time summary is usually
-      // a better signal than the raw snippet anyway, so use both.
-      const body = [e.extracted_json?.summary, e.snippet].filter(Boolean).join('\n\n');
+      // The email as it was sent, where the studio has kept it — the same
+      // text the reading pass decided on. The summary and snippet are the
+      // fallback for mail stored before bodies were kept at all.
+      const stored = readStoredText(e).body;
+      const body = stored || [e.extracted_json?.summary, e.snippet].filter(Boolean).join('\n\n');
       const made = await createTaskFromEmail(orgId, e.id, e.class, {
         gmailId: '',
         threadId: '',
@@ -543,7 +597,7 @@ export async function backfillTasks(
       console.error('[backfill] task from email failed:', (err as Error).message);
     }
   }
-  return { ok: true, scanned, created };
+  return { ok: true, scanned, created, remaining };
 }
 
 /**
@@ -594,7 +648,12 @@ export async function createTaskFromEmail(
     vendor: filed?.vendors?.name ?? null,
     names,
   });
-  if (!extracted || !extracted.needs_task) return false;
+  // Unusable JSON is not an answer — leave it to be asked again.
+  if (!extracted) return false;
+  if (!extracted.needs_task) {
+    await markTaskChecked(emailId);
+    return false;
+  }
 
   const title = String(extracted.title ?? '').trim().slice(0, 200);
   if (!title) return false;

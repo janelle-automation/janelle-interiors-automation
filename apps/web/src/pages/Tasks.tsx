@@ -547,6 +547,39 @@ function Board({
 /** Statuses a row can still be moved to; done/cancelled drop out of the list filter. */
 const OPEN_STATUSES: TaskStatus[] = ['open', 'in_progress', 'blocked'];
 
+/**
+ * What a scan found, said once it has finished.
+ *
+ * The button used to fall silent at the end: it read the inbox, raised
+ * nothing or something, and gave no sign which. Pressed on a test email
+ * that did not warrant a task, that silence was indistinguishable from the
+ * scan not working at all.
+ */
+function ScanResult({
+  result,
+  error,
+}: {
+  result?: { ok: boolean; reason?: string; scanned: number; created: number; remaining: number } | undefined;
+  error: Error | null;
+}) {
+  if (error) return <span className="text-[11.5px] text-crit">{error.message}</span>;
+  if (!result) return null;
+  if (!result.ok) return <span className="text-[11.5px] text-crit">{result.reason ?? 'The scan could not run.'}</span>;
+
+  const read =
+    result.scanned === 0
+      ? 'No new email to read — everything has been checked.'
+      : `Read ${result.scanned} email${result.scanned === 1 ? '' : 's'}: ${
+          result.created === 0 ? 'none needed a task' : `${result.created} new task${result.created === 1 ? '' : 's'}`
+        }.`;
+  return (
+    <span className="text-[11.5px] text-ink-faint">
+      {read}
+      {result.remaining > 0 ? ` ${result.remaining} more to go.` : ''}
+    </span>
+  );
+}
+
 export default function Tasks() {
   const { data: tasks, isLoading } = useTasks();
   const { data: team } = useTeam();
@@ -631,14 +664,21 @@ export default function Tasks() {
         action={
           <div className="flex items-center gap-2">
             {supervisor && (
-              <button
-                onClick={() => backfill.mutate()}
-                disabled={backfill.isPending}
-                className="btn-secondary btn-sm"
-                title="Raise tasks from email already in the system"
-              >
-                {backfill.isPending ? 'Reading email…' : 'Scan existing email'}
-              </button>
+              <div className="flex flex-col items-end gap-1">
+                <button
+                  onClick={() => backfill.mutate()}
+                  disabled={backfill.isPending}
+                  className="btn-secondary btn-sm"
+                  title="Raise tasks from email already in the system"
+                >
+                  {backfill.isPending
+                    ? 'Reading email…'
+                    : backfill.data && backfill.data.remaining > 0
+                      ? `Keep reading (${backfill.data.remaining} left)`
+                      : 'Scan existing email'}
+                </button>
+                <ScanResult result={backfill.data} error={backfill.error as Error | null} />
+              </div>
             )}
             <div className="flex overflow-hidden rounded-lg border border-line">
               {(['board', 'list'] as const).map((v) => (

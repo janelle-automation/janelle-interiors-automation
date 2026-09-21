@@ -1,5 +1,6 @@
 import { google, type drive_v3 } from 'googleapis';
 import { googleClientForUser } from '../lib/tokens.js';
+import { isWorkbook, workbookText } from '../lib/xlsx.js';
 
 export interface DriveFile {
   id: string;
@@ -207,14 +208,21 @@ const PLAIN_TYPES = /^(text\/|application\/(json|xml|csv))/;
  */
 export async function readDriveText(
   drive: drive_v3.Drive,
-  file: { id: string; mimeType: string },
+  file: { id: string; mimeType: string; name?: string },
   maxChars = 6000,
 ): Promise<string | null> {
+  const name = file.name ?? '';
   const exportAs = TEXT_EXPORTS[file.mimeType];
   let bytes: Buffer;
   if (exportAs) {
     const res = await drive.files.export({ fileId: file.id, mimeType: exportAs }, { responseType: 'arraybuffer' });
     bytes = Buffer.from(res.data as ArrayBuffer);
+  } else if (isWorkbook(file.mimeType, name)) {
+    // An uploaded .xlsx is not a Google Sheet, so `files.export` refuses
+    // it — which is why the studio's own schedules, the ones people
+    // actually send as attachments, were the files Jenny could never read.
+    // Downloaded and parsed instead.
+    return workbookText(await downloadFile(drive, file.id), maxChars);
   } else if (PLAIN_TYPES.test(file.mimeType)) {
     bytes = await downloadFile(drive, file.id);
   } else {

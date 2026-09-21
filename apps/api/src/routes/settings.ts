@@ -10,6 +10,14 @@ import {
   saveApiKey,
   saveModel,
 } from '../lib/aiSettings.js';
+import {
+  clearXaiApiKey,
+  looksLikeXaiKey,
+  saveXaiApiKey,
+  saveXaiModel,
+  xaiSettingsView,
+} from '../lib/aiSettings.js';
+import { GROK_IMAGE_MODELS, VIDEO_MODELS } from '@janelle/shared';
 import { readIngestSettings, saveIngestSettings } from '../lib/ingestSettings.js';
 
 /**
@@ -35,6 +43,112 @@ settingsRouter.get(
     const orgId = req.auth!.orgId;
     if (!orgId) return res.status(400).json({ error: 'No organization for user' });
     res.json({ data: { ...(await aiSettingsView(orgId)), models: SELECTABLE_MODELS } });
+  }),
+);
+
+/**
+ * The Grok account — renderings and video.
+ *
+ * A third provider with a third key, on the same terms as the Claude one:
+ * the key is encrypted at rest, never travels back to the browser, and the
+ * screen sees only its last four characters and which models are in use.
+ */
+settingsRouter.get(
+  '/media',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({
+      data: {
+        ...(await xaiSettingsView(orgId)),
+        imageModels: GROK_IMAGE_MODELS,
+        videoModels: VIDEO_MODELS,
+      },
+    });
+  }),
+);
+
+settingsRouter.put(
+  '/media/key',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const apiKey = String(req.body?.apiKey ?? '').trim();
+    if (!looksLikeXaiKey(apiKey)) {
+      return res.status(400).json({
+        error: 'That does not look like an xAI API key',
+        detail: 'Keys begin with xai- and come from console.x.ai.',
+      });
+    }
+
+    await saveXaiApiKey(orgId, apiKey);
+
+    // The key itself never reaches the log — the last four is enough to
+    // tell afterwards which key was put in place.
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.media_key_set',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: { hint: apiKey.slice(-4) },
+    });
+
+    res.json({ data: { ...(await xaiSettingsView(orgId)), imageModels: GROK_IMAGE_MODELS, videoModels: VIDEO_MODELS } });
+  }),
+);
+
+settingsRouter.delete(
+  '/media/key',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    await clearXaiApiKey(orgId);
+
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.media_key_cleared',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: {},
+    });
+
+    res.json({ data: { ...(await xaiSettingsView(orgId)), imageModels: GROK_IMAGE_MODELS, videoModels: VIDEO_MODELS } });
+  }),
+);
+
+/** Which Grok model draws stills, and which one makes clips. */
+settingsRouter.put(
+  '/media/model',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const kind = req.body?.kind === 'video' ? 'video' : 'image';
+    const model = String(req.body?.model ?? '');
+    try {
+      await saveXaiModel(orgId, kind, model);
+    } catch {
+      return res.status(400).json({ error: 'Unknown model' });
+    }
+
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.media_model_set',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: { kind, model },
+    });
+
+    res.json({ data: { ...(await xaiSettingsView(orgId)), imageModels: GROK_IMAGE_MODELS, videoModels: VIDEO_MODELS } });
   }),
 );
 

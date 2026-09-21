@@ -1,0 +1,781 @@
+<title>Grok Connector</title>
+<meta name="description" content="How to build the Grok media connector for the Janelle system — the circuit, the contract, and the five moves that wire it in.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,400&family=Instrument+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<style>
+  :root{
+    --paper:#F4F0E8;
+    --surface:#FBF8F2;
+    --sunk:#EAE3D6;
+    --ink:#24201A;
+    --ink-soft:#5B5346;
+    --ink-faint:#8A7F6E;
+    --line:#D8CFBF;
+    --line-soft:#E4DCCD;
+    --brass:#A17C3A;
+    --brass-deep:#856330;
+    --olive:#54603B;
+    --good:#5C7A4C;
+    --warn:#B07E33;
+    --crit:#A0483A;
+    --shadow:0 1px 2px rgba(36,32,26,.05), 0 12px 30px -18px rgba(36,32,26,.30);
+    --maxw:1040px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --paper:#17140F;
+      --surface:#211D16;
+      --sunk:#100E0A;
+      --ink:#ECE5D8;
+      --ink-soft:#B1A794;
+      --ink-faint:#867B6A;
+      --line:#332D23;
+      --line-soft:#2A251C;
+      --brass:#CBA463;
+      --brass-deep:#B58D4C;
+      --olive:#93A06F;
+      --good:#8AA773;
+      --warn:#CDA055;
+      --crit:#CB6E5D;
+      --shadow:0 1px 2px rgba(0,0,0,.30), 0 18px 40px -20px rgba(0,0,0,.65);
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#17140F;
+    --surface:#211D16;
+    --sunk:#100E0A;
+    --ink:#ECE5D8;
+    --ink-soft:#B1A794;
+    --ink-faint:#867B6A;
+    --line:#332D23;
+    --line-soft:#2A251C;
+    --brass:#CBA463;
+    --brass-deep:#B58D4C;
+    --olive:#93A06F;
+    --good:#8AA773;
+    --warn:#CDA055;
+    --crit:#CB6E5D;
+    --shadow:0 1px 2px rgba(0,0,0,.30), 0 18px 40px -20px rgba(0,0,0,.65);
+  }
+
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:"Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size:16px;
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:var(--maxw);margin:0 auto;padding-block:clamp(20px,4vw,52px) 90px;padding-inline:clamp(16px,4vw,44px)}
+
+  h1,h2,h3,h4{margin:0;font-family:"Fraunces", Georgia, "Times New Roman", serif;font-weight:600;line-height:1.14;text-wrap:balance;letter-spacing:-.01em}
+  p{margin:0 0 1em}
+  a{color:var(--brass-deep)}
+  strong{font-weight:600;color:var(--ink)}
+  code,.mono{font-family:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace}
+  code{font-size:.9em;color:var(--brass-deep);background:color-mix(in srgb,var(--brass) 10%,transparent);padding:1px 5px;border-radius:4px}
+  .eyebrow{font-family:"IBM Plex Mono",monospace;font-size:11.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--brass);font-weight:500}
+
+  /* ── masthead ─────────────────────────────── */
+  .masthead{border-top:2px solid var(--ink);padding-top:18px}
+  h1{font-size:clamp(2rem,5.2vw,3.4rem);margin:.3em 0 .2em;max-width:15ch}
+  .mast-sub{font-size:clamp(1.02rem,2vw,1.18rem);color:var(--ink-soft);max-width:58ch;font-family:"Fraunces",Georgia,serif;font-style:italic}
+  .titleblock{margin-top:26px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--surface);display:grid;grid-template-columns:repeat(4,1fr)}
+  .tb-cell{padding:13px 16px;border-right:1px solid var(--line-soft)}
+  .tb-cell:last-child{border-right:none}
+  .tb-k{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint)}
+  .tb-v{margin-top:3px;font-weight:600;font-size:14.5px}
+  .tb-v.brass{color:var(--brass-deep)}
+  @media(max-width:700px){
+    .titleblock{grid-template-columns:repeat(2,1fr)}
+    .tb-cell:nth-child(2n){border-right:none}
+    .tb-cell:nth-child(-n+2){border-bottom:1px solid var(--line-soft)}
+  }
+
+  /* ── sections ─────────────────────────────── */
+  section{margin-top:clamp(42px,6vw,66px)}
+  .sec-head{display:flex;align-items:baseline;gap:14px;border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:24px}
+  .sheet-no{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--brass);letter-spacing:.06em;white-space:nowrap;padding-top:4px}
+  .sec-head h2{font-size:clamp(1.42rem,3vw,1.95rem)}
+  .lede{font-size:clamp(1.04rem,1.9vw,1.16rem);line-height:1.55;color:var(--ink-soft);max-width:64ch}
+  .lede b{color:var(--ink);font-weight:600}
+  .note{max-width:66ch;color:var(--ink-soft)}
+
+  /* ── the definition band ──────────────────── */
+  .contract{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:24px}
+  @media(max-width:760px){.contract{grid-template-columns:1fr}}
+  .cbox{border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:18px 20px 20px}
+  .cbox.is-out{background:transparent;border-style:dashed}
+  .cbox h3{font-size:1.04rem;display:flex;align-items:center;gap:9px;margin-bottom:12px}
+  .dot{width:9px;height:9px;border-radius:50%;flex:none}
+  .dot.in{background:var(--good)}
+  .dot.out{background:var(--ink-faint)}
+  .checks{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+  .checks li{position:relative;padding-left:24px;font-size:14px;color:var(--ink-soft);line-height:1.45}
+  .checks li b{color:var(--ink)}
+  .checks li .m{position:absolute;left:0;top:0;font-family:"IBM Plex Mono",monospace;font-weight:600}
+  .checks.yes li .m{color:var(--good)}
+  .checks.no li .m{color:var(--ink-faint)}
+
+  /* ── diagram ──────────────────────────────── */
+  .stage{margin-top:8px;border:1px solid var(--line);border-radius:14px;background:var(--surface);box-shadow:var(--shadow);overflow:hidden}
+  .stage-bar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:13px 16px;border-bottom:1px solid var(--line-soft);background:var(--sunk)}
+  .tracks{display:flex;gap:6px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:3px}
+  .tbtn{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-soft);background:none;border:0;padding:6px 12px;border-radius:999px;cursor:pointer}
+  .tbtn[aria-pressed="true"]{background:var(--brass);color:#fff}
+  .tbtn:focus-visible,.ctrl:focus-visible{outline:2px solid var(--brass);outline-offset:2px}
+  .spacer{flex:1 1 auto;min-width:8px}
+  .ctrl{font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--ink-soft);background:var(--surface);border:1px solid var(--line);border-radius:7px;padding:6px 11px;cursor:pointer;line-height:1}
+  .ctrl:hover{color:var(--ink);border-color:var(--brass)}
+  .ctrl[data-role="play"]{min-width:76px}
+
+  .diagram-scroll{overflow-x:auto;padding:14px 16px 4px}
+  svg.circuit{display:block;width:100%;min-width:760px;height:auto}
+
+  .n-box{fill:var(--paper);stroke:var(--line);stroke-width:1.2;rx:10}
+  .n-eyebrow{font-family:"IBM Plex Mono",monospace;font-size:9.5px;letter-spacing:.14em;fill:var(--ink-faint)}
+  .n-title{font-family:"Fraunces",Georgia,serif;font-size:15px;font-weight:600;fill:var(--ink)}
+  .n-sub{font-family:"Instrument Sans",system-ui,sans-serif;font-size:11.5px;fill:var(--ink-soft)}
+  .node{opacity:.45;transition:opacity .35s ease}
+  .node.is-on{opacity:1}
+  .node.is-on .n-box{stroke:var(--brass);fill:var(--surface)}
+  .node.is-now .n-box{stroke:var(--brass);stroke-width:2;filter:drop-shadow(0 0 10px color-mix(in srgb,var(--brass) 45%,transparent))}
+  .edge{fill:none;stroke:var(--line);stroke-width:1.6}
+  .edge.only-video{stroke-dasharray:5 5}
+  .trace{fill:none;stroke:var(--brass);stroke-width:2.4;stroke-linecap:round}
+  .token{fill:var(--brass);stroke:var(--surface);stroke-width:2}
+  .zone{fill:none;stroke:var(--line-soft);stroke-width:1;stroke-dasharray:3 6;rx:14}
+  .zone-label{font-family:"IBM Plex Mono",monospace;font-size:9.5px;letter-spacing:.16em;fill:var(--ink-faint)}
+
+  .readout{display:grid;grid-template-columns:auto 1fr;gap:0 18px;align-items:start;padding:16px 18px 18px;border-top:1px solid var(--line-soft)}
+  @media(max-width:560px){.readout{grid-template-columns:1fr;gap:10px}}
+  .step-no{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--brass);letter-spacing:.08em;padding-top:4px;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .step-title{font-family:"Fraunces",Georgia,serif;font-size:1.12rem;font-weight:600;line-height:1.25;margin:0 0 7px}
+  .step-code{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink-soft);word-break:break-word;margin:0}
+  .step-code em{font-style:normal;color:var(--brass-deep)}
+  .rail{display:flex;gap:5px;padding:0 18px 16px;flex-wrap:wrap}
+  .pip{width:26px;height:4px;border-radius:2px;background:var(--line);border:0;padding:0;cursor:pointer}
+  .pip.is-done{background:var(--brass)}
+  .pip.is-now{background:var(--ink)}
+  .legend{display:flex;flex-wrap:wrap;gap:16px;padding:0 18px 16px;font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--ink-faint);letter-spacing:.04em}
+  .legend span{display:inline-flex;align-items:center;gap:7px}
+  .swatch-line{width:22px;height:0;border-top:2px solid var(--brass)}
+  .swatch-line.dash{border-top-style:dashed;border-color:var(--ink-faint)}
+
+  /* ── numbered moves ───────────────────────── */
+  .moves{display:flex;flex-direction:column;gap:0}
+  .move{display:grid;grid-template-columns:54px 1fr;gap:20px;padding:24px 0;border-bottom:1px solid var(--line-soft)}
+  .move:last-child{border-bottom:none}
+  @media(max-width:620px){.move{grid-template-columns:1fr;gap:10px}}
+  .move-no{font-family:"IBM Plex Mono",monospace;font-size:13px;color:var(--brass-deep);font-weight:500;padding-top:5px;font-variant-numeric:tabular-nums}
+  .move h3{font-size:1.14rem;margin-bottom:6px}
+  .move p{font-size:14.5px;color:var(--ink-soft);max-width:64ch}
+  .move p:last-child{margin-bottom:0}
+  .where{display:inline-block;font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--ink-faint);letter-spacing:.02em;margin-bottom:10px}
+
+  pre{margin:14px 0 0;background:var(--sunk);border:1px solid var(--line);border-radius:10px;padding:15px 17px;overflow-x:auto;font-family:"IBM Plex Mono",monospace;font-size:12.5px;line-height:1.65;color:var(--ink-soft)}
+  pre b{color:var(--ink);font-weight:500}
+  pre i{color:var(--brass-deep);font-style:normal}
+  pre .cm{color:var(--ink-faint)}
+
+  /* ── tables ───────────────────────────────── */
+  .tablewrap{overflow-x:auto;border-radius:10px;border:1px solid var(--line)}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th{text-align:left;font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);font-weight:500;padding:11px 14px;background:var(--sunk);border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:12px 14px;border-bottom:1px solid var(--line-soft);color:var(--ink-soft);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td b{color:var(--ink)}
+  td.num{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--ink)}
+
+  .callout{margin-top:26px;border-left:3px solid var(--brass);background:linear-gradient(90deg,color-mix(in srgb,var(--brass) 8%,transparent),transparent 72%);padding:16px 20px;border-radius:0 10px 10px 0}
+  .callout p{margin:0;font-family:"Fraunces",Georgia,serif;font-size:clamp(1.04rem,2.1vw,1.26rem);font-style:italic;line-height:1.42}
+  .callout .who{font-family:"IBM Plex Mono",monospace;font-style:normal;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);margin-top:9px}
+
+  footer{margin-top:60px;padding-top:18px;border-top:1px solid var(--line);display:flex;flex-wrap:wrap;gap:8px 18px;justify-content:space-between;font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--ink-faint);letter-spacing:.04em}
+
+  @media (prefers-reduced-motion: reduce){
+    .node,.trace{transition:none}
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow">Janelle Interiors · AI Workflow System</div>
+    <h1>The Grok connector</h1>
+    <p class="mast-sub">How a second media provider gets wired into a system that already has one — the circuit it
+      runs on, the contract it has to honour, and the five moves that build it.</p>
+
+    <div class="titleblock">
+      <div class="tb-cell"><div class="tb-k">Provider</div><div class="tb-v brass">xAI · Grok Imagine</div></div>
+      <div class="tb-cell"><div class="tb-k">Makes</div><div class="tb-v">Stills · 15s video</div></div>
+      <div class="tb-cell"><div class="tb-k">Lives at</div><div class="tb-v">services/grok.ts</div></div>
+      <div class="tb-cell"><div class="tb-k">Status</div><div class="tb-v brass">Built · needs a key</div></div>
+    </div>
+
+    <p class="lede" style="margin-top:26px">A connector here is <b>not</b> an integration screen or a third-party
+      plugin. It is one file with four exported functions, sitting behind the same shape the Gemini renderer already
+      uses: <b>prompt in, reference images in, one piece of media out.</b> Everything else in this document exists to
+      keep that shape honest — the key, the cost, the clock, and the fact that a video cannot finish inside a request.</p>
+
+    <div class="callout" style="margin-top:22px">
+      <p>This is built. The five moves below are what was done, not what to do — the code is in the branch, it
+        compiles, and it refuses in plain words until someone sets <code>XAI_API_KEY</code> and applies migration 0014.</p>
+      <div class="who">Two steps left · a key, and one migration through the Supabase SQL editor</div>
+    </div>
+  </header>
+
+  <!-- ══ 01 ══════════════════════════════════════════════ -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">01</span><h2>What the connector is, and is not</h2></div>
+    <p class="note">The system already talks to two providers: Claude for reading and writing, Gemini for drawing
+      boards. <code>services/images.ts</code> was written provider-shaped on purpose — its own comment says swapping
+      providers should be a new function beneath that file's exports, not a change at every call site. Grok is the
+      first test of that claim.</p>
+
+    <div class="contract">
+      <div class="cbox">
+        <h3><span class="dot in"></span> The connector owns</h3>
+        <ul class="checks yes">
+          <li><span class="m">+</span> <b>One HTTP client.</b> <code>fetch</code> with an <code>AbortController</code>, no SDK, so the timeout is ours.</li>
+          <li><span class="m">+</span> <b>Provider vocabulary.</b> <code>request_id</code>, <code>generate_audio</code>, <code>respect_moderation</code> — none of it leaks past the exports.</li>
+          <li><span class="m">+</span> <b>Plain-sentence errors.</b> A 401 becomes "the Grok key in Settings is not valid", never a 400 body on screen.</li>
+          <li><span class="m">+</span> <b>Its own spend row.</b> Every call lands on the usage report, successes and failures alike.</li>
+        </ul>
+      </div>
+      <div class="cbox is-out">
+        <h3><span class="dot out"></span> The connector never</h3>
+        <ul class="checks no">
+          <li><span class="m">–</span> <b>Holds a key.</b> It asks <code>aiSettings.ts</code>, which decrypts the studio's key or falls back to the environment.</li>
+          <li><span class="m">–</span> <b>Blocks on a video.</b> It starts one and returns. The waiting happens somewhere no one is watching a spinner.</li>
+          <li><span class="m">–</span> <b>Decides who may render.</b> That is <code>canWith(permissions, role, 'prompts', 'update')</code>, checked before the tool ever calls in.</li>
+          <li><span class="m">–</span> <b>Serves bytes to the browser.</b> Storage and sealed grants already do that, for every file in the app.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ 02 ══════════════════════════════════════════════ -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">02</span><h2>The circuit</h2></div>
+    <p class="note" style="margin-bottom:22px">Two tracks through the same ten parts. An <b>image</b> completes inside
+      one turn and comes back in the answer that asked for it. A <b>video</b> cannot: the provider hands back a
+      <code>request_id</code>, the job is written down, and something polls until there is an mp4 to fetch. Press play,
+      or step through it.</p>
+
+    <div class="stage">
+      <div class="stage-bar">
+        <div class="tracks" role="group" aria-label="Which track to play">
+          <button class="tbtn" type="button" data-track="image" aria-pressed="true">Image · in the turn</button>
+          <button class="tbtn" type="button" data-track="video" aria-pressed="false">Video · job + poll</button>
+        </div>
+        <span class="spacer"></span>
+        <button class="ctrl" type="button" data-role="prev" aria-label="Previous step">◀</button>
+        <button class="ctrl" type="button" data-role="play">Pause</button>
+        <button class="ctrl" type="button" data-role="next" aria-label="Next step">▶</button>
+      </div>
+
+      <div class="diagram-scroll">
+        <svg class="circuit" viewBox="0 0 1040 442" role="img" aria-label="The request path from the Jenny panel through the API, the Claude tool loop and the Grok connector to api.x.ai, and back through storage to the answer.">
+          <defs>
+            <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="var(--line)"></path>
+            </marker>
+            <marker id="head-live" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="var(--brass)"></path>
+            </marker>
+          </defs>
+
+          <!-- zones -->
+          <rect class="zone" x="8" y="14" width="608" height="124"></rect>
+          <text class="zone-label" x="22" y="30">OUR SIDE</text>
+          <rect class="zone" x="838" y="14" width="196" height="404"></rect>
+          <text class="zone-label" x="852" y="30">XAI</text>
+
+          <!-- edges -->
+          <path id="e1" class="edge" d="M180,76 H222" marker-end="url(#head)"></path>
+          <path id="e2" class="edge" d="M376,76 H418" marker-end="url(#head)"></path>
+          <path id="e3" class="edge" d="M588,76 H634" marker-end="url(#head)"></path>
+          <path id="e4" class="edge" d="M804,76 H850" marker-end="url(#head)"></path>
+          <path id="e5" class="edge" d="M937,118 V306" marker-end="url(#head)"></path>
+          <path id="e6" class="edge" d="M854,348 H808" marker-end="url(#head)"></path>
+          <path id="e7" class="edge" d="M634,348 H588" marker-end="url(#head)"></path>
+          <path id="e8" class="edge" d="M418,348 H120 Q96,348 96,324 V118" marker-end="url(#head)"></path>
+          <path id="e9" class="edge only-video" d="M719,118 V174" marker-end="url(#head)"></path>
+          <path id="e10" class="edge only-video" d="M804,207 H913 Q937,207 937,183 V126"></path>
+          <path id="e11" class="edge only-video" d="M588,207 H634" marker-end="url(#head)"></path>
+
+          <!-- nodes -->
+          <g class="node" id="n-studio">
+            <rect class="n-box" x="20" y="34" width="160" height="84"></rect>
+            <text class="n-eyebrow" x="36" y="60">BROWSER</text>
+            <text class="n-title" x="36" y="84">Jenny panel</text>
+            <text class="n-sub" x="36" y="104">spoken or typed</text>
+          </g>
+          <g class="node" id="n-api">
+            <rect class="n-box" x="222" y="34" width="154" height="84"></rect>
+            <text class="n-eyebrow" x="238" y="60">APPS/API</text>
+            <text class="n-title" x="238" y="84">/assistant/ask</text>
+            <text class="n-sub" x="238" y="104">60s, and no longer</text>
+          </g>
+          <g class="node" id="n-jenny">
+            <rect class="n-box" x="418" y="34" width="170" height="84"></rect>
+            <text class="n-eyebrow" x="434" y="60">CLAUDE TOOL LOOP</text>
+            <text class="n-title" x="434" y="84">Jenny</text>
+            <text class="n-sub" x="434" y="104">picks the tool</text>
+          </g>
+          <g class="node" id="n-conn">
+            <rect class="n-box" x="634" y="34" width="170" height="84"></rect>
+            <text class="n-eyebrow" x="650" y="60">SERVICES/GROK.TS</text>
+            <text class="n-title" x="650" y="84">the connector</text>
+            <text class="n-sub" x="650" y="104">key · clock · cost</text>
+          </g>
+          <g class="node" id="n-xai">
+            <rect class="n-box" x="854" y="34" width="166" height="84"></rect>
+            <text class="n-eyebrow" x="870" y="60">API.X.AI/V1</text>
+            <text class="n-title" x="870" y="84">Grok Imagine</text>
+            <text class="n-sub" x="870" y="104">images · videos</text>
+          </g>
+
+          <g class="node" id="n-jobs">
+            <rect class="n-box" x="634" y="174" width="170" height="66"></rect>
+            <text class="n-eyebrow" x="650" y="198">SUPABASE · RLS</text>
+            <text class="n-title" x="650" y="222">media_jobs</text>
+          </g>
+          <g class="node" id="n-cron">
+            <rect class="n-box" x="418" y="174" width="170" height="66"></rect>
+            <text class="n-eyebrow" x="434" y="198">OPS/CRON · 5 MIN</text>
+            <text class="n-title" x="434" y="222">the sweep</text>
+          </g>
+
+          <g class="node" id="n-store">
+            <rect class="n-box" x="854" y="306" width="166" height="84"></rect>
+            <text class="n-eyebrow" x="870" y="332">BUCKET</text>
+            <text class="n-title" x="870" y="356">our storage</text>
+            <text class="n-sub" x="870" y="376">assistant-uploads</text>
+          </g>
+          <g class="node" id="n-grant">
+            <rect class="n-box" x="634" y="306" width="170" height="84"></rect>
+            <text class="n-eyebrow" x="650" y="332">LIB/FILETOKENS</text>
+            <text class="n-title" x="650" y="356">sealed grant</text>
+            <text class="n-sub" x="650" y="376">or a signed URL</text>
+          </g>
+          <g class="node" id="n-answer">
+            <rect class="n-box" x="418" y="306" width="170" height="84"></rect>
+            <text class="n-eyebrow" x="434" y="332">THE ANSWER</text>
+            <text class="n-title" x="434" y="356">shown, not told</text>
+            <text class="n-sub" x="434" y="376">a ref in the items</text>
+          </g>
+
+          <circle class="token" id="token" r="6.5" cx="-40" cy="-40"></circle>
+        </svg>
+      </div>
+
+      <div class="readout">
+        <div class="step-no" id="step-no">01 / 09</div>
+        <div>
+          <h3 class="step-title" id="step-title">Someone asks</h3>
+          <p class="step-code mono" id="step-code">—</p>
+        </div>
+      </div>
+      <div class="rail" id="rail"></div>
+      <div class="legend">
+        <span><i class="swatch-line"></i> the live leg</span>
+        <span><i class="swatch-line dash"></i> video only</span>
+        <span>dimmed = not on this track</span>
+      </div>
+    </div>
+
+    <div class="callout">
+      <p>The model will happily announce a finished video it has never seen. So the server hands it a job id and an
+        instruction not to show one — and the screen, not the sentence, is what delivers the clip.</p>
+      <div class="who">Why <b>make_video</b> returns no file ref</div>
+    </div>
+  </section>
+
+  <!-- ══ 03 ══════════════════════════════════════════════ -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">03</span><h2>Five moves</h2></div>
+    <p class="note" style="margin-bottom:12px">In this order. Each one ends somewhere the work can stop safely, and
+      nothing before move four is visible to anyone in the studio.</p>
+
+    <div class="moves">
+
+      <article class="move">
+        <div class="move-no">01</div>
+        <div>
+          <h3>Prove the provider before you believe the docs</h3>
+          <span class="where">scripts/grok-probe.mjs · half a day</span>
+          <p>The video API is documented down to its status values. The image API is not: whether it takes
+            <code>n</code>, <code>response_format</code>, <code>aspect_ratio</code> or a reference image under exactly
+            those names is unconfirmed, and so is whether its returned URL expires. Settle it with one script against
+            the real key, and write the answers into the plan — before anything in the app depends on them.</p>
+          <pre><span class="cm"># one image, one video, every raw response printed</span>
+curl -X POST https://api.x.ai/v1/images/generations \
+  -H "Authorization: Bearer $XAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<i>grok-imagine-image-2.0</i>","prompt":"warm oak kitchen, morning light"}'
+
+curl -X POST https://api.x.ai/v1/videos/generations \
+  -H "Authorization: Bearer $XAI_API_KEY" \
+  -d '{"model":"<i>grok-imagine-video-1.5</i>","prompt":"slow pan across the island","duration":6}'
+<span class="cm"># → { "request_id": "d97415a1-…" } then poll:</span>
+curl https://api.x.ai/v1/videos/$REQUEST_ID -H "Authorization: Bearer $XAI_API_KEY"
+<span class="cm"># → status: pending | done | failed | expired</span></pre>
+        </div>
+      </article>
+
+      <article class="move">
+        <div class="move-no">02</div>
+        <div>
+          <h3>Write the module, and nothing else</h3>
+          <span class="where">apps/api/src/services/grok.ts · new file</span>
+          <p>Four exports. They are the whole connector, and they are deliberately not Grok-shaped: a caller asks for
+            an image or starts a video, and never learns what a <code>request_id</code> is.</p>
+          <pre><b>export async function</b> isGrokReady(orgId?): Promise&lt;boolean&gt;;
+<b>export async function</b> generateImage(req, refs, ctx: CallContext): Promise&lt;<i>GeneratedImage</i>&gt;;
+<b>export async function</b> startVideo(req: VideoRequest, ctx: CallContext): Promise&lt;{ requestId; model }&gt;;
+<b>export async function</b> pollVideo(requestId, orgId?): Promise&lt;
+  | { status: <i>'pending'</i> }
+  | { status: <i>'done'</i>; url; seconds; model }
+  | { status: <i>'failed' | 'expired'</i>; message }&gt;;
+
+<span class="cm">/* Bounded inside what is left of the assistant's 40s turn — not the</span>
+<span class="cm">   180s the board renderer asks for, which the 60s function outlives. */</span>
+<b>const</b> IMAGE_TIMEOUT_MS = Number(process.env.XAI_IMAGE_TIMEOUT_MS || 25_000);</pre>
+          <p style="margin-top:14px">Two rules the module holds on its own: <b>cost is recorded by whichever call
+            spends it</b> — the image call books one image, and the <i>poll</i> that first sees <code>done</code> books
+            <code>seconds × rate</code> — and <b>every failure comes out as a sentence someone can act on</b>, the way
+            the Gemini path already turns a quota error into "enable billing on the project behind this key".</p>
+        </div>
+      </article>
+
+      <article class="move">
+        <div class="move-no">03</div>
+        <div>
+          <h3>Give it a key it does not own</h3>
+          <span class="where">env.ts · lib/aiSettings.ts · routes/settings.ts</span>
+          <p>A third resolver beside <code>resolveAi</code> and <code>resolveImageAi</code>: same AES-256-GCM
+            encryption, same 30-second cache, same rule that the key never reaches the browser — the settings screen
+            gets the last four characters and nothing else. <code>organizations.settings</code> is readable by every
+            member of the studio, which is exactly why the key is encrypted inside it.</p>
+          <pre>xai_api_key_encrypted · xai_image_model · xai_video_model   <span class="cm">// studio</span>
+XAI_API_KEY · XAI_IMAGE_MODEL · XAI_VIDEO_MODEL             <span class="cm">// environment fallback</span></pre>
+          <p style="margin-top:14px">Worth knowing before you start: <code>imageSettingsView</code> and its
+            save/clear siblings already exist in <code>aiSettings.ts</code> and are <b>wired to no route and no
+            screen</b>. Image config is environment-only in practice today. Wire both while you are in there.</p>
+        </div>
+      </article>
+
+      <article class="move">
+        <div class="move-no">04</div>
+        <div>
+          <h3>Hand it to Jenny — two tools, one of which lies if you let it</h3>
+          <span class="where">services/assistant.ts · TOOLS, runTool, TOOL_STATUS, TOOL_SOURCES</span>
+          <p><code>make_image</code> follows the <code>render_board</code> handler almost line for line: check the
+            permission, check the key, read the attachments as references, store the bytes, seal a grant, return a
+            ref for the answer's items. <code>make_video</code> is the one that needs guarding.</p>
+          <pre><b>return</b> {
+  job_id: job.id,
+  status: <i>'rendering'</i>,
+  estimated_cost_usd: videoCostUsd(model, seconds).toFixed(2),
+  instruction: <i>'Tell them it is rendering and roughly how long. Do NOT put a file'</i> +
+               <i>' ref in the items — there is no video yet.'</i>,
+};</pre>
+          <p style="margin-top:14px">Keep both descriptions tight. <code>estimateTokens</code> counts the tool block
+            on <b>every</b> turn against a 5,000-token budget, and whatever the tools spend comes off the clamp on
+            Jenny's output — so a verbose description is paid for by every answer she gives, forever.</p>
+        </div>
+      </article>
+
+      <article class="move">
+        <div class="move-no">05</div>
+        <div>
+          <h3>Make the waiting real</h3>
+          <span class="where">migration 0014 · services/mediaJobs.ts · routes/ops.ts · AssistantAnswer.tsx</span>
+          <p>A <code>media_jobs</code> table, org-scoped by the same RLS policy the baseline stamps on every
+            operational table. Then two pollers, because neither is enough alone: <b>the browser</b> while someone is
+            watching, and <b>a cron sweep every five minutes</b> for everyone who closed the tab. Both call one
+            <code>finishJob(jobId)</code>, made safe against each other by a conditional update.</p>
+          <pre>  start ──▶ <b>pending</b> ──▶ <b>done</b>      <span class="cm">bytes in our storage, URL signed</span>
+              │  └────▶ <b>failed</b>    <span class="cm">the provider's own sentence, passed on</span>
+              └───────▶ <b>expired</b>   <span class="cm">gave up after ~10 minutes</span></pre>
+          <p style="margin-top:14px">Two details decide whether this works at all. The provider's mp4 URL is
+            <b>temporary</b> — fetch it into the bucket the moment the job reports done, or last Tuesday's clip is a
+            dead link. And an mp4 cannot come back through <code>/api/assistant/file</code>: the relay caps at
+            <b>4.3 MB</b> on Vercel, so video is delivered as a short-lived Supabase signed URL with a new
+            <code>preview: 'video'</code>, never as a download.</p>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ══ 04 ══════════════════════════════════════════════ -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">04</span><h2>What it costs, and what goes wrong</h2></div>
+    <p class="note" style="margin-bottom:20px">Prices from xAI's model list, read on 21 September 2026. A board from
+      the existing Gemini path is $0.18 for comparison, and an answer from Jenny is fractions of a cent — video is the
+      most expensive single action in the app by an order of magnitude.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Model</th><th>Makes</th><th>Price</th><th>A realistic ask</th></tr></thead>
+        <tbody>
+          <tr><td><b>grok-imagine-image-2.0</b></td><td>One still</td><td class="num">$0.04 / image</td><td>"Show me the kitchen in warm oak" — $0.04</td></tr>
+          <tr><td>grok-imagine-image</td><td>One still</td><td class="num">$0.02 / image</td><td>Iterating on a concept, cheaply</td></tr>
+          <tr><td>grok-imagine-image-quality</td><td>One still</td><td class="num">$0.05 / image</td><td>The one that goes in front of a client</td></tr>
+          <tr><td><b>grok-imagine-video-1.5</b></td><td>1–15s, up to 1080p</td><td class="num">$0.080 / second</td><td>A 6s walk-through — <b>$0.48</b>. The full 15s — <b>$1.20</b></td></tr>
+          <tr><td>grok-imagine-video</td><td>1–15s</td><td class="num">$0.050 / second</td><td>A 6s draft — $0.30</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 style="margin:30px 0 14px;font-size:1.1rem">The failures worth writing code for</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>What happens</th><th>What the person must see</th><th>Where it is handled</th></tr></thead>
+        <tbody>
+          <tr><td><b>No key anywhere</b></td><td>"Video isn't set up yet" — and an offer to write the brief out instead</td><td><code>isGrokReady</code>, before the call</td></tr>
+          <tr><td><b>401 from xAI</b></td><td>"The Grok key in Settings is not valid"</td><td>grok.ts, mapped from the status</td></tr>
+          <tr><td><b>Grok refuses the brief</b></td><td>Its own reason, in one sentence — not a 400 body</td><td>grok.ts, from <code>error.message</code></td></tr>
+          <tr><td><b>The image runs past the turn</b></td><td>"It's still drawing" — the turn ends with what it has</td><td>25s abort, inside the 40s budget</td></tr>
+          <tr><td><b>They close the tab mid-render</b></td><td>The clip is waiting for them next time</td><td>The cron sweep</td></tr>
+          <tr><td><b>The mp4 is 9 MB</b></td><td>It plays. The download button is not the delivery path</td><td>Signed URL, not the 4.3 MB relay</td></tr>
+          <tr><td><b>A misheard brief</b></td><td>A Confirm step before a dollar is spent</td><td>The existing proposal mechanism</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ══ 05 ══════════════════════════════════════════════ -->
+  <section>
+    <div class="sec-head"><span class="sheet-no">05</span><h2>The voice half is already built</h2></div>
+    <p class="note">Worth saying plainly before anyone plans work for it. <code>apps/web/src/lib/speech.ts</code>
+      already holds recognition, the studio's own vocabulary re-ranking (fed by <code>GET
+      /api/assistant/vocabulary</code>, so "Casa Elar" survives being heard), echo suppression and speech output.
+      Every hearing already reaches the server as <code>spoken.alternatives</code>. A spoken brief needs four things
+      on top of that, all small:</p>
+    <div class="contract" style="margin-top:22px">
+      <div class="cbox">
+        <h3><span class="dot in"></span> Do</h3>
+        <ul class="checks yes">
+          <li><span class="m">+</span> <b>Pass the alternatives through.</b> A misheard material is a wasted dollar, and the model spots "oat flooring" better than the recogniser does.</li>
+          <li><span class="m">+</span> <b>Confirm before spending.</b> A misheard task is recoverable; a misheard $1.20 clip is not.</li>
+        </ul>
+      </div>
+      <div class="cbox">
+        <h3><span class="dot out"></span> Don't</h3>
+        <ul class="checks no">
+          <li><span class="m">–</span> <b>Read the brief back aloud.</b> The answer's <code>speech</code> field exists for exactly this: "Rendering it now, about a minute."</li>
+          <li><span class="m">–</span> <b>Leave audio on.</b> <code>generate_audio</code> defaults to <i>true</i> at the provider; a talking video plus Jenny speaking is two voices, and the echo filter will feed the soundtrack back as the next question.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Janelle Interiors · AI Workflow System</span>
+    <span>Companion: docs/GROK-MEDIA-IMPLEMENTATION.md</span>
+    <span>Provider facts verified 21 Sep 2026</span>
+  </footer>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var TRACKS = {
+    image: [
+      { node: 'n-studio', title: 'Someone asks', code: '"Make me the kitchen in warm oak" — held mic, or typed.' },
+      { edge: 'e1', node: 'n-api', title: 'It reaches the API', code: 'POST /api/assistant/ask — with <em>spoken.alternatives</em>, every way the browser heard it.' },
+      { edge: 'e2', node: 'n-jenny', title: 'Jenny reads the room', code: 'The page they are on, what is pending, the studio snapshot — then she picks a tool.' },
+      { edge: 'e3', node: 'n-conn', title: 'make_image calls the connector', code: 'canWith(permissions, role, <em>prompts</em>, <em>update</em>) → isGrokReady() → generateImage()' },
+      { edge: 'e4', node: 'n-xai', title: 'One request, one picture', code: 'Something attached → POST /v1/images/<em>edits</em>, which holds that picture and keeps its proportions. Nothing attached → /v1/images/<em>generations</em>. Two endpoints, chosen by whether there is a source.' },
+      { edge: 'e5', node: 'n-store', title: 'The bytes become ours', code: 'storeUpload() → the <em>assistant-uploads</em> bucket. $0.04 on the usage report, recorded either way.' },
+      { edge: 'e6', node: 'n-grant', title: 'Sealed, not linked', code: 'sealFileGrant({ source: <em>upload</em>, … }) — org-bound, expiring, unforgeable.' },
+      { edge: 'e7', node: 'n-answer', title: 'A ref, not a retelling', code: 'refs.add(<em>F</em>, { kind: file, preview: image }) — the server swaps the ref for the row.' },
+      { edge: 'e8', node: 'n-studio', title: 'Shown in the answer that asked', code: 'One turn, start to finish. Jenny says one sentence; the picture does the rest.' }
+    ],
+    video: [
+      { node: 'n-studio', title: 'Someone asks for a clip', code: '"A six second walk-through of the Casa Elar kitchen, morning light."' },
+      { edge: 'e1', node: 'n-api', title: 'It reaches the API', code: 'POST /api/assistant/ask — the same door as every other question.' },
+      { edge: 'e2', node: 'n-jenny', title: 'Jenny proposes, and waits', code: '6 seconds ≈ <em>$0.48</em>. A misheard brief must not spend it — so this goes through Confirm.' },
+      { edge: 'e3', node: 'n-conn', title: 'make_video starts it', code: 'startVideo({ prompt, seconds: 6, generate_audio: <em>false</em> })' },
+      { edge: 'e4', node: 'n-xai', title: 'The provider takes the job', code: 'POST /v1/videos/generations — and answers immediately, with nothing to watch.' },
+      { edge: 'e9', node: 'n-jobs', title: 'Written down before anything else', code: 'media_jobs ← { request_id, status: <em>pending</em>, model, seconds } · Jenny’s turn ends here.' },
+      { edge: 'e10', node: 'n-xai', title: 'Poll', code: 'GET /v1/videos/{request_id} → status: <em>pending</em>' },
+      { edge: 'e10', node: 'n-xai', title: 'Poll again, five seconds later', code: 'The browser drives this while someone watches — one provider poll per browser poll.' },
+      { edge: 'e10', reverse: true, node: 'n-jobs', title: 'Done', code: 'status: <em>done</em> · video.url · duration 6 — and the URL is temporary.' },
+      { edge: 'e5', node: 'n-store', title: 'Fetch it before it expires', code: 'The mp4 comes into our bucket now, not later. $0.48 booked on this poll.' },
+      { edge: 'e6', node: 'n-grant', title: 'A signed URL, not a download', code: 'createSignedUrl(path, 3600) — because the API relay caps at <em>4.3 MB</em> and an mp4 does not fit.' },
+      { edge: 'e7', node: 'n-answer', title: 'The clip arrives late, and in place', code: 'preview: <em>video</em> — controls, muted, never autoplay. No reload.' },
+      { edge: 'e11', node: 'n-cron', title: 'And if they walked away', code: 'The five-minute sweep finishes any pending job — otherwise the URL expires and the work is lost.' }
+    ]
+  };
+
+  var svg = document.querySelector('svg.circuit');
+  if (!svg) return;
+  var token = document.getElementById('token');
+  var railEl = document.getElementById('rail');
+  var elNo = document.getElementById('step-no');
+  var elTitle = document.getElementById('step-title');
+  var elCode = document.getElementById('step-code');
+  var playBtn = document.querySelector('[data-role="play"]');
+  var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // One brass "trace" per edge, drawn in as the token passes over it.
+  var traces = {};
+  Array.prototype.forEach.call(svg.querySelectorAll('path.edge'), function (edge) {
+    var clone = edge.cloneNode(false);
+    clone.removeAttribute('id');
+    clone.setAttribute('class', 'trace');
+    clone.setAttribute('marker-end', 'url(#head-live)');
+    clone.style.strokeDasharray = '';
+    var len = edge.getTotalLength();
+    clone.style.strokeDasharray = len + ' ' + len;
+    clone.style.strokeDashoffset = len;
+    edge.parentNode.insertBefore(clone, edge.nextSibling);
+    traces[edge.id] = { path: edge, trace: clone, len: len };
+  });
+
+  var trackName = 'image';
+  var steps = TRACKS[trackName];
+  var index = 0;
+  var playing = !reduced;
+  var raf = null;
+  var timer = null;
+
+  function clearTraces() {
+    Object.keys(traces).forEach(function (id) {
+      traces[id].trace.style.strokeDashoffset = traces[id].len;
+    });
+  }
+
+  function buildRail() {
+    railEl.innerHTML = '';
+    steps.forEach(function (_, i) {
+      var pip = document.createElement('button');
+      pip.type = 'button';
+      pip.className = 'pip';
+      pip.setAttribute('aria-label', 'Step ' + (i + 1));
+      pip.addEventListener('click', function () { stop(); go(i, false); });
+      railEl.appendChild(pip);
+    });
+  }
+
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+
+  function paint() {
+    var step = steps[index];
+    Array.prototype.forEach.call(svg.querySelectorAll('.node'), function (n) {
+      n.classList.remove('is-on', 'is-now');
+    });
+    for (var i = 0; i <= index; i++) {
+      var n = document.getElementById(steps[i].node);
+      if (n) n.classList.add('is-on');
+    }
+    var now = document.getElementById(step.node);
+    if (now) now.classList.add('is-now');
+
+    elNo.textContent = pad(index + 1) + ' / ' + pad(steps.length);
+    elTitle.textContent = step.title;
+    elCode.innerHTML = step.code;
+
+    Array.prototype.forEach.call(railEl.children, function (pip, i) {
+      pip.className = 'pip' + (i < index ? ' is-done' : i === index ? ' is-now' : '');
+    });
+  }
+
+  function place(edgeId, t, reverse) {
+    var entry = traces[edgeId];
+    if (!entry) { token.setAttribute('cx', -40); token.setAttribute('cy', -40); return; }
+    var at = reverse ? entry.len * (1 - t) : entry.len * t;
+    var p = entry.path.getPointAtLength(at);
+    token.setAttribute('cx', p.x);
+    token.setAttribute('cy', p.y);
+    entry.trace.style.strokeDashoffset = (reverse ? -1 : 1) * entry.len * (1 - t);
+  }
+
+  function go(i, animate) {
+    if (raf) { cancelAnimationFrame(raf); raf = null; }
+    if (timer) { clearTimeout(timer); timer = null; }
+
+    if (i === 0) clearTraces();
+    index = ((i % steps.length) + steps.length) % steps.length;
+    paint();
+
+    var step = steps[index];
+    if (!step.edge) {
+      token.setAttribute('cx', -40);
+      token.setAttribute('cy', -40);
+      if (animate && playing) timer = setTimeout(next, 1100);
+      return;
+    }
+    if (!animate || reduced) {
+      place(step.edge, 1, step.reverse);
+      if (animate && playing) timer = setTimeout(next, 1100);
+      return;
+    }
+
+    var duration = 850;
+    var started = null;
+    (function frame(ts) {
+      if (started === null) started = ts;
+      var t = Math.min(1, (ts - started) / duration);
+      var eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      place(step.edge, eased, step.reverse);
+      if (t < 1) { raf = requestAnimationFrame(frame); }
+      else {
+        raf = null;
+        if (playing) timer = setTimeout(next, index === steps.length - 1 ? 2200 : 620);
+      }
+    })(performance.now());
+  }
+
+  function next() { go(index + 1, true); }
+
+  function stop() {
+    playing = false;
+    playBtn.textContent = 'Play';
+    if (raf) { cancelAnimationFrame(raf); raf = null; }
+    if (timer) { clearTimeout(timer); timer = null; }
+  }
+
+  function start() {
+    playing = true;
+    playBtn.textContent = 'Pause';
+    go(index, true);
+  }
+
+  playBtn.addEventListener('click', function () { playing ? stop() : start(); });
+  document.querySelector('[data-role="next"]').addEventListener('click', function () { stop(); go(index + 1, false); });
+  document.querySelector('[data-role="prev"]').addEventListener('click', function () { stop(); go(index - 1, false); });
+
+  Array.prototype.forEach.call(document.querySelectorAll('.tbtn'), function (btn) {
+    btn.addEventListener('click', function () {
+      var name = btn.getAttribute('data-track');
+      if (name === trackName) return;
+      Array.prototype.forEach.call(document.querySelectorAll('.tbtn'), function (b) {
+        b.setAttribute('aria-pressed', String(b === btn));
+      });
+      trackName = name;
+      steps = TRACKS[name];
+      index = 0;
+      buildRail();
+      clearTraces();
+      if (playing) { go(0, true); } else { go(0, false); }
+    });
+  });
+
+  buildRail();
+  go(0, false);
+  if (!reduced) { timer = setTimeout(function () { start(); }, 900); }
+  else { playBtn.textContent = 'Play'; playing = false; }
+})();
+</script>

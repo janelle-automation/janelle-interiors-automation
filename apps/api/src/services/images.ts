@@ -150,9 +150,10 @@ async function callGemini(
   apiKey: string,
   model: string,
   body: unknown,
+  timeoutMs = RENDER_TIMEOUT_MS,
 ): Promise<{ res: Response; json: GeminiResponse }> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), RENDER_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${GEMINI_URL}/${encodeURIComponent(model)}:generateContent`, {
       method: 'POST',
@@ -180,6 +181,13 @@ export async function renderImage(
   prompt: string,
   references: ImageReference[],
   ctx: CallContext,
+  /**
+   * Shorter than the board default when a person is waiting inside one
+   * turn. A board rendered from the Prompts page can take its three
+   * minutes; a picture asked for in conversation has to come back before
+   * the assistant's own budget runs out, or the answer is lost with it.
+   */
+  options?: { timeoutMs?: number },
 ): Promise<RenderResult> {
   const ai = await resolveImageAi(ctx.orgId);
   if (!ai.apiKey) throw new ImagesNotConfigured();
@@ -215,12 +223,12 @@ export async function renderImage(
   // so both go out as TEXT+IMAGE and whichever comes back is used.
   const started = Date.now();
   try {
-    let { res, json } = await callGemini(ai.apiKey, model, request(['TEXT', 'IMAGE']));
+    let { res, json } = await callGemini(ai.apiKey, model, request(['TEXT', 'IMAGE']), options?.timeoutMs);
 
     // Some models reject the pairing and want one modality named. Cheap to
     // try the other way round rather than fail on a config detail.
     if (!res.ok && /responseModalities|modalit/i.test(json.error?.message ?? '')) {
-      ({ res, json } = await callGemini(ai.apiKey, model, request(['IMAGE'])));
+      ({ res, json } = await callGemini(ai.apiKey, model, request(['IMAGE']), options?.timeoutMs));
     }
 
     if (!res.ok) {
@@ -278,6 +286,19 @@ export async function renderImage(
           'Use an image model, or leave it to answer in words.',
       );
     }
+    // The commonest cause by far, and the one whose error is otherwise
+    // baffling: the configured id is a TEXT model. It answers the brief in
+    // prose, which looks like a refusal rather than like a setting that
+    // needs changing. `imageModelKind` assumes an unknown id is raster, so
+    // nothing upstream catches this — it is caught here, by name.
+    if (!IMAGE_MODELS.some((m) => m.id === model)) {
+      throw new Error(
+        `"${model}" answered in words instead of drawing — it is a text model, not an image model. ` +
+          `Set the image model to one that draws: ${IMAGE_MODELS.map((m) => m.id).join(', ')} ` +
+          '(Settings, or GEMINI_IMAGE_MODEL).',
+      );
+    }
+
     // A model that answers in words when asked for a picture has usually
     // refused; its own sentence is the most useful error we can give.
     throw new Error(said ? `No image came back: ${said.slice(0, 300)}` : 'No image came back.');

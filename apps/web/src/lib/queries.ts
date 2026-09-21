@@ -442,6 +442,13 @@ export interface AssistantReply {
    * keyed as the browser sent them, so their buttons can be settled too.
    */
   settled?: { key: string; decision: 'confirmed' | 'cancelled'; id?: string | null; kind?: 'task' | 'draft' | 'task_update' }[];
+  /**
+   * Clips this question set off, which are still rendering.
+   *
+   * The answer is written and sent while the provider is still drawing, so
+   * these ids are how the screen knows there is something to wait for.
+   */
+  startedJobs?: string[];
 }
 
 /** What a confirmed proposal became. */
@@ -815,7 +822,7 @@ export function useBackfillTasks() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () =>
-      api<{ ok: boolean; reason?: string; scanned: number; created: number }>(
+      api<{ ok: boolean; reason?: string; scanned: number; created: number; remaining: number; advanced?: number }>(
         '/ops/backfill-tasks',
         { method: 'POST' },
       ),
@@ -1228,6 +1235,50 @@ export function useClearAiKey() {
   return useAiMutation(() => api<AiSettingsView>('/settings/ai/key', { method: 'DELETE' }));
 }
 
+// ── Pictures and video (Grok / xAI) ─────────────────────────
+
+export interface MediaConfig {
+  configured: boolean;
+  source: 'studio' | 'environment' | 'none';
+  keyHint: string | null;
+  imageModel: string;
+  videoModel: string;
+  imageModels: { id: string; label: string; usdPerImage: number; note: string }[];
+  videoModels: { id: string; label: string; usdPerSecond: number; maxSeconds: number; note: string }[];
+}
+
+export function useMediaConfig() {
+  return useQuery({ queryKey: ['media-config'], queryFn: () => api<MediaConfig>('/settings/media') });
+}
+
+/** A new key changes what the Create buttons can offer, so both are refreshed. */
+function useMediaMutation<V>(fn: (v: V) => Promise<MediaConfig>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['media-config'] });
+      qc.invalidateQueries({ queryKey: ['imagine-options'] });
+    },
+  });
+}
+
+export function useSetMediaKey() {
+  return useMediaMutation((apiKey: string) =>
+    api<MediaConfig>('/settings/media/key', { method: 'PUT', body: JSON.stringify({ apiKey }) }),
+  );
+}
+
+export function useClearMediaKey() {
+  return useMediaMutation(() => api<MediaConfig>('/settings/media/key', { method: 'DELETE' }));
+}
+
+export function useSetMediaModel() {
+  return useMediaMutation((v: { kind: 'image' | 'video'; model: string }) =>
+    api<MediaConfig>('/settings/media/model', { method: 'PUT', body: JSON.stringify(v) }),
+  );
+}
+
 export function useIngestSettings() {
   return useQuery({
     queryKey: ['ingest-settings'],
@@ -1258,10 +1309,36 @@ export interface UsageLink {
   created_at: string | null;
 }
 
-export function useAiUsage(days = 30) {
+/** What the Create buttons can offer right now, and what a clip would cost. */
+export interface ImagineOptions {
+  image: { ready: boolean; provider: 'grok' | 'gemini' | null };
+  video: {
+    ready: boolean;
+    model: string;
+    defaultSeconds: number;
+    maxSeconds: number;
+    usdPerSecond: number;
+    spentTodayUsd: number;
+    dailyCapUsd: number;
+  };
+}
+
+export function useImagineOptions() {
   return useQuery({
-    queryKey: ['ai-usage', days],
-    queryFn: () => api<AiUsageReport>(`/usage?days=${days}`),
+    queryKey: ['imagine-options'],
+    queryFn: () => api<ImagineOptions | null>('/assistant/imagine/options'),
+    // Keys and caps change in Settings, not between keystrokes.
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useAiUsage(days = 30) {
+  // The reader's offset, so the report's "today" is their day rather than
+  // UTC's — which otherwise rolls over mid-afternoon on the US west coast.
+  const tz = new Date().getTimezoneOffset();
+  return useQuery({
+    queryKey: ['ai-usage', days, tz],
+    queryFn: () => api<AiUsageReport>(`/usage?days=${days}&tz=${tz}`),
   });
 }
 

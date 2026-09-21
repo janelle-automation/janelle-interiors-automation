@@ -1,8 +1,12 @@
 import {
+  DEFAULT_GROK_IMAGE_MODEL,
   DEFAULT_IMAGE_MODEL,
   DEFAULT_MODEL,
+  DEFAULT_VIDEO_MODEL,
+  GROK_IMAGE_MODELS,
   IMAGE_MODELS,
   SELECTABLE_MODELS,
+  VIDEO_MODELS,
   type AiSettingsView,
 } from '@janelle/shared';
 import { env } from '../env.js';
@@ -33,6 +37,12 @@ const MODEL_FIELD = 'anthropic_model';
 // renders, which is the normal state until someone pays for image credit.
 const IMAGE_KEY_FIELD = 'image_api_key_encrypted';
 const IMAGE_MODEL_FIELD = 'image_model';
+
+// Grok: a third key, and two models rather than one, because a still and a
+// clip are priced and chosen separately.
+const XAI_KEY_FIELD = 'xai_api_key_encrypted';
+const XAI_IMAGE_MODEL_FIELD = 'xai_image_model';
+const XAI_VIDEO_MODEL_FIELD = 'xai_video_model';
 
 export interface ResolvedAi {
   apiKey: string | null;
@@ -166,6 +176,137 @@ export async function resolveImageAi(given?: string | null): Promise<ResolvedAi>
 
   imageCache.set(orgId, { at: Date.now(), value });
   return value;
+}
+
+// ── Grok (xAI): renderings and video ────────────────────────
+
+export interface ResolvedXai {
+  apiKey: string | null;
+  /** Two models rather than one: a still and a clip are chosen separately. */
+  imageModel: string;
+  videoModel: string;
+  source: 'studio' | 'environment' | 'none';
+}
+
+export interface XaiSettingsView {
+  configured: boolean;
+  source: ResolvedXai['source'];
+  keyHint: string | null;
+  imageModel: string;
+  videoModel: string;
+}
+
+const xaiCache = new Map<string, { at: number; value: ResolvedXai }>();
+
+export function invalidateXaiSettings(orgId?: string | null): void {
+  if (orgId) xaiCache.delete(orgId);
+  else xaiCache.clear();
+}
+
+function xaiFromEnvironment(): ResolvedXai {
+  return {
+    apiKey: env.xai.apiKey || null,
+    imageModel: env.xai.imageModel || DEFAULT_GROK_IMAGE_MODEL,
+    videoModel: env.xai.videoModel || DEFAULT_VIDEO_MODEL,
+    source: env.xai.apiKey ? 'environment' : 'none',
+  };
+}
+
+/** The Grok key and models this org should use, resolved like the others. */
+export async function resolveXai(given?: string | null): Promise<ResolvedXai> {
+  if (!supabaseAdmin) return xaiFromEnvironment();
+
+  const orgId = await resolveOrgId(given);
+  if (!orgId) return xaiFromEnvironment();
+
+  const hit = xaiCache.get(orgId);
+  if (hit && Date.now() - hit.at < TTL_MS) return hit.value;
+
+  let value = xaiFromEnvironment();
+  try {
+    const settings = await readSettings(orgId);
+
+    const stored = settings[XAI_KEY_FIELD];
+    if (typeof stored === 'string' && stored) {
+      try {
+        const apiKey = decrypt(stored);
+        if (apiKey) value = { ...value, apiKey, source: 'studio' };
+      } catch {
+        console.error('[grok] stored API key could not be decrypted — using the environment key');
+      }
+    }
+
+    // An unknown id is ignored rather than passed on: a typo in the
+    // settings row should not become a 404 on every render.
+    const imageModel = settings[XAI_IMAGE_MODEL_FIELD];
+    if (typeof imageModel === 'string' && GROK_IMAGE_MODELS.some((m) => m.id === imageModel)) {
+      value = { ...value, imageModel };
+    }
+    const videoModel = settings[XAI_VIDEO_MODEL_FIELD];
+    if (typeof videoModel === 'string' && VIDEO_MODELS.some((m) => m.id === videoModel)) {
+      value = { ...value, videoModel };
+    }
+  } catch (err) {
+    console.error('[grok] settings unreadable, using the environment:', (err as Error).message);
+    return xaiFromEnvironment();
+  }
+
+  xaiCache.set(orgId, { at: Date.now(), value });
+  return value;
+}
+
+export async function saveXaiApiKey(orgId: string, apiKey: string): Promise<void> {
+  if (!supabaseAdmin) throw new Error('Backend not configured');
+  const settings = await readSettings(orgId);
+  const { error } = await supabaseAdmin
+    .from('organizations')
+    .update({ settings: { ...settings, [XAI_KEY_FIELD]: encrypt(apiKey.trim()) } })
+    .eq('id', orgId);
+  if (error) throw new Error(error.message);
+  invalidateXaiSettings(orgId);
+}
+
+export async function clearXaiApiKey(orgId: string): Promise<void> {
+  if (!supabaseAdmin) throw new Error('Backend not configured');
+  const settings = await readSettings(orgId);
+  delete settings[XAI_KEY_FIELD];
+  const { error } = await supabaseAdmin.from('organizations').update({ settings }).eq('id', orgId);
+  if (error) throw new Error(error.message);
+  invalidateXaiSettings(orgId);
+}
+
+export async function saveXaiModel(orgId: string, kind: 'image' | 'video', model: string): Promise<void> {
+  if (!supabaseAdmin) throw new Error('Backend not configured');
+  const known =
+    kind === 'image'
+      ? GROK_IMAGE_MODELS.some((m) => m.id === model)
+      : VIDEO_MODELS.some((m) => m.id === model);
+  if (!known) throw new Error('Unknown model');
+  const field = kind === 'image' ? XAI_IMAGE_MODEL_FIELD : XAI_VIDEO_MODEL_FIELD;
+  const settings = await readSettings(orgId);
+  const { error } = await supabaseAdmin
+    .from('organizations')
+    .update({ settings: { ...settings, [field]: model } })
+    .eq('id', orgId);
+  if (error) throw new Error(error.message);
+  invalidateXaiSettings(orgId);
+}
+
+/** What the settings screen may see. Never the key itself. */
+export async function xaiSettingsView(orgId: string): Promise<XaiSettingsView> {
+  const resolved = await resolveXai(orgId);
+  return {
+    configured: Boolean(resolved.apiKey),
+    source: resolved.source,
+    keyHint: resolved.apiKey ? resolved.apiKey.slice(-4) : null,
+    imageModel: resolved.imageModel,
+    videoModel: resolved.videoModel,
+  };
+}
+
+/** Basic shape check — a typo should fail here, not on the first render. */
+export function looksLikeXaiKey(key: string): boolean {
+  return /^xai-[A-Za-z0-9_-]{20,}$/.test(key.trim());
 }
 
 export async function saveImageApiKey(orgId: string, apiKey: string): Promise<void> {

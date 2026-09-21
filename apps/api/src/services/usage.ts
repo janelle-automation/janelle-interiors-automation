@@ -103,12 +103,30 @@ function bucket(
   return [...map.values()].sort((a, b) => b.cost_usd - a.cost_usd);
 }
 
+/**
+ * The reader's own calendar day, as a YYYY-MM-DD string.
+ *
+ * `offsetMinutes` is what `Date.getTimezoneOffset()` gives — minutes to ADD
+ * to local time to reach UTC, so it is subtracted here. Without it "today"
+ * would roll over at UTC midnight, which is five in the afternoon in
+ * California: the studio would watch the day's spend reset while they were
+ * still working.
+ */
+function localDayKey(at: Date, offsetMinutes: number): string {
+  return new Date(at.getTime() - offsetMinutes * 60_000).toISOString().slice(0, 10);
+}
+
 export async function buildUsageReport(
   orgId: string,
   windowDays: number,
+  /** The reader's timezone offset in minutes, as the browser reports it. */
+  tzOffsetMinutes = 0,
 ): Promise<AiUsageReport> {
   if (!supabaseAdmin) throw new Error('Backend not configured');
 
+  // Past what any real timezone can be, the offset is junk; UTC is the
+  // honest fallback rather than a silently shifted day.
+  const offset = Number.isFinite(tzOffsetMinutes) && Math.abs(tzOffsetMinutes) <= 840 ? tzOffsetMinutes : 0;
   const days = Math.min(Math.max(Math.round(windowDays) || 30, 1), 365);
   const now = Date.now();
   const windowStart = new Date(now - days * 86_400_000);
@@ -205,6 +223,24 @@ export async function buildUsageReport(
         : null,
     },
     previous_cost_usd: previous.reduce((sum, c) => sum + c.cost_usd, 0),
+    today: (() => {
+      const key = localDayKey(new Date(now), offset);
+      const todaysCalls = current.filter((c) => localDayKey(new Date(c.created_at), offset) === key);
+      const earlier = current.filter((c) => localDayKey(new Date(c.created_at), offset) !== key);
+
+      // Averaged over the days that have actually finished, not over the
+      // whole window: dividing by 7 when only three days have any calls in
+      // them makes every day look cheap, and today look alarming.
+      const earlierDays = new Set(earlier.map((c) => localDayKey(new Date(c.created_at), offset))).size;
+      const earlierCost = earlier.reduce((sum, c) => sum + c.cost_usd, 0);
+
+      return {
+        date: key,
+        cost_usd: todaysCalls.reduce((sum, c) => sum + c.cost_usd, 0),
+        calls: todaysCalls.length,
+        avg_daily_cost_usd: earlierDays ? earlierCost / earlierDays : 0,
+      };
+    })(),
     by_feature: bucket(
       current,
       (c) => c.feature,
@@ -215,10 +251,12 @@ export async function buildUsageReport(
       (c) => c.model,
       (key) => key,
     ),
-    // Days, oldest first — a chart reads left to right.
+    // Days, oldest first — a chart reads left to right. Keyed in the
+    // reader's timezone like `today` is, so the last bar and the Today
+    // figure are the same day rather than two different ones.
     by_day: bucket(
       current,
-      (c) => c.created_at.slice(0, 10),
+      (c) => localDayKey(new Date(c.created_at), offset),
       (key) => key,
     ).sort((a, b) => a.key.localeCompare(b.key)),
     by_person: bucket(
