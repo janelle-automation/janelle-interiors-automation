@@ -8,6 +8,10 @@ import {
   useConnectGoogle,
   useDisconnectGoogle,
   useAiConfig,
+  useMediaConfig,
+  useSetMediaKey,
+  useClearMediaKey,
+  useSetMediaModel,
   useClearAiKey,
   useDisconnectGoogleService,
   useSetAiKey,
@@ -127,104 +131,200 @@ function ServiceCard({
   );
 }
 
-/**
- * The studio's Claude credentials. Kept here rather than in a deploy so
- * the key can be rotated by the person who owns the Anthropic account,
- * not by whoever has access to the server.
- *
- * The key never comes back from the API — only whether one is set and its
- * last four characters, which is enough to tell which key is in use.
- */
-function AiSetupCard() {
-  const config = useAiConfig();
-  const setKey = useSetAiKey();
-  const clearKey = useClearAiKey();
-  const setModel = useSetAiModel();
-  const [draft, setDraft] = useState('');
-
-  // A 403 means "not a principal" — say nothing rather than showing an
-  // error for a card this person was never meant to use.
-  if (config.isError) return null;
-
-  const data = config.data;
-  const saving = setKey.isPending || clearKey.isPending;
-  const error = (setKey.error ?? clearKey.error ?? setModel.error) as Error | undefined;
-
-  return (
-    <Card className="p-6 lg:col-span-2">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-[16px] font-semibold text-ink">{ASSISTANT_NAME}’s brain</h2>
-          <p className="mt-1 max-w-2xl text-[13.5px] text-ink-soft">
+/**
+
+ * The studio's Claude credentials. Kept here rather than in a deploy so
+
+ * the key can be rotated by the person who owns the Anthropic account,
+
+ * not by whoever has access to the server.
+
+ *
+
+ * The key never comes back from the API — only whether one is set and its
+
+ * last four characters, which is enough to tell which key is in use.
+
+ */
+
+function AiSetupCard() {
+
+  const config = useAiConfig();
+
+  const setKey = useSetAiKey();
+
+  const clearKey = useClearAiKey();
+
+  const setModel = useSetAiModel();
+
+  const [draft, setDraft] = useState('');
+
+
+
+  // A 403 means "not a principal" — say nothing rather than showing an
+
+  // error for a card this person was never meant to use.
+
+  if (config.isError) return null;
+
+
+
+  const data = config.data;
+
+  const saving = setKey.isPending || clearKey.isPending;
+
+  const error = (setKey.error ?? clearKey.error ?? setModel.error) as Error | undefined;
+
+
+
+  return (
+
+    <Card className="p-6 lg:col-span-2">
+
+      <div className="flex flex-wrap items-start justify-between gap-3">
+
+        <div>
+
+          <h2 className="text-[16px] font-semibold text-ink">{ASSISTANT_NAME}’s brain</h2>
+
+          <p className="mt-1 max-w-2xl text-[13.5px] text-ink-soft">
+
             {`The Claude account everything runs on — reading email, raising tasks,
             drafting follow-ups and answering ${ASSISTANT_NAME}’s questions. Get a key from`}{' '}
-            <a
-              href="https://console.anthropic.com/settings/keys"
-              target="_blank"
-              rel="noreferrer"
-              className="font-medium text-brass hover:underline"
-            >
-              console.anthropic.com
-            </a>
-            .
-          </p>
-        </div>
-        {data && (
-          <Pill tone={data.configured ? 'good' : 'crit'}>
-            {data.configured ? 'Connected' : 'No key'}
-          </Pill>
-        )}
-      </div>
-
-      {config.isLoading && <p className="mt-4 text-[13px] text-ink-faint">Loading…</p>}
-
-      {data && (
-        <>
-          <div className="mt-5">
-            <label className="text-[12.5px] font-medium text-ink-soft" htmlFor="ai-key">
-              API key
-            </label>
-            {data.configured && (
-              <p className="mt-1 text-[12.5px] text-ink-faint">
-                {data.source === 'environment'
-                  ? 'Currently using the key from the server environment. Setting one here replaces it.'
-                  : `A key ending ${data.keyHint} is in use. Pasting a new one replaces it.`}
-              </p>
-            )}
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              <input
-                id="ai-key"
-                type="password"
-                autoComplete="off"
-                spellCheck={false}
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder={data.configured ? 'Paste a new key to replace it' : 'sk-ant-…'}
-                className="input min-w-0 flex-1"
-              />
-              <button
-                className="btn-primary btn-sm"
-                disabled={saving || draft.trim().length === 0}
-                onClick={() => setKey.mutate(draft.trim(), { onSuccess: () => setDraft('') })}
-              >
-                {setKey.isPending ? 'Saving…' : 'Save key'}
-              </button>
-              {data.source === 'studio' && (
-                <button
-                  className="btn-secondary btn-sm"
-                  disabled={saving}
-                  onClick={() => clearKey.mutate(undefined)}
-                >
-                  {clearKey.isPending ? 'Removing…' : 'Remove'}
-                </button>
-              )}
-            </div>
-            <p className="mt-2 text-[11.5px] text-ink-faint">
-              Stored encrypted, and never shown again after saving. Removing it falls back to the
-              server’s own key, if it has one.
-            </p>
-          </div>
-
+            <a
+
+              href="https://console.anthropic.com/settings/keys"
+
+              target="_blank"
+
+              rel="noreferrer"
+
+              className="font-medium text-brass hover:underline"
+
+            >
+
+              console.anthropic.com
+
+            </a>
+
+            .
+
+          </p>
+
+        </div>
+
+        {data && (
+
+          <Pill tone={data.configured ? 'good' : 'crit'}>
+
+            {data.configured ? 'Connected' : 'No key'}
+
+          </Pill>
+
+        )}
+
+      </div>
+
+
+
+      {config.isLoading && <p className="mt-4 text-[13px] text-ink-faint">Loading…</p>}
+
+
+
+      {data && (
+
+        <>
+
+          <div className="mt-5">
+
+            <label className="text-[12.5px] font-medium text-ink-soft" htmlFor="ai-key">
+
+              API key
+
+            </label>
+
+            {data.configured && (
+
+              <p className="mt-1 text-[12.5px] text-ink-faint">
+
+                {data.source === 'environment'
+
+                  ? 'Currently using the key from the server environment. Setting one here replaces it.'
+
+                  : `A key ending ${data.keyHint} is in use. Pasting a new one replaces it.`}
+
+              </p>
+
+            )}
+
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+
+              <input
+
+                id="ai-key"
+
+                type="password"
+
+                autoComplete="off"
+
+                spellCheck={false}
+
+                value={draft}
+
+                onChange={(e) => setDraft(e.target.value)}
+
+                placeholder={data.configured ? 'Paste a new key to replace it' : 'sk-ant-…'}
+
+                className="input min-w-0 flex-1"
+
+              />
+
+              <button
+
+                className="btn-primary btn-sm"
+
+                disabled={saving || draft.trim().length === 0}
+
+                onClick={() => setKey.mutate(draft.trim(), { onSuccess: () => setDraft('') })}
+
+              >
+
+                {setKey.isPending ? 'Saving…' : 'Save key'}
+
+              </button>
+
+              {data.source === 'studio' && (
+
+                <button
+
+                  className="btn-secondary btn-sm"
+
+                  disabled={saving}
+
+                  onClick={() => clearKey.mutate(undefined)}
+
+                >
+
+                  {clearKey.isPending ? 'Removing…' : 'Remove'}
+
+                </button>
+
+              )}
+
+            </div>
+
+            <p className="mt-2 text-[11.5px] text-ink-faint">
+
+              Stored encrypted, and never shown again after saving. Removing it falls back to the
+
+              server’s own key, if it has one.
+
+            </p>
+
+          </div>
+
+
+
           <div className="mt-6">
             <label className="block text-[12.5px] font-medium text-ink-soft" htmlFor="ai-model">
               Model
@@ -252,6 +352,157 @@ function AiSetupCard() {
       )}
     </Card>
   );
+}
+
+/**
+ * Pictures and video.
+ *
+ * A third provider with a third key. It sits beside the Claude card rather
+ * than in a deploy for the same reason that one does: the person paying
+ * for it should be able to switch it on without anyone touching a server.
+ *
+ * Without a key here the Create buttons do not appear and Jenny says so
+ * plainly when asked for a rendering — which is the honest behaviour, but
+ * it is also a dead end until somebody can paste a key in.
+ */
+function MediaSetupCard() {
+  const config = useMediaConfig();
+  const setKey = useSetMediaKey();
+  const clearKey = useClearMediaKey();
+  const setModel = useSetMediaModel();
+  const [draft, setDraft] = useState('');
+
+  if (config.isError) return null;
+  const data = config.data;
+  const saving = setKey.isPending || clearKey.isPending;
+  const error = (setKey.error ?? clearKey.error ?? setModel.error) as Error | undefined;
+
+  return (
+    <Card className="p-6 lg:col-span-2">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-[16px] font-semibold text-ink">Pictures and video</h2>
+          <p className="mt-1 max-w-2xl text-[13.5px] text-ink-soft">
+            Renderings, concept images and short clips — a sketch made photoreal, an empty room
+            furnished, a walk-through. Get a key from{' '}
+            <a
+              href="https://console.x.ai"
+              target="_blank"
+              rel="noreferrer"
+              className="font-medium text-brass hover:underline"
+            >
+              console.x.ai
+            </a>
+            . Without one, only the studio boards can be drawn.
+          </p>
+        </div>
+        {data && (
+          <Pill tone={data.configured ? 'good' : 'crit'}>
+            {data.configured ? 'Connected' : 'No key'}
+          </Pill>
+        )}
+      </div>
+
+      {config.isLoading && <p className="mt-4 text-[13px] text-ink-faint">Loading…</p>}
+
+      {data && (
+        <>
+          <div className="mt-5">
+            <label className="text-[12.5px] font-medium text-ink-soft" htmlFor="media-key">
+              API key
+            </label>
+            {data.configured && (
+              <p className="mt-1 text-[12.5px] text-ink-faint">
+                {data.source === 'environment'
+                  ? 'Currently using the key from the server environment. Setting one here replaces it.'
+                  : `A key ending ${data.keyHint} is in use. Pasting a new one replaces it.`}
+              </p>
+            )}
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <input
+                id="media-key"
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                placeholder={data.configured ? 'Paste a new key to replace it' : 'xai-…'}
+                className="input min-w-0 flex-1"
+              />
+              <button
+                className="btn-primary btn-sm"
+                disabled={saving || draft.trim().length === 0}
+                onClick={() => setKey.mutate(draft.trim(), { onSuccess: () => setDraft('') })}
+              >
+                {setKey.isPending ? 'Saving…' : 'Save key'}
+              </button>
+              {data.source === 'studio' && (
+                <button className="btn-secondary btn-sm" disabled={saving} onClick={() => clearKey.mutate(undefined)}>
+                  {clearKey.isPending ? 'Removing…' : 'Remove'}
+                </button>
+              )}
+            </div>
+            <p className="mt-2 text-[11.5px] text-ink-faint">
+              Stored encrypted, and never shown again after saving.
+            </p>
+          </div>
+
+          <div className="mt-6 grid gap-5 md:grid-cols-2">
+            <div>
+              <label className="block text-[12.5px] font-medium text-ink-soft" htmlFor="media-image-model">
+                Image model
+              </label>
+              <select
+                id="media-image-model"
+                className="input mt-2 w-full"
+                value={data.imageModel}
+                disabled={setModel.isPending}
+                onChange={(e) => setModel.mutate({ kind: 'image', model: e.target.value })}
+              >
+                {data.imageModels.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label} — {usdEach(m.usdPerImage)} each
+                  </option>
+                ))}
+              </select>
+              <p className="mt-2 text-[11.5px] text-ink-faint">
+                {data.imageModels.find((m) => m.id === data.imageModel)?.note ?? ''}
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-[12.5px] font-medium text-ink-soft" htmlFor="media-video-model">
+                Video model
+              </label>
+              <select
+                id="media-video-model"
+                className="input mt-2 w-full"
+                value={data.videoModel}
+                disabled={setModel.isPending}
+                onChange={(e) => setModel.mutate({ kind: 'video', model: e.target.value })}
+              >
+                {data.videoModels.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label} — {usdEach(m.usdPerSecond)} a second
+                  </option>
+                ))}
+              </select>
+              <p className="mt-2 text-[11.5px] text-ink-faint">
+                A clip is capped per day and per length; both are set on the server.
+              </p>
+            </div>
+          </div>
+
+          {error && <p className="mt-3 text-[12.5px] text-crit">{error.message}</p>}
+        </>
+      )}
+    </Card>
+  );
+}
+
+/** Cents when small, dollars when not — a price people read at a glance. */
+function usdEach(n: number): string {
+  return n < 1 ? `${Math.round(n * 100)}c` : `$${n.toFixed(2)}`;
 }
 
 /**
@@ -567,6 +818,7 @@ export default function Settings() {
         </Card>
 
         <AiSetupCard />
+        <MediaSetupCard />
 
         <EmailReadingCard />
 

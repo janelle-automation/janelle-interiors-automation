@@ -632,6 +632,49 @@ function PagePreview({ item, compact }: { item: AssistantItem; compact: boolean 
   );
 }
 
+/**
+ * A clip Jenny made, played where it was asked for.
+ *
+ * Not fetched as a blob the way a picture or a PDF is: an mp4 is past what
+ * the API will relay back through a serverless response, so the server
+ * signs a short-lived URL straight off storage and this plays from that.
+ *
+ * Muted, with controls, and never autoplaying. Jenny reads her answers
+ * aloud, and a clip that starts talking over her is both rude and a
+ * problem — the browser's echo filter would hear the soundtrack as the
+ * next question.
+ */
+function ClipPreview({ item }: { item: AssistantItem }) {
+  const file = item.file ?? null;
+  const src = file?.streamUrl ?? null;
+
+  return (
+    <div className="px-3 py-3">
+      <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+        <span className="min-w-0 truncate text-[13.5px] font-medium text-ink" title={item.title}>
+          {item.title}
+        </span>
+        {item.detail && <span className="text-[12px] text-ink-faint">{item.detail}</span>}
+      </div>
+
+      {src ? (
+        <video
+          src={src}
+          controls
+          muted
+          playsInline
+          preload="metadata"
+          className="block w-full rounded-lg border border-line bg-black"
+        />
+      ) : (
+        <p className="rounded-lg bg-sunk px-3 py-6 text-center text-[12.5px] text-ink-faint">
+          This clip's link has expired — ask again and a fresh one is made.
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ── The answer ──────────────────────────────────────────────
 
 /** Whether this answer wants the room a table needs. */
@@ -717,7 +760,13 @@ export function AssistantAnswerView({
       {files.length > 0 && (
         <div className="mt-2.5 divide-y divide-line rounded-lg border border-line bg-surface">
           {files.map((item, i) =>
-            item.preview ? <PagePreview key={i} item={item} compact={compact} /> : <FileRow key={i} item={item} />,
+            item.preview === 'video' ? (
+              <ClipPreview key={i} item={item} />
+            ) : item.preview ? (
+              <PagePreview key={i} item={item} compact={compact} />
+            ) : (
+              <FileRow key={i} item={item} />
+            ),
           )}
         </div>
       )}

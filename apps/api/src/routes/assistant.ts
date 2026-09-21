@@ -6,11 +6,16 @@ import { ProposalError, commitProposal } from '../services/proposals.js';
 import { buildBriefing, emptyBriefing } from '../services/briefing.js';
 import { MAX_RELAY_BYTES, UPLOAD_GRANT_TTL_MS, openFileGrant, sealFileGrant } from '../lib/fileTokens.js';
 import { MAX_UPLOAD_BYTES, removeUploads, sniffType, storeUpload } from '../lib/uploads.js';
-import { FileFetchError, fetchGrantedContent } from '../services/files.js';
+import { FileFetchError, fetchGrantedContent, fetchGrantedFile } from '../services/files.js';
+import { finishJob, recentJobs, viewOf } from '../services/mediaJobs.js';
+import { imagineOptions, makePicture, mayImagine, startClip } from '../services/imagine.js';
 import { STUDIO_TEAM, isStudioMailbox } from '../lib/studioTeam.js';
 
 export const assistantRouter = Router();
 assistantRouter.use(requireAuth);
+
+/** Files one question may carry. */
+const MAX_ATTACHMENTS = 4;
 
 /**
  * Who is asking, as the assistant should know them.
@@ -255,8 +260,170 @@ assistantRouter.get(
   }),
 );
 
-/** Files one question may carry. */
-const MAX_ATTACHMENTS = 4;
+/**
+ * Make a picture or a clip, without going through Jenny at all.
+ *
+ * The Create buttons in the composer come here. Reaching the same work
+ * through a question costs a whole assistant turn — the system prompt, the
+ * studio snapshot and the entire tool block sent to Claude — purely to
+ * decide that the person who pressed "Image" wants an image. They already
+ * decided, so this spends NO model tokens: the brief goes to the provider
+ * as written, and the answer is shaped here.
+ *
+ * Everything else is identical to the tool path, because it IS the tool
+ * path: same permission check, same day cap, same storage, same spend row.
+ */
+assistantRouter.get(
+  '/imagine/options',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { db, orgId, userId, role, permissions } = req.auth!;
+    if (!orgId) return res.json({ data: null });
+    const actor = { db, orgId, userId, role, permissions };
+    if (!mayImagine(actor)) return res.json({ data: null });
+    res.json({ data: await imagineOptions(actor) });
+  }),
+);
+
+assistantRouter.post(
+  '/imagine',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { db, orgId, userId, role, permissions } = req.auth!;
+    if (!orgId) return res.status(400).json({ error: 'No studio is attached to this account.' });
+
+    const actor = { db, orgId, userId, role, permissions };
+    const kind = req.body?.kind === 'video' ? 'video' : 'image';
+    const prompt = String(req.body?.prompt ?? '').trim();
+    if (!prompt) return res.status(400).json({ error: 'Say what you would like made.' });
+    if (prompt.length > 2000) return res.status(400).json({ error: 'That brief is too long.' });
+
+    // Only tokens this server sealed for this studio; anything else is dropped.
+    const attachments = (Array.isArray(req.body?.attachments) ? (req.body.attachments as unknown[]) : [])
+      .map((f) => (f as { token?: unknown })?.token)
+      .filter((t): t is string => typeof t === 'string' && t.length < 6000)
+      .slice(0, MAX_ATTACHMENTS)
+      .flatMap((token) => {
+        const opened = openFileGrant(token, orgId);
+        return opened.ok && opened.grant.mimeType.startsWith('image/') ? [opened.grant] : [];
+      });
+
+    const pictures: { mimeType: string; bytes: Buffer; label: string }[] = [];
+    for (const grant of attachments) {
+      try {
+        const file = await fetchGrantedFile(grant);
+        pictures.push({ mimeType: file.mimeType, bytes: file.bytes, label: grant.name });
+      } catch {
+        // An unreadable attachment falls through to drawing from words.
+      }
+    }
+
+    if (kind === 'video') {
+      const started = await startClip({
+        actor,
+        brief: prompt,
+        seconds: Number(req.body?.seconds) || undefined,
+        aspectRatio: typeof req.body?.aspect_ratio === 'string' ? req.body.aspect_ratio : undefined,
+        still: pictures[0] ?? null,
+        projectId: typeof req.body?.project_id === 'string' ? req.body.project_id : null,
+      });
+      if (!started.ok) return res.status(400).json({ error: started.reason });
+
+      const lead = `Rendering a ${started.value.seconds}-second clip — it appears here by itself in a minute or so.`;
+      return res.json({
+        data: {
+          answer: {
+            lead,
+            items: [],
+            more: 0,
+            speech: 'Rendering it now. It will appear when it is ready.',
+            sources: ['Grok'],
+            suggestions: [],
+          },
+          startedJobs: [started.value.jobId],
+        },
+      });
+    }
+
+    const drawn = await makePicture({
+      actor,
+      brief: prompt,
+      sources: pictures,
+      aspectRatio: typeof req.body?.aspect_ratio === 'string' ? req.body.aspect_ratio : undefined,
+      resolution: req.body?.resolution === '1K' ? '1K' : '2K',
+      projectId: typeof req.body?.project_id === 'string' ? req.body.project_id : null,
+    });
+    if (!drawn.ok) return res.status(400).json({ error: drawn.reason });
+    const picture = drawn.value;
+
+    const lead =
+      picture.mode === 'edit'
+        ? 'Here it is, worked up from the picture you attached. It is a generated image, not a photograph.'
+        : 'Here it is. It is a generated image, not a photograph.';
+
+    res.json({
+      data: {
+        answer: {
+          lead,
+          items: [
+            {
+              kind: 'file',
+              title: picture.name,
+              preview: 'image',
+              file: {
+                name: picture.name,
+                mimeType: picture.mimeType,
+                size: picture.size,
+                source: 'upload',
+                token: picture.token,
+                downloadable: true,
+                webUrl: null,
+              },
+            },
+          ],
+          more: 0,
+          speech: 'Here it is.',
+          caveat: picture.ignored.length
+            ? `Only one picture can be transformed at a time, so ${picture.ignored.join(', ')} was not used.`
+            : null,
+          sources: [picture.model],
+          suggestions: [],
+        },
+        startedJobs: [],
+      },
+    });
+  }),
+);
+
+/**
+ * Wait on a clip that was started by an earlier question.
+ *
+ * Polled by the browser while someone is watching, which is what makes the
+ * video appear in the conversation without a reload. Each call moves the
+ * job on by one provider poll — and the first one to see it finished is
+ * what fetches the mp4 into storage, before the provider's own URL goes
+ * stale. The cron sweep does the same for anyone who closed the tab.
+ */
+assistantRouter.get(
+  '/media/:id',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { orgId } = req.auth!;
+    if (!orgId) return res.status(400).json({ error: 'No studio is attached to this account.' });
+
+    const job = await finishJob(String(req.params.id), orgId);
+    if (!job) return res.status(404).json({ error: 'No such job.' });
+    res.json({ data: await viewOf(job) });
+  }),
+);
+
+/** This person's recent media, so a reopened conversation catches up. */
+assistantRouter.get(
+  '/media',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { orgId, userId } = req.auth!;
+    if (!orgId) return res.json({ data: [] });
+    const jobs = await recentJobs(orgId, userId, Number(req.query.limit) || 10);
+    res.json({ data: await Promise.all(jobs.map((job) => viewOf(job))) });
+  }),
+);
 
 /**
  * Attach a file to a question: a PDF or an image, sent as the raw request
@@ -283,8 +450,38 @@ assistantRouter.post(
     const bytes = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     if (!bytes.length) return res.status(400).json({ error: 'The file is empty.' });
     const mimeType = sniffType(bytes);
-    if (!mimeType) {
-      return res.status(415).json({ error: 'Jenny can read PDFs and images (PNG, JPEG, GIF, WebP). Save other files as a PDF first.' });
+
+    /**
+     * What Jenny can actually do something with.
+     *
+     * Narrower than what `sniffType` recognises, on purpose: the extra
+     * types are sniffed so a refusal can NAME the file rather than call a
+     * photograph "not an image". Told what it is, a person knows what to
+     * do; told the generic line, they try the same file again.
+     */
+    const READABLE = [
+      'application/pdf',
+      'image/png',
+      'image/jpeg',
+      'image/gif',
+      'image/webp',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'text/plain',
+    ];
+    if (!mimeType || !READABLE.includes(mimeType)) {
+      const called: Record<string, string> = {
+        'image/avif': 'an AVIF image',
+        'image/heic': 'a HEIC photo (the format iPhones use)',
+        'image/svg+xml': 'an SVG drawing',
+        'video/mp4': 'a video',
+      };
+      const what = mimeType ? called[mimeType] : null;
+      return res.status(415).json({
+        error: what
+          ? `That file is ${what}. Jenny reads PDFs, images (PNG, JPEG, GIF, WebP), spreadsheets, Word documents and text — export or screenshot it as one of those.`
+          : 'Jenny could not tell what that file is. PDFs, images, .xlsx, .docx, .csv and .txt all work.',
+      });
     }
 
     const name = String(req.query.name ?? '').trim().slice(0, 200) || (mimeType === 'application/pdf' ? 'document.pdf' : 'image');

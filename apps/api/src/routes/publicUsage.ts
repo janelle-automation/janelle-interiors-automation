@@ -71,7 +71,9 @@ publicUsageRouter.get(
     if (!data) return res.status(404).json({ error: 'No report here' });
 
     const days = Number(req.query.days ?? 30);
-    const report = await buildUsageReport((data as { id: string }).id, days);
+    // The reader's own offset, so "today" is their today — a shared link is
+    // often opened somewhere other than the studio.
+    const report = await buildUsageReport((data as { id: string }).id, days, Number(req.query.tz ?? 0));
 
     // Shared links get read by people, not caches; and a stale spend figure
     // is worse than a slow one.

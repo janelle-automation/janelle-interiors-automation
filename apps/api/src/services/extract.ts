@@ -409,7 +409,7 @@ ${PROJECT_NAME_RULES}`;
  * than an error, losing everything that pass had read. Quotes and order
  * confirmations sit comfortably under this and go inline, in one call.
  */
-const INLINE_PDF_BYTES = 12 * 1024 * 1024;
+export const INLINE_PDF_BYTES = 12 * 1024 * 1024;
 
 /**
  * The largest PDF worth reading at all.

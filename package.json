@@ -23,7 +23,8 @@
     "seed-team": "node scripts/seed-team.mjs",
     "seed-projects": "node scripts/seed-projects.mjs",
     "seed-prompts": "node scripts/seed-prompts.mjs",
-    "ai-usage": "node scripts/ai-usage.mjs"
+    "ai-usage": "node scripts/ai-usage.mjs",
+    "grok-probe": "node scripts/grok-probe.mjs"
   },
   "engines": {
     "node": ">=20"

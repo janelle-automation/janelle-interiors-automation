@@ -18,6 +18,22 @@ import { publicApi } from '../lib/api';
 
 const WINDOWS = [7, 30, 90] as const;
 
+/**
+ * Today against a normal day, said the way a person would say it.
+ *
+ * A percentage would be precise and useless: nobody reads "+218%" at ten in
+ * the morning and knows whether to worry. The day is still running, so the
+ * honest comparison is a rough one.
+ */
+function pace(today: number, average: number): string {
+  const ratio = today / average;
+  if (today === 0) return 'nothing spent yet';
+  if (ratio < 0.5) return `quiet — a day is usually ${usd(average)}`;
+  if (ratio <= 1.5) return `about usual (${usd(average)} a day)`;
+  if (ratio <= 3) return `busier than usual (${usd(average)} a day)`;
+  return `well above the usual ${usd(average)} a day`;
+}
+
 function usd(n: number): string {
   // Sub-cent totals are normal in the first days; don't round them to £0.00.
   if (n > 0 && n < 0.01) return '<$0.01';
@@ -39,10 +55,26 @@ function when(iso: string): string {
   });
 }
 
-function Tile({ label, value, hint }: { label: string; value: string; hint?: string }) {
+function Tile({
+  label,
+  value,
+  hint,
+  tone,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  /** Marks the one figure that is still moving. */
+  tone?: 'live';
+}) {
   return (
-    <div className="rounded-xl border border-line bg-panel p-5">
-      <div className="text-[12.5px] font-medium text-ink-soft">{label}</div>
+    <div
+      className={`rounded-xl border bg-panel p-5 ${tone === 'live' ? 'border-brass/45' : 'border-line'}`}
+    >
+      <div className="flex items-center gap-1.5 text-[12.5px] font-medium text-ink-soft">
+        {tone === 'live' && <span className="h-1.5 w-1.5 rounded-full bg-brass" aria-hidden="true" />}
+        {label}
+      </div>
       <div className="mt-2 text-[28px] font-bold leading-none tracking-[-0.02em] tabular-nums text-ink">
         {value}
       </div>
@@ -104,11 +136,16 @@ function DailyChart({ buckets }: { buckets: AiUsageBucket[] }) {
       {buckets.length === 0 ? (
         <div className="mt-4 text-[13px] text-ink-faint">Nothing yet.</div>
       ) : (
+        // Each column is `h-full` on purpose: a bar's height is a
+        // percentage, and a percentage of an auto-height parent resolves to
+        // nothing — which is why this chart drew as an empty box.
         <div className="mt-5 flex h-32 items-end gap-1">
-          {buckets.map((b) => (
-            <div key={b.key} className="group flex flex-1 flex-col items-center gap-1">
+          {buckets.map((b, i) => (
+            <div key={b.key} className="group flex h-full flex-1 flex-col justify-end gap-1">
               <div
-                className="w-full rounded-t bg-brass/80 transition-colors group-hover:bg-brass"
+                className={`w-full rounded-t transition-colors ${
+                  i === buckets.length - 1 ? 'bg-brass group-hover:bg-brass' : 'bg-brass/60 group-hover:bg-brass'
+                }`}
                 style={{ height: `${Math.max(2, (b.cost_usd / max) * 100)}%` }}
                 title={`${b.key} · ${usd(b.cost_usd)} · ${b.calls} calls`}
               />
@@ -136,7 +173,10 @@ export default function UsageReport() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    publicApi<AiUsageReport>(`/public/ai-usage?t=${encodeURIComponent(token)}&days=${days}`)
+    // The reader's own offset, so "today" means their today rather than
+    // UTC's — a shared link gets opened from anywhere.
+    const tz = new Date().getTimezoneOffset();
+    publicApi<AiUsageReport>(`/public/ai-usage?t=${encodeURIComponent(token)}&days=${days}&tz=${tz}`)
       .then((data) => {
         if (cancelled) return;
         setReport(data);
@@ -216,7 +256,17 @@ export default function UsageReport() {
           </div>
         </header>
 
-        <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <section className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+          <Tile
+            label="Today"
+            tone="live"
+            value={usd(report.today.cost_usd)}
+            hint={
+              report.today.avg_daily_cost_usd > 0
+                ? `${pace(report.today.cost_usd, report.today.avg_daily_cost_usd)} · ${report.today.calls} call${report.today.calls === 1 ? '' : 's'} so far`
+                : `${report.today.calls} call${report.today.calls === 1 ? '' : 's'} so far`
+            }
+          />
           <Tile
             label="Total cost"
             value={usd(totals.cost_usd)}

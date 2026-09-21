@@ -33,7 +33,7 @@ usageRouter.get(
     const orgId = req.auth!.orgId;
     if (!orgId) return res.status(400).json({ error: 'No organization for user' });
     const days = Number(req.query.days ?? 30);
-    res.json({ data: await buildUsageReport(orgId, days) });
+    res.json({ data: await buildUsageReport(orgId, days, Number(req.query.tz ?? 0)) });
   }),
 );
 

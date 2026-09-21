@@ -6,10 +6,16 @@ import {
   useMemo,
   useRef,
   useState,
+  type Context,
   type ReactNode,
 } from 'react';
 import { useLocation } from 'react-router-dom';
-import { ASSISTANT_NAME, type AssistantAnswer } from '@janelle/shared';
+import {
+  ASSISTANT_NAME,
+  type AssistantAnswer,
+  type AssistantItem,
+  type MediaJobView,
+} from '@janelle/shared';
 import { useAuth } from './AuthContext';
 import { api, apiStream, apiUpload, NetworkError } from '../lib/api';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -76,6 +82,15 @@ export interface ChatMessage {
   retry?: string;
   /** For an error: the files that question carried. */
   retryFiles?: AttachedFile[];
+  /**
+   * Clips still being drawn for this answer.
+   *
+   * A video does not exist when the answer that asked for it is sent, so
+   * the job ids ride along and the screen waits on them. Each one that
+   * finishes is added to `answer.items` and dropped from here; anything
+   * left is still rendering, or failed and said why.
+   */
+  jobs?: string[];
 }
 
 /** One conversation in the list of past ones. */
@@ -104,6 +119,11 @@ interface AssistantCtx {
    * `files` are uploads attached to it.
    */
   send: (text: string, opts?: { alternatives?: string[]; files?: AttachedFile[] }) => void;
+  /**
+   * Make a picture or a clip directly, skipping the model turn entirely.
+   * Used by the Create buttons, where there is nothing left to decide.
+   */
+  imagine: (text: string, kind: 'image' | 'video', opts?: { files?: AttachedFile[]; seconds?: number }) => void;
   /** Upload a file to attach to the next question. */
   uploadFile: (file: File, signal?: AbortSignal) => Promise<AttachedFile>;
   /** The studio's names, for choosing between hearings of a spoken question. */
@@ -163,7 +183,22 @@ interface AssistantCtx {
   canSpeak: boolean;
 }
 
-const Ctx = createContext<AssistantCtx | null>(null);
+/**
+ * One context object for the life of the page, surviving hot reloads.
+ *
+ * When this file is edited in development, Vite re-runs it — and a plain
+ * `createContext()` here would then make a SECOND context. The provider
+ * renders the new one while any page still holding the previous copy of
+ * this module reads the old one, finds nothing, and throws "useAssistant
+ * must be used inside AssistantProvider" with the provider plainly in the
+ * tree. Kept on `import.meta.hot.data`, the object is created once and
+ * reused by every later version of the module. In a production build
+ * `import.meta.hot` is undefined and this is an ordinary createContext.
+ */
+const Ctx: Context<AssistantCtx | null> =
+  (import.meta.hot?.data.assistantCtx as Context<AssistantCtx | null> | undefined) ??
+  createContext<AssistantCtx | null>(null);
+if (import.meta.hot) import.meta.hot.data.assistantCtx = Ctx;
 
 // ── Remembering the conversation ────────────────────────────
 
@@ -556,6 +591,82 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     [update],
   );
 
+  // ── Clips that are still rendering ────────────────────────
+
+  /**
+   * Wait for video the answer could not carry.
+   *
+   * A clip takes a minute or two, and the answer that asked for it was sent
+   * long before — so the conversation holds the job ids and this waits on
+   * them. Each poll asks the server, which asks the provider once and, the
+   * first time it hears "done", fetches the mp4 into the studio's own
+   * storage before the provider's temporary link goes stale.
+   *
+   * Only the conversation on screen is polled. Nothing is lost by that: the
+   * cron sweep finishes every job server-side regardless, so a clip whose
+   * tab was closed is waiting, finished, when that conversation is reopened
+   * and this picks it up again.
+   */
+  const activeId = active.id;
+  const pendingJobs = useMemo(
+    () => [...new Set(active.messages.flatMap((m) => m.jobs ?? []))],
+    [active.messages],
+  );
+  const pendingKey = pendingJobs.join(',');
+
+  useEffect(() => {
+    if (!pendingKey) return;
+    const ids = pendingKey.split(',');
+    let stopped = false;
+
+    /** Drop the job from the message it belongs to, and show what came of it. */
+    const settleJob = (jobId: string, item: AssistantItem | null, failure: string | null) =>
+      update(
+        (s) => ({
+          ...s,
+          messages: s.messages.map((m) => {
+            if (!m.jobs?.includes(jobId)) return m;
+            const left = m.jobs.filter((j) => j !== jobId);
+            return {
+              ...m,
+              jobs: left.length ? left : undefined,
+              answer: m.answer
+                ? {
+                    ...m.answer,
+                    items: item ? [...m.answer.items, item] : m.answer.items,
+                    caveat: failure ?? m.answer.caveat ?? null,
+                  }
+                : m.answer,
+            };
+          }),
+        }),
+        activeId,
+      );
+
+    const tick = async () => {
+      for (const jobId of ids) {
+        if (stopped) return;
+        try {
+          const job = await api<MediaJobView>(`/assistant/media/${jobId}`);
+          if (job.status === 'done') settleJob(jobId, job.item, null);
+          else if (job.status !== 'pending') {
+            settleJob(jobId, null, job.error || 'The clip could not be made.');
+          }
+        } catch {
+          // A blip is not a failure: the job is still on the server, and
+          // the next tick asks again.
+        }
+      }
+    };
+
+    void tick();
+    const timer = setInterval(() => void tick(), 5_000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [pendingKey, activeId, update]);
+
   // ── What is on screen ─────────────────────────────────────
 
   const path = `${location.pathname}${location.search}`;
@@ -624,6 +735,69 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       speak(spokenText);
     }
   }, []);
+
+  /**
+   * Make a picture or a clip straight away, with no model turn at all.
+   *
+   * `send` puts a question to Jenny, and she decides what to do with it —
+   * which costs the system prompt, the studio snapshot and the whole tool
+   * block on every attempt. When someone has pressed Image or Video there
+   * is nothing left to decide, so this goes directly to the provider and
+   * spends no tokens. The answer comes back in the same shape either way,
+   * so the conversation cannot tell the difference.
+   */
+  const imagine = useCallback(
+    (text: string, kind: 'image' | 'video', opts: { files?: AttachedFile[]; seconds?: number } = {}) => {
+      const brief = text.trim();
+      if (!brief || abortRef.current) return;
+      const files = (opts.files ?? []).slice(0, 4);
+      const conversationId = activeOf(storeRef.current).id;
+
+      append({ role: 'user', content: brief, ...(files.length ? { files } : {}) }, conversationId);
+      setPending(true);
+      setStatus(kind === 'video' ? 'Starting the clip' : 'Drawing it');
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      api<{ answer: AssistantAnswer; startedJobs: string[] }>('/assistant/imagine', {
+        method: 'POST',
+        body: JSON.stringify({
+          kind,
+          prompt: brief,
+          ...(opts.seconds ? { seconds: opts.seconds } : {}),
+          attachments: files.map((f) => ({ token: f.token })),
+        }),
+        signal: controller.signal,
+      })
+        .then((data) => {
+          append(
+            {
+              role: 'assistant',
+              content: data.answer.lead,
+              answer: data.answer,
+              done: [],
+              ...(data.startedJobs?.length ? { jobs: data.startedJobs } : {}),
+            },
+            conversationId,
+          );
+          deliver(data.answer.speech || data.answer.lead);
+        })
+        .catch((err: Error) => {
+          if (err.name === 'AbortError') return;
+          append(
+            { role: 'assistant', kind: 'error', content: err.message || 'That could not be made.', retry: brief },
+            conversationId,
+          );
+        })
+        .finally(() => {
+          abortRef.current = null;
+          setPending(false);
+          setStatus(null);
+        });
+    },
+    [append, deliver],
+  );
 
   const send = useCallback(
     (text: string, opts: { alternatives?: string[]; files?: AttachedFile[] } = {}) => {
@@ -729,7 +903,17 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
                 void queryClient.invalidateQueries({ queryKey: ['dashboard'] });
               }
             }
-            append({ role: 'assistant', content: r.reply, answer: r.answer, proposed: r.proposed, done: [] }, conversationId);
+            append(
+              {
+                role: 'assistant',
+                content: r.reply,
+                answer: r.answer,
+                proposed: r.proposed,
+                done: [],
+                ...(r.startedJobs?.length ? { jobs: r.startedJobs } : {}),
+              },
+              conversationId,
+            );
             deliver(r.answer?.speech || r.reply);
             return;
           }
@@ -1040,6 +1224,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       pending,
       status,
       send,
+      imagine,
       uploadFile,
       vocabulary,
       interim,
@@ -1079,7 +1264,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       canSpeak,
     }),
     [
-      active.messages, active.id, store.unseen, pending, status, send, uploadFile, vocabulary, interim, stop, newConversation,
+      active.messages, active.id, store.unseen, pending, status, send, imagine, uploadFile, vocabulary, interim, stop, newConversation,
       conversations, openConversation, renameConversation, pinConversation, deleteConversation, downloadConversation,
       prefill, setPrefill, attachRequest, requestAttach, markDone, markDismissed, acknowledge,
       briefingLoading, open, setOpen, focusRequest, requestFocus, lookingAt, handsFree,

@@ -18,9 +18,21 @@ export const UPLOAD_BUCKET = 'assistant-uploads';
 /** What Jenny can read: PDFs and the image types Claude accepts. */
 export const UPLOAD_TYPES = [
   'application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+  // Sniffed so they can be NAMED when refused, not so they can be read:
+  // a phone photo and an AI export commonly arrive in these, and "that
+  // file is not a PDF or an image" is a lie when it plainly is one.
+  'image/avif', 'image/heic',
+  // The studio's real paperwork: a flooring schedule, an FF&E list, a
+  // vendor's spec. All readable, so all attachable.
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'text/plain',
   // Written by a model rather than uploaded by a person: a rendered board
   // comes back as vector when the studio has no image-model billing.
   'image/svg+xml',
+  // Likewise never uploaded by a person — a clip Grok drew, fetched off
+  // the provider's temporary URL and kept here so it stays playable.
+  'video/mp4',
 ] as const;
 export type UploadType = (typeof UPLOAD_TYPES)[number];
 
@@ -42,6 +54,60 @@ export function sniffType(bytes: Buffer): UploadType | null {
   if (bytes.length >= 12 && bytes.subarray(0, 4).toString('latin1') === 'RIFF' && bytes.subarray(8, 12).toString('latin1') === 'WEBP') {
     return 'image/webp';
   }
+  // An `ftyp` box at offset 4 is the ISO base media container, which is NOT
+  // only video: AVIF and HEIC photographs use the same wrapper. The four
+  // bytes after it say which, and reading them is the difference between
+  // storing a clip and refusing someone's photo as though it were one.
+  if (bytes.length >= 12 && bytes.subarray(4, 8).toString('latin1') === 'ftyp') {
+    const brand = bytes.subarray(8, 12).toString('latin1');
+    if (brand === 'avif' || brand === 'avis') return 'image/avif';
+    if (/^(heic|heix|hevc|hevx|heim|heis|mif1|msf1)$/.test(brand)) return 'image/heic';
+    return 'video/mp4';
+  }
+
+  /**
+   * Office formats are zips, and which one is told by the entry names.
+   *
+   * A zip stores those names uncompressed, but mostly in the CENTRAL
+   * DIRECTORY at the END of the file — in a real workbook the first
+   * mention of `xl/workbook.xml` was 62KB in. So both ends are read: the
+   * head catches a small file, the tail catches the directory, and neither
+   * costs unpacking anything.
+   */
+  if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) {
+    const names =
+      bytes.subarray(0, 8192).toString('latin1') +
+      bytes.subarray(Math.max(0, bytes.length - 65_536)).toString('latin1');
+    if (names.includes('xl/workbook.xml') || names.includes('xl/worksheets/')) {
+      return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    }
+    if (names.includes('word/document.xml')) {
+      return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    }
+    return null;
+  }
+
+  const head = bytes.subarray(0, 512).toString('utf8').trimStart();
+
+  // SVG is markup, so it has no magic number — but it is a picture this app
+  // produces itself (a board rendered by a text model comes back as vector),
+  // and one it could not previously take back.
+  if (/^(<\?xml[\s\S]*?\?>\s*)?(<!--[\s\S]*?-->\s*)*<svg[\s>]/i.test(head)) return 'image/svg+xml';
+
+  /**
+   * Plain text, and deliberately not by guessing.
+   *
+   * HTML is text too, and an HTML file accepted here would be stored and
+   * served from this app's own origin. So anything starting with a tag is
+   * refused outright, and what remains has to be free of the control bytes
+   * a binary file is full of.
+   */
+  if (!head.startsWith('<') && bytes.length) {
+    const sample = bytes.subarray(0, 2048);
+    const binary = sample.some((b) => b === 0 || (b < 9) || (b > 13 && b < 32 && b !== 27));
+    if (!binary) return 'text/plain';
+  }
+
   return null;
 }
 

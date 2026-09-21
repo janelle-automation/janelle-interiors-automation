@@ -16,6 +16,7 @@ import {
   SEATS,
   canManageTasks,
   canWith,
+  videoCostUsd,
   type AssistantAnswer,
   type AssistantField,
   type AssistantItem,
@@ -31,6 +32,8 @@ import { createMessage, isAiReady, isTimeoutError } from './anthropic.js';
 import { fillTemplate, matchPrompt, missingInputs, runLibraryPrompt } from './promptRunner.js';
 import { BOARD_PROMPTS, boardPrompt, freeformBoard, isRenderable } from './boards.js';
 import { isImageReady, renderImage, type ImageReference } from './images.js';
+import { clampSeconds, grokModels } from './grok.js';
+import { makePicture, startClip } from './imagine.js';
 import { storeUpload, type UploadType } from '../lib/uploads.js';
 import {
   ProposalError,
@@ -121,6 +124,13 @@ export interface AssistantResult {
    * and what became of them, so the browser can mark them done.
    */
   settled: SettledProposal[];
+  /**
+   * Media jobs this question started and did not finish.
+   *
+   * A clip is still being drawn when the answer is sent, so the ids travel
+   * with it and the browser waits on them. Empty for every other question.
+   */
+  startedJobs: string[];
 }
 
 export interface AssistantContext {
@@ -266,6 +276,14 @@ interface ToolSession {
    * decision to get wrong.
    */
   produced: ProducedWork | null;
+  /**
+   * Video jobs this question set off.
+   *
+   * Carried back to the browser because the clip does not exist yet: the
+   * answer is written and sent while the provider is still drawing, and
+   * these ids are how the screen knows there is something to wait for.
+   */
+  startedJobs: string[];
 }
 
 interface ProducedWork {
@@ -580,7 +598,7 @@ const TOOLS: Anthropic.Tool[] = [
   {
     name: 'render_board',
     description:
-      "DRAW a presentation board or a rendering, as a picture. Only some of the studio's prompts make one — the elevation + moodboard board, a room rendering, a moodboard page, a materials page, a snapshot retouch — and list_studio_prompts marks them. Use this when someone asks to SEE something: \"make the board\", \"render the kitchen\", \"draw the moodboard\". It needs no project record. Anything the person attached to the question becomes reference imagery, which is how the approved house template gets matched — draw it with whatever they gave you and say what would improve it, rather than refusing until they attach more. Put the ref it returns in the answer's items so they can see it.",
+      "DRAW a presentation board or a rendering, as a picture. FIRST check the studio has not already issued the thing they named — a flooring plan or a schedule is usually one page inside a plan set, and the issued page beats anything drawn fresh; read_document returns a ref that shows that page. Only some of the studio's prompts make one — the elevation + moodboard board, a room rendering, a moodboard page, a materials page, a snapshot retouch — and list_studio_prompts marks them. Use this when someone asks to SEE something: \"make the board\", \"render the kitchen\", \"draw the moodboard\". It needs no project record. Anything the person attached to the question becomes reference imagery, which is how the approved house template gets matched — draw it with whatever they gave you and say what would improve it, rather than refusing until they attach more. Put the ref it returns in the answer's items so they can see it.",
     input_schema: {
       type: 'object',
       properties: {
@@ -744,7 +762,7 @@ const TOOLS: Anthropic.Tool[] = [
   {
     name: 'drive_read',
     description:
-      'Read what a Drive file SAYS — a Google Doc, a Sheet (as CSV) or a text file — to answer questions about its contents. Pass a file_id from drive_search. A PDF or image cannot be read this way; hand it over as a file instead.',
+      'Read what a Drive file SAYS — a Google Doc, a Sheet, an uploaded .xlsx workbook, or a text file — to answer questions about its contents. Pass a file_id from drive_search. A PDF or image cannot be read this way: pass its ref to read_document instead.',
     input_schema: {
       type: 'object',
       properties: { file_id: { type: 'string', description: 'The file_id from drive_search.' } },
@@ -782,7 +800,7 @@ const TOOLS: Anthropic.Tool[] = [
   {
     name: 'read_document',
     description:
-      'Read what a PDF or an image SAYS and SHOWS, to answer a question about its contents — "from this PDF give me the living room furniture and decor", "what finishes are in the Lemon proposal", "what does page 4 show". Pass the file ref (F1, F2…) of a file already in the conversation or one you just found with find_attachments, search_documents, read_email or drive_search. Returns the answer, the individual findings, and a ref that shows the relevant pages themselves as images — put that ref in items.',
+      'Read what a PDF, an image or a SPREADSHEET says and shows, to answer a question about its contents — "from this PDF give me the living room furniture and decor", "what finishes are in the Lemon proposal", "what flooring is scheduled", "what does page 4 show". A schedule, an FF&E list or a vendor\'s quote as .xlsx opens here and its cells are read. Pass the file ref (F1, F2…) of a file already in the conversation or one you just found with find_attachments, search_documents, read_email or drive_search. ALWAYS read a file before telling someone what is in it: naming a schedule and saying the selections "are listed in it" is not an answer when you could have opened it. Returns the answer, the individual findings, and a ref that shows the relevant pages themselves as images — put that ref in items.',
     input_schema: {
       type: 'object',
       properties: {
@@ -806,6 +824,47 @@ const TOOLS: Anthropic.Tool[] = [
         next_step: { type: 'string' },
       },
       required: ['task_id'],
+    },
+  },
+  {
+    name: 'make_image',
+    description:
+      "MAKE a picture: TRANSFORM one the person attached — a sketch made photoreal, a plan rendered, a room restyled — or draw one from words. Whenever someone attaches a picture and asks for it changed, rendered or visualised, use this: the attachment is held to and keeps its proportions. Never answer that in words, and never refuse it as a board. Use render_board for the house-template boards; for a deliverable the studio has already issued, find and hand over the real page instead. Put the ref it returns in the answer's items.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        brief: {
+          type: 'string',
+          description:
+            "A description of the PICTURE, written for whoever is drawing it — never your message to the person. Nothing like \"Here's a complete interior design\" or \"I've created\": that is narration, and it goes into the render as words. Describe only what is in the frame: the room, the pieces and where they sit, the materials and finishes, the light and time of day, the camera position. Pass the person's own wording when they wrote a full brief — do not paraphrase a careful prompt. When they were brief, fill it out as a photographer's brief and say what you assumed.",
+        },
+        aspect_ratio: {
+          type: 'string',
+          description: '16:9, 4:3, 3:4, 1:1, 9:16. Ignored when transforming an attachment, which keeps its own shape.',
+        },
+        resolution: { type: 'string', enum: ['1K', '2K'], description: '2K for anything a client will see. Default 2K.' },
+        project_id: { type: 'string', description: 'The project this belongs to, so it is filed against it.' },
+      },
+      required: ['brief'],
+    },
+  },
+  {
+    name: 'make_video',
+    description:
+      "START a short video clip (a few seconds) from a brief, or animate a still the person attached. It does NOT finish inside this answer: it returns a job that renders in the background, and the clip appears on screen by itself when it is ready. Say it is rendering and roughly how long — never say it is done, and never put a file ref in the items, because there is no video yet. It costs real money by the second, so it is prepared as a proposal the person confirms, exactly like a task.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        brief: { type: 'string', description: 'What should happen in the clip: the room, the move, the light.' },
+        seconds: { type: 'number', description: 'How long, in seconds. Default 6; the studio caps it.' },
+        aspect_ratio: { type: 'string', description: '16:9, 1:1, 9:16. Default 16:9.' },
+        from_attachment: {
+          type: 'boolean',
+          description: 'True to animate the still the person attached to this question rather than drawing from words.',
+        },
+        project_id: { type: 'string', description: 'The project this belongs to, so it is filed against it.' },
+      },
+      required: ['brief'],
     },
   },
   ANSWER_TOOL,
@@ -848,6 +907,8 @@ const TOOL_SOURCES: Record<string, string> = {
   list_studio_prompts: 'the prompt library',
   run_studio_prompt: 'the prompt library',
   render_board: 'the prompt library',
+  make_image: 'Grok',
+  make_video: 'Grok',
   get_studio_rules: "the studio's rules",
   get_recent_activity: 'the audit log',
   get_ai_spend: 'AI spend',
@@ -895,6 +956,8 @@ const TOOL_STATUS: Record<string, string> = {
   list_studio_prompts: "Checking the studio's prompts",
   run_studio_prompt: 'Writing it, to the studio\'s prompt',
   render_board: 'Drawing the board',
+  make_image: 'Drawing it',
+  make_video: 'Starting the clip',
   get_studio_rules: "Checking the studio's rules",
   get_recent_activity: 'Reading the audit log',
   get_ai_spend: 'Adding up the AI spend',
@@ -2338,7 +2401,8 @@ async function runTool(
       if (!(await isImageReady(ctx.orgId))) {
         return {
           refused: true,
-          reason: 'Board rendering has no image key set up yet — say so, and offer to write the board out in words instead.',
+          reason:
+            'Board rendering has no image key set up yet. If what they actually asked for was a rendering or a picture transformed from something they attached, that is make_image, not a board — try that instead of refusing. Otherwise say so, and offer to write the board out in words.',
         };
       }
 
@@ -2465,6 +2529,142 @@ async function runTool(
           : 'nothing attached — drawn from the written inputs alone',
         note: render.note,
         instruction: `Put { "ref": "${ref}" } in the answer's items so the board is shown. Keep the lead to one sentence.`,
+      };
+    }
+
+    case 'make_image': {
+      if (!ctx.orgId) return { refused: true, reason: 'No studio is attached to this account.' };
+
+      // A picture on the question means transform THAT picture.
+      const attachedImages: ImageReference[] = [];
+      for (const { grant } of ctx.attached ?? []) {
+        if (!grant.mimeType.startsWith('image/')) continue;
+        try {
+          const file = await fetchGrantedFile(grant);
+          attachedImages.push({ mimeType: file.mimeType, bytes: file.bytes, label: grant.name });
+        } catch {
+          // An unreadable attachment falls through to drawing from words.
+        }
+      }
+
+      const drawn = await makePicture({
+        actor: { db, orgId: ctx.orgId, userId: ctx.userId, role: ctx.role, permissions: ctx.permissions },
+        brief: String(input.brief ?? '').trim(),
+        sources: attachedImages,
+        aspectRatio: String(input.aspect_ratio ?? '16:9'),
+        resolution: input.resolution === '1K' ? '1K' : '2K',
+        projectId: typeof input.project_id === 'string' ? input.project_id : null,
+      });
+
+      if (!drawn.ok) {
+        return {
+          failed: drawn.reason,
+          note: 'Tell them what went wrong in plain words, and offer to describe it instead.',
+        };
+      }
+      const picture = drawn.value;
+
+      const ref = refs.add('F', {
+        kind: 'file',
+        title: picture.name,
+        preview: 'image',
+        file: {
+          name: picture.name,
+          mimeType: picture.mimeType,
+          size: picture.size,
+          source: 'upload',
+          token: picture.token,
+          downloadable: true,
+          webUrl: null,
+        },
+      });
+
+      return {
+        ref,
+        made_by: picture.mode === 'edit' ? 'transforming the attached picture' : 'drawing from the brief alone',
+        drawn_with: picture.model,
+        ...(picture.ignored.length
+          ? { not_used: picture.ignored, why: 'Only one picture can be transformed at a time.' }
+          : {}),
+        note: picture.note,
+        instruction: `Put { "ref": "${ref}" } in the answer's items so the picture is shown. Keep the lead to one sentence, and say plainly that it is a generated image, not a photograph.`,
+      };
+    }
+
+    case 'make_video': {
+      if (!ctx.orgId) return { refused: true, reason: 'No studio is attached to this account.' };
+      const brief = String(input.brief ?? '').trim();
+      if (!brief) return { refused: true, reason: 'Nothing was described. Ask what should happen in the clip.' };
+
+      const actor = { db, orgId: ctx.orgId, userId: ctx.userId, role: ctx.role, permissions: ctx.permissions };
+
+      // Nothing is spent until the person has heard what it costs. The
+      // model is told to read the brief back and ask; only the second call
+      // carries confirmed. The day cap inside startClip holds regardless.
+      if (input.confirmed !== true) {
+        const models = await grokModels(ctx.orgId);
+        const seconds = clampSeconds(typeof input.seconds === 'number' ? input.seconds : undefined, models.video);
+        return {
+          quote: {
+            brief,
+            seconds,
+            cost_usd: videoCostUsd(models.video, seconds).toFixed(2),
+            model: models.video,
+            with_audio: false,
+          },
+          instruction:
+            'Nothing has been started. Read the brief back in one sentence, say it is ' +
+            `${seconds} seconds and about $${videoCostUsd(models.video, seconds).toFixed(2)}, and ask them to confirm. ` +
+            'If they say yes, call make_video again with the same brief and confirmed: true.',
+        };
+      }
+
+      // Image-to-video: animate the still they attached.
+      let still: { mimeType: string; bytes: Buffer } | null = null;
+      if (input.from_attachment === true) {
+        for (const { grant } of ctx.attached ?? []) {
+          if (!grant.mimeType.startsWith('image/')) continue;
+          try {
+            const file = await fetchGrantedFile(grant);
+            still = { mimeType: file.mimeType, bytes: file.bytes };
+            break;
+          } catch {
+            // Fall through to drawing it from words.
+          }
+        }
+        if (!still) {
+          return {
+            refused: true,
+            reason:
+              'There is no picture attached to this question to animate. Ask them to attach one, or offer to draw the clip from the brief instead.',
+          };
+        }
+      }
+
+      const started = await startClip({
+        actor,
+        brief,
+        seconds: typeof input.seconds === 'number' ? input.seconds : undefined,
+        aspectRatio: String(input.aspect_ratio ?? '16:9'),
+        still,
+        projectId: typeof input.project_id === 'string' ? input.project_id : null,
+      });
+
+      if (!started.ok) {
+        return { failed: started.reason, note: 'Tell them in plain words. Nothing was charged.' };
+      }
+
+      session.startedJobs.push(started.value.jobId);
+
+      return {
+        job_id: started.value.jobId,
+        status: 'rendering',
+        seconds: started.value.seconds,
+        cost_usd: started.value.costUsd.toFixed(2),
+        instruction:
+          'Say it is rendering and that it will appear here by itself in a minute or so. ' +
+          "Do NOT put a file ref in the answer's items — there is no video yet, and claiming " +
+          'one exists is the one mistake to avoid here. The screen shows it when it arrives.',
       };
     }
 
@@ -3482,6 +3682,21 @@ Making things, not only finding them:
   schedule — do the work anyway, to the same standard, from your own knowledge as a senior designer:
   write it into the answer's document field, or pass a brief to render_board to have it drawn. NEVER answer that the
   studio has no prompt for it. That is a fact about a database table, not about what you can do.
+- A PICTURE THEY ATTACHED IS A PICTURE YOU CAN CHANGE. A pencil sketch to be built as a photoreal
+  visualisation, a plan to be rendered, a room to be restyled, an empty room to be furnished, a snapshot
+  to be tidied up: that is make_image, which transforms the attachment itself and keeps its proportions.
+  Never describe what the rendering WOULD show in place of making it, and never turn it down as "not a
+  board" — it never was one. render_board is only for the studio's own template pages. Pass their prompt
+  as they wrote it: someone who has written a careful brief has already said what they want.
+- DO NOT OFFER TO MAKE A PICTURE. MAKE IT. Someone who attached a room and asked for it designed has
+  already asked; "would you like me to generate a visualisation?" spends their turn and gives them
+  nothing. Write the scheme AND call make_image in the same turn, then show both — the words in the
+  document, the render in the items. Ask only when you genuinely cannot proceed, and never as a way of
+  checking they meant it.
+- THE BRIEF IS NOT YOUR ANSWER. What you pass to make_image describes the frame — the room, the pieces,
+  the materials, the light, the camera. Your sentences to the person go in the answer, not into the
+  brief: a brief beginning "Here's a complete interior design for your empty room" is narration, and the
+  model draws the words instead of the room.
 - DESIGN WORK DOES NOT NEED A RECORD. "Design a kitchen", "make a moodboard", "draw the board for a
   new project" ask for your professional judgement, not for a lookup. If they name no project, or name
   one the system has never heard of, DO THE WORK ANYWAY — from what they told you plus what a senior
@@ -3507,10 +3722,31 @@ Handing things over:
 - Stored mail first when it is recent and about a project (read_email lists its attachments as
   files); find_attachments or gmail_search when it is older, or not found there.
 - If several files match, hand over all of them rather than asking which one.
-- To answer from what a PDF or an image SAYS or SHOWS — "from this PDF give me the living room furniture
-  and decor", "what finishes are in the proposal", "show me the dining room board" — call read_document
-  with the file's ref. Give the answer in the lead, the pieces as rows, and ALWAYS include the preview ref
-  it returns, so they see the pages themselves. Never say you cannot open or see a PDF or an image.
+- To answer from what a PDF, an image or a SPREADSHEET says or shows — "from this PDF give me the living
+  room furniture and decor", "what finishes are in the proposal", "what flooring is scheduled", "show me
+  the dining room board" — call read_document with the file's ref. Give the answer in the lead, the pieces
+  as rows, and ALWAYS include the preview ref it returns, so they see the pages themselves. Never say you
+  cannot open or see a PDF, an image or a workbook.
+- FINDING A FILE IS NOT ANSWERING. If what they asked for is INSIDE something you found — the finishes
+  in a schedule, the flooring in a workbook, the specification in a plan set — OPEN IT and answer from
+  its contents, then hand the file over as well. "The selections are listed in the Finish Schedule" is
+  not an answer when you are holding the Finish Schedule: read it, and say WF-01 is white oak, T-01 is
+  the 12x24 porcelain, and so on. A schedule as .xlsx opens like any other document.
+- THE STUDIO'S OWN DRAWING BEATS ONE YOU MAKE. Before drawing or writing a NAMED deliverable — "the
+  whole house flooring plan", "the door and window schedule", "the lighting plan", "the finish
+  schedule" — LOOK FOR IT FIRST. It is usually ONE PAGE INSIDE A PLAN SET, not a file of its own: a
+  65-page Plans.pdf holds the flooring plan, the door schedule and the elevations as separate pages.
+  So find the plan set (search_documents, drive_search, find_attachments), call read_document asking
+  which page shows the thing they named, and hand back the page preview ref it returns — that shows
+  them the issued drawing itself. Only draw your own when there is genuinely none, and then SAY SO in
+  as many words: "the studio has not issued one, so this is mine to check". Never present something
+  you drew as though it were the studio's issued document. A board you invented that contradicts the
+  approved one — wood specified in the living room, tile in your version — is worse than no board.
+- A HOUSE-WIDE ANSWER IS ASSEMBLED, NOT LOOKED UP. Asked for "the whole house flooring plan" when no
+  single file carries that name, do not report that none is labelled that way. Read the plan set and the
+  flooring schedule you DID find, and give the whole picture: every room, the material scheduled for it,
+  and the tile and grout by code. Hand over the files you read, and say which rooms are still TBD. One
+  document per room is not a reason to answer with two filenames.
 - You cannot send email, and you cannot change anything in Drive. To get an email written, use
   propose_draft: the person confirms, it goes to Drafts, and they send it themselves from there.
   Say it is prepared — never that it was sent.
@@ -3635,6 +3871,7 @@ export async function ask(
     google: new GoogleAccess(ctx.orgId),
     settled: [],
     produced: null,
+    startedJobs: [],
   };
   const settled = session.settled;
 
@@ -3724,7 +3961,7 @@ export async function ask(
   // session made is lost on the way.
   const done = (answer: AssistantAnswer): AssistantResult => {
     const full = withProduced(answer, session.produced);
-    return { reply: answerToText(full), answer: full, proposed, used, settled };
+    return { reply: answerToText(full), answer: full, proposed, used, settled, startedJobs: session.startedJobs };
   };
 
   // once it has started.

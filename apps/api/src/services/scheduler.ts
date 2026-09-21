@@ -6,6 +6,7 @@ import { runReport } from './report.js';
 import { runIngest } from './ingest.js';
 import { runDigest } from './digest.js';
 import { readIngestSettings } from '../lib/ingestSettings.js';
+import { sweepJobs } from './mediaJobs.js';
 
 async function forEachOrg(fn: (orgId: string) => Promise<unknown>, label: string) {
   if (!supabaseAdmin) return;
@@ -32,6 +33,9 @@ async function forEachOrg(fn: (orgId: string) => Promise<unknown>, label: string
  */
 const INGEST_TICK = '* * * * *'; // every minute; the studio decides the rest
 let ingestRunning = false;
+
+/** One media sweep at a time: they poll a provider and can overlap. */
+let mediaRunning = false;
 
 /** When each org was last read, so an interval can be honoured. */
 const lastIngest = new Map<string, number>();
@@ -93,6 +97,17 @@ export function startScheduler(): void {
     void forEachOrg((id) => runFollowUps(id), 'followups');
   });
 
+  // Video finishes a minute or two after the request that started it, and
+  // the provider's URL for a finished clip is temporary. A person watching
+  // the screen polls it themselves; this is for the one who closed the tab.
+  cron.schedule('*/2 * * * *', () => {
+    if (mediaRunning) return;
+    mediaRunning = true;
+    void forEachOrg((id) => sweepJobs(id), 'media').finally(() => {
+      mediaRunning = false;
+    });
+  });
+
   // Morning digest, every day — the push that means nobody has to log in.
   // Offset past the weekly report so Monday does not run both at once.
   cron.schedule('5 7 * * *', () => {
@@ -104,6 +119,6 @@ export function startScheduler(): void {
   });
 
   console.log(
-    '  ▸ Scheduler started (email: per-studio interval · follow-ups 02:00 · digest 07:05 · report Mon 07:00)',
+    '  ▸ Scheduler started (email: per-studio interval · follow-ups 02:00 · digest 07:05 · report Mon 07:00 · media every 2 min)',
   );
 }

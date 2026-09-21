@@ -670,12 +670,13 @@ export type AiFeature =
   | 'prompt.run'
   | 'assistant.answer'
   | 'document.read'
-  | 'image.render';
+  | 'image.render'
+  | 'video.render';
 
 export const AI_FEATURES: AiFeature[] = [
   'email.extract', 'task.extract', 'document.extract', 'followup.draft',
   'reply.draft', 'digest.summary', 'report.narrative', 'prompt.run', 'assistant.answer', 'document.read',
-  'image.render',
+  'image.render', 'video.render',
 ];
 
 export const AI_FEATURE_LABELS: Record<AiFeature, string> = {
@@ -690,6 +691,7 @@ export const AI_FEATURE_LABELS: Record<AiFeature, string> = {
   'assistant.answer': 'Assistant answers',
   'document.read': 'Reading documents on request',
   'image.render': 'Presentation boards',
+  'video.render': 'Video clips',
 };
 
 /** Whether the spend was the agent working, or a person pressing a button. */
@@ -705,6 +707,7 @@ export const AI_FEATURE_TRIGGER: Record<AiFeature, 'agent' | 'person'> = {
   'assistant.answer': 'person',
   'document.read': 'person',
   'image.render': 'person',
+  'video.render': 'person',
 };
 
 /**
@@ -788,6 +791,117 @@ export function imageCostUsd(model: string, images = 1): number {
   return (IMAGE_MODELS.find((m) => m.id === model)?.usdPerImage ?? 0) * images;
 }
 
+/**
+ * Grok's own models, kept in a list of their own rather than mixed into
+ * IMAGE_MODELS.
+ *
+ * They are not interchangeable with the board models: `services/images.ts`
+ * posts to Gemini's endpoint and nothing else, so a Grok id selected in the
+ * board dropdown would be sent to Google and 404. Two providers, two lists,
+ * and no way to pick one and reach the other.
+ */
+export interface GrokImageModel {
+  id: string;
+  label: string;
+  usdPerImage: number;
+  note: string;
+}
+
+export const GROK_IMAGE_MODELS: GrokImageModel[] = [
+  {
+    id: 'grok-imagine-image-2.0',
+    label: 'Grok Imagine 2.0',
+    usdPerImage: 0.04,
+    note: 'Photoreal renderings and concept imagery. xAI recommends this one.',
+  },
+  {
+    id: 'grok-imagine-image',
+    label: 'Grok Imagine',
+    usdPerImage: 0.02,
+    note: 'Half the price, for iterating on a direction before anyone sees it.',
+  },
+  {
+    id: 'grok-imagine-image-quality',
+    label: 'Grok Imagine (quality)',
+    usdPerImage: 0.05,
+    note: 'The dearest tier, for the one that goes in front of a client.',
+  },
+];
+
+export const DEFAULT_GROK_IMAGE_MODEL = 'grok-imagine-image-2.0';
+
+export function grokImageCostUsd(model: string, images = 1): number {
+  return (GROK_IMAGE_MODELS.find((m) => m.id === model)?.usdPerImage ?? 0) * images;
+}
+
+/**
+ * Video, priced per SECOND rather than per picture.
+ *
+ * Worth stating plainly wherever this list is shown: at eight cents a
+ * second, one fifteen-second clip costs more than six presentation boards.
+ * `maxSeconds` is the provider's own ceiling, and the studio's own cap
+ * (MEDIA_MAX_SECONDS) may be lower still.
+ */
+export interface VideoModel {
+  id: string;
+  label: string;
+  usdPerSecond: number;
+  maxSeconds: number;
+  note: string;
+}
+
+export const VIDEO_MODELS: VideoModel[] = [
+  {
+    id: 'grok-imagine-video-1.5',
+    label: 'Grok Imagine Video 1.5',
+    usdPerSecond: 0.08,
+    maxSeconds: 15,
+    note: 'Up to 1080p from text or a still. xAI recommends this one.',
+  },
+  {
+    id: 'grok-imagine-video',
+    label: 'Grok Imagine Video',
+    usdPerSecond: 0.05,
+    maxSeconds: 15,
+    note: 'Cheaper and lower resolution — right for a draft nobody outside the studio sees.',
+  },
+];
+
+export const DEFAULT_VIDEO_MODEL = 'grok-imagine-video-1.5';
+
+/** What a clip cost, in USD. An unpriced model reports 0 rather than guessing. */
+export function videoCostUsd(model: string, seconds: number): number {
+  return (VIDEO_MODELS.find((m) => m.id === model)?.usdPerSecond ?? 0) * Math.max(0, seconds);
+}
+
+/** The provider's ceiling for a model, so a caller cannot ask for 60 seconds. */
+export function maxVideoSeconds(model: string): number {
+  return VIDEO_MODELS.find((m) => m.id === model)?.maxSeconds ?? 15;
+}
+
+/**
+ * A piece of media the studio asked for, as the browser sees it.
+ *
+ * An image is `done` the moment it is asked for; a video is not, and that
+ * is the whole reason this shape exists — something has to be shown while
+ * the provider is still drawing.
+ */
+export type MediaJobStatus = 'pending' | 'done' | 'failed' | 'expired';
+
+export interface MediaJobView {
+  id: string;
+  kind: 'image' | 'video';
+  status: MediaJobStatus;
+  model: string;
+  prompt: string;
+  seconds: number | null;
+  createdAt: string;
+  /** Set once it is done: the row to drop into the answer, preview and all. */
+  item: AssistantItem | null;
+  /** Set when it failed or expired: what to tell the person, in words. */
+  error: string | null;
+}
+
 export const CACHE_WRITE_MULTIPLIER = 1.25;
 export const CACHE_READ_MULTIPLIER = 0.1;
 
@@ -856,6 +970,25 @@ export interface AiUsageReport {
   };
   /** Cost over the window immediately before this one, for the trend. */
   previous_cost_usd: number;
+  /**
+   * What has been spent since midnight, and what a day normally costs.
+   *
+   * Separate from the window totals because it answers a different
+   * question: the window says what the agent costs to run, and this says
+   * whether today is going the usual way. A studio watching a bill wants
+   * to know that before the month closes, not after.
+   *
+   * `date` is the day this covers, resolved in the reader's own timezone —
+   * a report opened in California must not roll over to tomorrow at five
+   * in the afternoon.
+   */
+  today: {
+    date: string;
+    cost_usd: number;
+    calls: number;
+    /** The mean daily cost over the rest of the window; 0 when there is no history. */
+    avg_daily_cost_usd: number;
+  };
   by_feature: AiUsageBucket[];
   by_model: AiUsageBucket[];
   by_day: AiUsageBucket[];
@@ -1053,6 +1186,16 @@ export interface AssistantFile {
   downloadable: boolean;
   /** The file where it lives — the Gmail message or the Drive file. */
   webUrl: string | null;
+  /**
+   * A short-lived URL the browser can play or draw from directly.
+   *
+   * Set only for media the app itself produced and stored. It exists
+   * because the download endpoint cannot carry a video: a serverless
+   * response caps at a few megabytes and an mp4 is larger than that, so a
+   * clip is streamed from storage instead of relayed through the API. It
+   * expires on its own; anything holding one refreshes by asking again.
+   */
+  streamUrl?: string | null;
 }
 
 export interface AssistantItem {
@@ -1080,7 +1223,7 @@ export interface AssistantItem {
    * image. For a PDF the grant serves only the pages that matter, and
    * `pages` says which pages of the original they are.
    */
-  preview?: 'pdf' | 'image' | null;
+  preview?: 'pdf' | 'image' | 'video' | null;
   pages?: number[] | null;
 }
 

@@ -8,6 +8,7 @@ import { runFollowUps, resolveFollowUps } from '../services/followups.js';
 import { runReport } from '../services/report.js';
 import { runDigest } from '../services/digest.js';
 import { advanceActiveTasks, backfillTasks, mergeDuplicateTasks } from '../services/tasks.js';
+import { sweepJobs } from '../services/mediaJobs.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 
 export const opsRouter = Router();
@@ -96,6 +97,11 @@ cronRouter.all(
 cronRouter.all('/follow-ups', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => runFollowUps(id)) })));
 cronRouter.all('/report', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => runReport(id)) })));
 cronRouter.all('/digest', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => runDigest(id)) })));
+// Video that nobody is watching. A clip finishes a minute or two after the
+// request that started it has gone, and the provider's URL for it is
+// temporary — without this, a person who asked and then closed the tab
+// would have paid for something that was never fetched.
+cronRouter.all('/media', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => sweepJobs(id)) })));
 
 opsRouter.use('/cron', cronRouter);
 
@@ -111,7 +117,9 @@ opsRouter.post(
   requireRole('principal', 'coordinator'),
   asyncHandler(async (req, res) => {
     if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
-    const result = await backfillTasks(req.auth!.orgId);
+    // A person is waiting on this one, so it gets the short budget and
+    // reports what is left rather than holding the connection open.
+    const result = await backfillTasks(req.auth!.orgId, { budgetMs: JOB_BUDGET_MS });
     // Tasks raised from old mail are often already under way: advance them
     // in the same pass rather than showing a board of stale Open cards.
     const advanced = await advanceActiveTasks(req.auth!.orgId);
