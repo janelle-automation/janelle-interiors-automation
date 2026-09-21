@@ -71,10 +71,19 @@ calls these endpoints instead, authenticated with `CRON_SECRET`:
 | `/api/ops/cron/follow-ups` | `0 2 * * *` — nightly |
 | `/api/ops/cron/report` | `0 7 * * 1` — Monday morning |
 | `/api/ops/cron/ingest` | not registered — see below |
+| `/api/ops/cron/digest` | `5 7 * * *` — every morning |
+| `/api/ops/cron/media` | not registered — see below |
 
-**On the Hobby plan Vercel runs each cron job once a day and allows two of
-them**, so the two above use the quota and continuous ingestion is not
-possible. Until that changes, new mail is read when someone presses **Read
+> **Never register a cron more often than once a day on Hobby.** Vercel rejects
+> the whole deployment, after a build that passed, with only "Deployment
+> failed" on the PR. That is what happened to PR #11: the video sweep went in
+> at `*/5 * * * *`. Anything that needs to run more often goes through an
+> external scheduler, as below.
+
+**On the Hobby plan Vercel runs each cron job at most once a day**, so
+continuous ingestion is not possible from Vercel Cron. (Three daily crons
+deploy fine — PR #10 shipped with all three above; it is the frequency Hobby
+refuses, not the count.) Until that changes, new mail is read when someone presses **Read
 Gmail & Drive** on the Dashboard.
 
 To get automatic ingestion back, either:
@@ -86,6 +95,12 @@ To get automatic ingestion back, either:
 - **Or call `/api/ops/cron/ingest` from an external scheduler**
   (cron-job.org, GitHub Actions, Upstash QStash) as often as you want, with
   the header `Authorization: Bearer $CRON_SECRET`.
+
+The same applies to **`/api/ops/cron/media`**, which finishes video clips
+whose tab was closed while they rendered. Without it, a clip still arrives for
+anyone watching the conversation, because the browser polls it, but a clip
+nobody is watching when it finishes is written off after ten minutes. Call it
+every few minutes from the same external scheduler once video is switched on.
 
 A single function invocation is capped at 60 seconds (`maxDuration` in
 `vercel.json`), so a very large first ingestion may need several runs. Each
