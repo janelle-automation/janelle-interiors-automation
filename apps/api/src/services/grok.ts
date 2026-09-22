@@ -84,6 +84,13 @@ export interface ImageRequest {
   aspectRatio?: string;
   /** 2K is the tier a client-facing visualisation wants. */
   resolution?: '1K' | '2K';
+  /**
+   * How long this render may take, set by the caller because only the
+   * caller knows how much of its request is left. The direct Image mode
+   * has nearly the whole function to spend; a render inside one of Jenny's
+   * turns has what her budget leaves. IMAGE_TIMEOUT_MS when unset.
+   */
+  timeoutMs?: number;
 }
 
 export interface VideoRequest {
@@ -212,10 +219,19 @@ function explain(res: Response, json: Record<string, unknown>, what: string): Er
   return new Error(said || `${what} failed (${res.status}).`);
 }
 
-/** An aborted call is the clock, not the request, and reads differently. */
+/**
+ * An aborted call is the clock, not the request, and reads differently.
+ *
+ * Tagged, so a caller can tell "Grok was slow" from "Grok said no" — the
+ * first is worth another go as it stands, the second is not.
+ */
+export class RenderTimeout extends Error {
+  readonly timedOut = true;
+}
+
 function timedOut(err: unknown, what: string): Error {
   if ((err as Error)?.name === 'AbortError') {
-    return new Error(`${what} took longer than the time limit. Try again, or ask for something simpler.`);
+    return new RenderTimeout(`${what} took longer than the time limit. Try again, or ask for something simpler.`);
   }
   return err as Error;
 }
@@ -316,21 +332,24 @@ export async function generateImage(req: ImageRequest, ctx: CallContext): Promis
   }
 
   const started = Date.now();
+  const limit = req.timeoutMs && req.timeoutMs > 0 ? req.timeoutMs : IMAGE_TIMEOUT_MS;
   try {
     let { res, json } = await call(path, {
       body,
       apiKey: ai.apiKey,
-      timeoutMs: IMAGE_TIMEOUT_MS,
+      timeoutMs: limit,
     });
 
     // Not every optional field is documented for every model, and one the
     // account does not accept should not cost the whole picture. Retried
     // once with nothing but the model, the prompt and the source image —
-    // a plainer request beats an error about a field nobody chose.
-    if (!res.ok && /response_format|b64_json|resolution|aspect|unknown|unsupported|invalid.*(field|param)/i.test(messageOf(json))) {
+    // a plainer request beats an error about a field nobody chose. Only
+    // with what is left of the limit: the retry must not double it.
+    const left = limit - (Date.now() - started);
+    if (!res.ok && left > 5_000 && /response_format|b64_json|resolution|aspect|unknown|unsupported|invalid.*(field|param)/i.test(messageOf(json))) {
       const plain: Record<string, unknown> = { model, prompt: req.prompt };
       if (body.image) plain.image = body.image;
-      ({ res, json } = await call(path, { body: plain, apiKey: ai.apiKey, timeoutMs: IMAGE_TIMEOUT_MS }));
+      ({ res, json } = await call(path, { body: plain, apiKey: ai.apiKey, timeoutMs: left }));
     }
 
     if (!res.ok) throw explain(res, json, mode === 'edit' ? 'The image edit' : 'The image request');

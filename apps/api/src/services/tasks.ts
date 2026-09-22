@@ -1,11 +1,11 @@
 import {
-  DEFAULT_SLA, SEATS, SEAT_KEYS, TASK_HYGIENE_SEAT, TASK_KIND_ROLE, TASK_KINDS,
+  DEFAULT_SLA, SEATS, SEAT_KEYS, TASK_HYGIENE_SEAT, TASK_KIND_LABELS, TASK_KIND_ROLE, TASK_KINDS,
   dueDateFor, seatPeople,
   type Seat, type SlaSettings, type TaskKind, type UserRole,
 } from '@janelle/shared';
 import { supabaseAdmin } from '../lib/supabase.js';
-import { hasSeatColumn } from '../lib/columns.js';
-import { extractTask } from './extract.js';
+import { hasSeatColumn, hasSubtasks, hasTaskCompletion } from '../lib/columns.js';
+import { extractTask, type TaskExtraction } from './extract.js';
 import { loadStudioNames } from '../lib/studioNames.js';
 import { STUDIO_TEAM, isAutomatedAddress, isStudioAddress, isStudioMailbox } from '../lib/studioTeam.js';
 import { matchProjectId } from './promote.js';
@@ -517,6 +517,245 @@ export async function advanceActiveTasks(orgId: string): Promise<number> {
   }
 }
 
+// ────────────────────────────────────────────────────────────
+//  Closing work the mail shows is finished
+//
+//  advanceActiveTasks says a task has started. Nothing said it had ended:
+//  a task whose work was done early — the vendor sent the quote, the client
+//  approved — stayed on the board until somebody dragged it to Done, and
+//  once its date passed the nightly engine chased its owner for work that
+//  was already finished.
+//
+//  The email that finishes a task is read anyway, by the same Claude call
+//  that decides whether it raises one, so that call is also shown the open
+//  tasks it could plausibly finish and asked which it does. No extra call,
+//  and a close has to quote the words in the email that prove it.
+// ────────────────────────────────────────────────────────────
+
+/** At most this many open tasks are put to the model per email. */
+const MAX_CLOSABLE = 8;
+
+export interface LiveTask {
+  id: string;
+  title: string;
+  kind: TaskKind;
+  next_step: string | null;
+  due_date: string | null;
+  created_at: string;
+  project_id: string | null;
+  vendor_id: string | null;
+  source_email_id: string | null;
+  projects?: { name: string } | null;
+  vendors?: { name: string } | null;
+}
+
+/** The email being read, as stored. */
+export interface EmailFacts {
+  id: string;
+  thread_id: string | null;
+  received_at: string | null;
+  project_id: string | null;
+  vendor_id: string | null;
+  subject: string | null;
+  from_addr: string | null;
+}
+
+export interface ClosableTask {
+  ref: string;
+  task: LiveTask;
+  /** One line for the prompt: the task, its job and supplier, and why it was picked. */
+  line: string;
+}
+
+const LIVE_TASK_COLUMNS =
+  'id, title, kind, next_step, due_date, created_at, project_id, vendor_id, source_email_id, projects(name), vendors(name)';
+
+const ms = (iso: string | null | undefined): number => (iso ? Date.parse(iso) : NaN);
+
+/**
+ * The live tasks one email could plausibly finish, closest first.
+ *
+ * Related means the same thread, or the same job, or the same supplier on a
+ * job that does not contradict it — a quote from a vendor for one job must
+ * not close the chase for the same vendor's quote on another. And the email
+ * has to come AFTER the ask: mail from before a task existed cannot be its
+ * answer, which matters when an older email is read late.
+ *
+ * Pure, so the ranking can be checked without a database.
+ */
+export function rankClosable(
+  email: EmailFacts,
+  tasks: LiveTask[],
+  sources: Map<string, { thread_id: string | null; received_at: string | null }>,
+): { task: LiveTask; why: string }[] {
+  const at = Number.isNaN(ms(email.received_at)) ? Date.now() : ms(email.received_at);
+  const scored: { task: LiveTask; why: string; score: number }[] = [];
+
+  for (const t of tasks) {
+    if (t.source_email_id === email.id) continue;
+    const source = t.source_email_id ? sources.get(t.source_email_id) : undefined;
+    const since = Number.isNaN(ms(source?.received_at)) ? ms(t.created_at) : ms(source?.received_at);
+    if (!Number.isNaN(since) && at <= since) continue;
+
+    const sameThread = !!email.thread_id && source?.thread_id === email.thread_id;
+    const sameProject = !!email.project_id && t.project_id === email.project_id;
+    const sameVendor = !!email.vendor_id && t.vendor_id === email.vendor_id;
+    const otherJob = !!email.project_id && !!t.project_id && t.project_id !== email.project_id;
+
+    if (!sameThread && otherJob) continue;
+    const score = sameThread ? 3 : sameProject && sameVendor ? 2 : sameProject || sameVendor ? 1 : 0;
+    if (!score) continue;
+
+    const why = sameThread ? 'same email thread' : sameProject && sameVendor ? 'same job and supplier' : sameProject ? 'same job' : 'same supplier';
+    scored.push({ task: t, why, score });
+  }
+
+  // Closest relation first, then the newest ask: a thread's latest request is
+  // the one a reply is most likely answering.
+  scored.sort((a, b) => b.score - a.score || ms(b.task.created_at) - ms(a.task.created_at));
+  return scored.map(({ task, why }) => ({ task, why }));
+}
+
+function closableLine(t: LiveTask, why: string): string {
+  return [
+    `${t.title} (${TASK_KIND_LABELS[t.kind] ?? t.kind})`,
+    t.projects?.name ? `job: ${t.projects.name}` : null,
+    t.vendors?.name ? `supplier: ${t.vendors.name}` : null,
+    t.next_step ? `next step: ${t.next_step}` : null,
+    `raised ${t.created_at.slice(0, 10)}`,
+    why,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+/**
+ * The open tasks to show the model for this email, with refs.
+ *
+ * Two kinds are left out on purpose: a task a person reopened after the
+ * system had closed it (they have said it is not finished, and the next
+ * reply on the thread would only close it again), and a parent whose
+ * subtasks are still live (its steps are the record of what is left).
+ * Never throws — without it, the email still raises its task.
+ */
+async function loadClosable(orgId: string, email: EmailFacts): Promise<ClosableTask[]> {
+  if (!supabaseAdmin) return [];
+  try {
+    const { data: rows } = await supabaseAdmin
+      .from('tasks')
+      .select(LIVE_TASK_COLUMNS)
+      .eq('org_id', orgId)
+      .in('status', LIVE_STATUSES);
+    const live = (rows ?? []) as unknown as LiveTask[];
+    if (!live.length) return [];
+
+    const sourceIds = [...new Set(live.map((t) => t.source_email_id).filter((id): id is string => !!id))];
+    const { data: sourceRows } = sourceIds.length
+      ? await supabaseAdmin.from('emails').select('id, thread_id, received_at').in('id', sourceIds)
+      : { data: [] };
+    const sources = new Map(
+      ((sourceRows ?? []) as { id: string; thread_id: string | null; received_at: string | null }[]).map((e) => [e.id, e]),
+    );
+
+    const ranked = rankClosable(email, live, sources);
+    if (!ranked.length) return [];
+    const ids = ranked.map((r) => r.task.id);
+
+    const { data: reopened } = await supabaseAdmin
+      .from('activity_log')
+      .select('entity_id')
+      .eq('org_id', orgId)
+      .eq('action', 'task.auto_complete')
+      .in('entity_id', ids);
+    const skip = new Set(((reopened ?? []) as { entity_id: string }[]).map((r) => r.entity_id));
+
+    if (await hasSubtasks()) {
+      const { data: kids } = await supabaseAdmin
+        .from('tasks')
+        .select('parent_task_id')
+        .in('parent_task_id', ids)
+        .in('status', LIVE_STATUSES);
+      for (const k of (kids ?? []) as { parent_task_id: string }[]) skip.add(k.parent_task_id);
+    }
+
+    return ranked
+      .filter((r) => !skip.has(r.task.id))
+      .slice(0, MAX_CLOSABLE)
+      .map((r, i) => ({ ref: `T${i + 1}`, task: r.task, line: closableLine(r.task, r.why) }));
+  } catch (err) {
+    console.error('[tasks] finding closable tasks failed:', (err as Error).message);
+    return [];
+  }
+}
+
+/** "Acme Sales" from `"Acme Sales" <sales@acme.com>`; the address when there is no name. */
+function senderName(from: string | null): string {
+  const raw = (from ?? '').trim();
+  const name = raw.replace(/<[^>]*>/, '').replace(/["']/g, '').trim();
+  return name || raw.replace(/[<>]/g, '') || 'an unknown sender';
+}
+
+/**
+ * Close the tasks the model says this email finished.
+ *
+ * Only refs it was shown, only with evidence, and only while the task is
+ * still live — a person may have closed or reopened it while the email was
+ * being read. Each close is logged with the words that justified it, and
+ * the note on the task (migration 0015) says the same on the board.
+ * Returns the ids closed.
+ */
+async function closeFinished(
+  orgId: string,
+  email: EmailFacts,
+  closable: ClosableTask[],
+  completes: TaskExtraction['completes'],
+): Promise<string[]> {
+  if (!supabaseAdmin || !closable.length || !Array.isArray(completes)) return [];
+
+  const byRef = new Map(closable.map((c) => [c.ref, c.task]));
+  const withNote = await hasTaskCompletion();
+  const day = (email.received_at ?? new Date().toISOString()).slice(0, 10);
+  const closed: string[] = [];
+
+  for (const c of completes) {
+    const task = byRef.get(String(c?.ref ?? '').trim().toUpperCase());
+    const evidence = String(c?.evidence ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    // No proof, no close: an invented ref or an empty reason is not an answer.
+    if (!task || !evidence || closed.includes(task.id)) continue;
+
+    const patch: Record<string, unknown> = { status: 'done' };
+    if (withNote) {
+      patch.completion_note =
+        `Closed automatically — "${email.subject?.trim() || '(no subject)'}" from ${senderName(email.from_addr)}, ${day}: "${evidence}"`;
+    }
+    const { data } = await supabaseAdmin
+      .from('tasks')
+      .update(patch)
+      .eq('id', task.id)
+      .eq('org_id', orgId)
+      .in('status', LIVE_STATUSES)
+      .select('id');
+    if (!data?.length) continue;
+    closed.push(task.id);
+
+    await supabaseAdmin.from('activity_log').insert({
+      org_id: orgId,
+      action: 'task.auto_complete',
+      entity: 'tasks',
+      entity_id: task.id,
+      meta: {
+        title: task.title,
+        email_id: email.id,
+        evidence,
+        due_date: task.due_date,
+        // What the studio asked for: whether finished work was early.
+        finished: !task.due_date ? null : day < task.due_date ? 'early' : day === task.due_date ? 'on_time' : 'late',
+      },
+    });
+  }
+  return closed;
+}
+
 /**
  * Raise tasks from email already in the system.
  *
@@ -632,7 +871,7 @@ export async function createTaskFromEmail(
   // file was Lemon Residence.
   const { data: email } = await supabaseAdmin
     .from('emails')
-    .select('project_id, vendor_id, projects(name, client_name), vendors(name)')
+    .select('project_id, vendor_id, thread_id, received_at, subject, from_addr, projects(name, client_name), vendors(name)')
     .eq('id', emailId)
     .maybeSingle();
   const filed = email as {
@@ -641,15 +880,30 @@ export async function createTaskFromEmail(
   } | null;
   const filedUnder = filed?.projects ?? null;
 
+  // The open work this email might be the answer to, read from the stored
+  // row rather than `parsed` — a backfill passes no thread id.
+  const facts = { id: emailId, ...(email as Omit<EmailFacts, 'id'> | null) } as EmailFacts;
+  const closable = email ? await loadClosable(orgId, facts) : [];
+
   const names = await loadStudioNames(orgId);
   const extracted = await extractTask(parsed, { orgId }, {
     project: filedUnder?.name ?? null,
     client: filedUnder?.client_name ?? null,
     vendor: filed?.vendors?.name ?? null,
     names,
+    openTasks: closable.map(({ ref, line }) => ({ ref, line })),
   });
   // Unusable JSON is not an answer — leave it to be asked again.
   if (!extracted) return false;
+
+  // Before the needs_task gate: the email that finishes work usually raises
+  // none of its own.
+  try {
+    await closeFinished(orgId, facts, closable, extracted.completes);
+  } catch (err) {
+    console.error('[tasks] closing finished tasks failed:', (err as Error).message);
+  }
+
   if (!extracted.needs_task) {
     await markTaskChecked(emailId);
     return false;

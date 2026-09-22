@@ -284,7 +284,20 @@ interface ToolSession {
    * these ids are how the screen knows there is something to wait for.
    */
   startedJobs: string[];
+  /**
+   * When this question started. A tool that can run long — a render — sizes
+   * itself to what is left of the FUNCTION, not only of the answer budget:
+   * the answer still has to be written after it, inside the same 60s.
+   */
+  startedAt: number;
 }
+
+/**
+ * The latest a render inside a turn may finish, from the question's start.
+ * What follows it is one forced answer (a few seconds) before the platform's
+ * 60s — so a picture that finishes by here still reaches the screen.
+ */
+const RENDER_IN_TURN_CEILING_MS = Number(process.env.RENDER_IN_TURN_CEILING_MS || 42_000);
 
 interface ProducedWork {
   title: string;
@@ -2554,12 +2567,19 @@ async function runTool(
         aspectRatio: String(input.aspect_ratio ?? '16:9'),
         resolution: input.resolution === '1K' ? '1K' : '2K',
         projectId: typeof input.project_id === 'string' ? input.project_id : null,
+        // It was a flat 25s whatever the turn had already spent.
+        timeoutMs: Math.max(10_000, RENDER_IN_TURN_CEILING_MS - (Date.now() - session.startedAt)),
       });
 
+      // They asked for a picture. A paragraph restating their brief is not
+      // one, and "offer to describe it instead" is how a timed-out render
+      // came back as a page of prose that read as though it had worked.
       if (!drawn.ok) {
         return {
           failed: drawn.reason,
-          note: 'Tell them what went wrong in plain words, and offer to describe it instead.',
+          note: drawn.timedOut
+            ? 'The render ran out of time. Say so in one short sentence, and tell them to switch the box to Image and send the same brief — Image mode has nearly a minute to draw, where a render inside a conversation has only what is left of it. Do NOT describe the picture in its place.'
+            : 'Tell them what went wrong in one or two plain sentences. Do NOT describe the picture in its place unless they ask for a description.',
         };
       }
       const picture = drawn.value;
@@ -3872,6 +3892,7 @@ export async function ask(
     settled: [],
     produced: null,
     startedJobs: [],
+    startedAt: Date.now(),
   };
   const settled = session.settled;
 

@@ -273,34 +273,66 @@ export interface TaskView {
    * added by hand and is worth being able to tell apart.
    */
   fromEmail: boolean;
+  /** When it moved to Done; null while it is still live. */
+  completedAt: string | null;
+  /** Set when the system closed it from an email: which one, and the words that finished it. */
+  closedNote: string | null;
+  /** Days between finishing and the due date — positive is early, negative late. */
+  daysEarly: number | null;
 }
 interface TaskRow {
   id: string; title: string; detail: string | null; kind: TaskKind; status: TaskStatus;
   assigned_to: string | null; due_date: string | null; created_at: string;
+  updated_at?: string | null;
+  /** Migration 0015; absent before it is applied. */
+  completed_at?: string | null; completion_note?: string | null;
   source_email_id?: string | null;
   next_step?: string | null; seat?: Seat | null;
   projects: { name: string } | null; vendors: { name: string } | null;
   profiles: { full_name: string | null } | null;
+}
+
+/**
+ * Whole days from when a task was finished to when it was due. The finish
+ * is a moment, the due date a calendar day, so the moment is read as the
+ * day it fell on here rather than in UTC — an evening close in California
+ * is already tomorrow in UTC.
+ */
+export function daysEarly(due: string | null, completedAt: string | null): number | null {
+  if (!due || !completedAt) return null;
+  const done = new Date(completedAt);
+  const [y, m, d] = due.split('-').map(Number);
+  if (Number.isNaN(done.getTime()) || !y || !m || !d) return null;
+  const doneDay = Date.UTC(done.getFullYear(), done.getMonth(), done.getDate());
+  return Math.round((Date.UTC(y, m - 1, d) - doneDay) / 86_400_000);
 }
 export function useTasks() {
   const q = useQuery({
     queryKey: ['tasks'],
     queryFn: async (): Promise<TaskView[]> => {
       const rows = await api<TaskRow[]>('/tasks');
-      return rows.map((r) => ({
-        id: r.id, title: r.title, detail: r.detail ?? '', kind: r.kind, status: r.status,
-        assignedTo: r.assigned_to,
-        assignee: r.profiles?.full_name ?? (r.assigned_to ? 'Assigned' : 'Unassigned'),
-        project: r.projects?.name ?? r.vendors?.name ?? '—',
-        due: r.due_date, age: ageFrom(r.created_at),
-        nextStep: r.next_step ?? null,
-        seat: r.seat ?? null,
-        overdue:
-          !!r.due_date &&
-          r.due_date < new Date().toISOString().slice(0, 10) &&
-          !['done', 'cancelled'].includes(r.status),
-        fromEmail: Boolean(r.source_email_id),
-      }));
+      return rows.map((r) => {
+        // Before migration 0015 there is no completed_at; a finished task's
+        // last change is the closest record of when it was finished.
+        const completedAt = r.status === 'done' ? r.completed_at ?? r.updated_at ?? null : null;
+        return {
+          id: r.id, title: r.title, detail: r.detail ?? '', kind: r.kind, status: r.status,
+          assignedTo: r.assigned_to,
+          assignee: r.profiles?.full_name ?? (r.assigned_to ? 'Assigned' : 'Unassigned'),
+          project: r.projects?.name ?? r.vendors?.name ?? '—',
+          due: r.due_date, age: ageFrom(r.created_at),
+          nextStep: r.next_step ?? null,
+          seat: r.seat ?? null,
+          overdue:
+            !!r.due_date &&
+            r.due_date < new Date().toISOString().slice(0, 10) &&
+            !['done', 'cancelled'].includes(r.status),
+          fromEmail: Boolean(r.source_email_id),
+          completedAt,
+          closedNote: r.status === 'done' ? r.completion_note ?? null : null,
+          daysEarly: daysEarly(r.due_date, completedAt),
+        };
+      });
     },
   });
   return { ...q, data: q.data ?? [] };
@@ -904,6 +936,11 @@ export function useUpdateTask() {
               !!next.due &&
               next.due < new Date().toISOString().slice(0, 10) &&
               !['done', 'cancelled'].includes(v.status);
+            // Finished now, by a person — so no system note. Reopening
+            // clears both, as the server does.
+            if (v.status === 'done' && t.status !== 'done') next.completedAt = new Date().toISOString();
+            if (v.status !== 'done') next.completedAt = null;
+            if (v.status !== t.status) next.closedNote = null;
           }
 
           if (v.due_date !== undefined) {
@@ -913,6 +950,7 @@ export function useUpdateTask() {
               v.due_date < new Date().toISOString().slice(0, 10) &&
               !['done', 'cancelled'].includes(next.status);
           }
+          next.daysEarly = daysEarly(next.due, next.completedAt);
 
           if (v.next_step !== undefined) next.nextStep = v.next_step;
 
@@ -1013,6 +1051,8 @@ export interface TaskDetail {
     next_step: string | null; due_date: string | null;
     created_at: string; updated_at: string | null;
     reminded_at: string | null; reminder_count: number;
+    /** Migration 0015; absent before it is applied. */
+    completed_at?: string | null; completion_note?: string | null;
     projects: { name: string } | null;
     vendors: { name: string } | null;
     profiles: { full_name: string | null; email: string | null } | null;

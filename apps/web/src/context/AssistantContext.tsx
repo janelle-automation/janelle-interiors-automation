@@ -61,6 +61,11 @@ export interface ChatMessage {
   content: string;
   /** Files attached to a question. */
   files?: AttachedFile[];
+  /**
+   * For a question: made directly in Image or Video mode rather than asked of
+   * Jenny — so editing it makes it again the same way.
+   */
+  made?: 'image' | 'video';
   /** When it was said, epoch ms. */
   at: number;
   answer?: AssistantAnswer;
@@ -82,6 +87,13 @@ export interface ChatMessage {
   retry?: string;
   /** For an error: the files that question carried. */
   retryFiles?: AttachedFile[];
+  /**
+   * For an error from Image or Video: make it again the same way. Without
+   * it the retry went to Jenny as a question — Claude tokens on a request
+   * that had said "no tokens spent", a render squeezed into what was left of
+   * her turn, and, when that timed out too, a paragraph instead of a picture.
+   */
+  retryKind?: 'image' | 'video';
   /**
    * Clips still being drawn for this answer.
    *
@@ -118,12 +130,18 @@ interface AssistantCtx {
    * Ask. `alternatives` are the other ways a spoken question was heard;
    * `files` are uploads attached to it.
    */
-  send: (text: string, opts?: { alternatives?: string[]; files?: AttachedFile[] }) => void;
+  send: (text: string, opts?: { alternatives?: string[]; files?: AttachedFile[]; replaceFrom?: string }) => void;
   /**
    * Make a picture or a clip directly, skipping the model turn entirely.
    * Used by the Create buttons, where there is nothing left to decide.
    */
-  imagine: (text: string, kind: 'image' | 'video', opts?: { files?: AttachedFile[]; seconds?: number }) => void;
+  imagine: (text: string, kind: 'image' | 'video', opts?: { files?: AttachedFile[]; seconds?: number; replaceFrom?: string }) => void;
+  /**
+   * Change a question already asked and ask it again. Everything after it in
+   * the conversation is replaced by the new answer, and it goes the way it
+   * went the first time — to Jenny, or straight to Image or Video.
+   */
+  editMessage: (messageId: string, text: string) => void;
   /** Upload a file to attach to the next question. */
   uploadFile: (file: File, signal?: AbortSignal) => Promise<AttachedFile>;
   /** The studio's names, for choosing between hearings of a spoken question. */
@@ -591,6 +609,21 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     [update],
   );
 
+  /**
+   * Put a question in the conversation — at the end, or in place of an
+   * earlier one being edited, dropping everything after it. One update, so
+   * the old answers are never on screen beside the new question.
+   */
+  const ask = useCallback(
+    (message: Omit<ChatMessage, 'id' | 'at'>, conversationId: string, replaceFrom?: string) =>
+      update((s) => {
+        const at = replaceFrom ? s.messages.findIndex((m) => m.id === replaceFrom) : -1;
+        const kept = at < 0 ? s.messages : s.messages.slice(0, at);
+        return { ...s, messages: [...kept, { ...message, id: newId(), at: Date.now() }] };
+      }, conversationId),
+    [update],
+  );
+
   // ── Clips that are still rendering ────────────────────────
 
   /**
@@ -747,13 +780,13 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
    * so the conversation cannot tell the difference.
    */
   const imagine = useCallback(
-    (text: string, kind: 'image' | 'video', opts: { files?: AttachedFile[]; seconds?: number } = {}) => {
+    (text: string, kind: 'image' | 'video', opts: { files?: AttachedFile[]; seconds?: number; replaceFrom?: string } = {}) => {
       const brief = text.trim();
       if (!brief || abortRef.current) return;
       const files = (opts.files ?? []).slice(0, 4);
       const conversationId = activeOf(storeRef.current).id;
 
-      append({ role: 'user', content: brief, ...(files.length ? { files } : {}) }, conversationId);
+      ask({ role: 'user', content: brief, made: kind, ...(files.length ? { files } : {}) }, conversationId, opts.replaceFrom);
       setPending(true);
       setStatus(kind === 'video' ? 'Starting the clip' : 'Drawing it');
 
@@ -786,7 +819,14 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         .catch((err: Error) => {
           if (err.name === 'AbortError') return;
           append(
-            { role: 'assistant', kind: 'error', content: err.message || 'That could not be made.', retry: brief },
+            {
+              role: 'assistant',
+              kind: 'error',
+              content: err.message || 'That could not be made.',
+              retry: brief,
+              retryKind: kind,
+              ...(files.length ? { retryFiles: files } : {}),
+            },
             conversationId,
           );
         })
@@ -796,11 +836,11 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
           setStatus(null);
         });
     },
-    [append, deliver],
+    [append, ask, deliver],
   );
 
   const send = useCallback(
-    (text: string, opts: { alternatives?: string[]; files?: AttachedFile[] } = {}) => {
+    (text: string, opts: { alternatives?: string[]; files?: AttachedFile[]; replaceFrom?: string } = {}) => {
       const typed = text.trim();
       const files = (opts.files ?? []).slice(0, 4);
       if ((!typed && !files.length) || abortRef.current) return;
@@ -811,14 +851,20 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       const conversation = activeOf(storeRef.current);
       const conversationId = conversation.id;
 
+      // An edited question is asked as if what followed it never happened:
+      // the old answers are not history, and a proposal made after it is
+      // not still waiting on a yes.
+      const cut = opts.replaceFrom ? conversation.messages.findIndex((m) => m.id === opts.replaceFrom) : -1;
+      const before = cut < 0 ? conversation.messages : conversation.messages.slice(0, cut);
+
       // What was said before, as plain text. Failed exchanges are left out:
       // an error message in the history reads to the model as something it
       // said, and it starts apologising for it.
-      const history = historyOf(conversation.messages);
-      const waiting = pendingOf(conversation.messages);
-      const earlier = recentFilesOf(conversation.messages);
+      const history = historyOf(before);
+      const waiting = pendingOf(before);
+      const earlier = recentFilesOf(before);
 
-      append({ role: 'user', content: typed, ...(files.length ? { files } : {}) }, conversationId);
+      ask({ role: 'user', content: typed, ...(files.length ? { files } : {}) }, conversationId, opts.replaceFrom);
       setPending(true);
       setStatus('Thinking');
       if (handsFreeRef.current) setVoice('thinking');
@@ -926,7 +972,20 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
           deliver('Sorry, that did not work. Try asking again.');
         });
     },
-    [append, deliver, path, update, queryClient],
+    [append, ask, deliver, path, update, queryClient],
+  );
+
+  const editMessage = useCallback(
+    (messageId: string, text: string) => {
+      if (abortRef.current) return;
+      const original = activeOf(storeRef.current).messages.find((m) => m.id === messageId);
+      if (!original || original.role !== 'user') return;
+      // The files it carried go again: the edit is to the words.
+      const files = original.files ?? [];
+      if (original.made) imagine(text, original.made, { files, replaceFrom: messageId });
+      else send(text, { files, replaceFrom: messageId });
+    },
+    [imagine, send],
   );
 
   const stop = useCallback(() => abortRef.current?.abort(), []);
@@ -1225,6 +1284,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       status,
       send,
       imagine,
+      editMessage,
       uploadFile,
       vocabulary,
       interim,
@@ -1264,7 +1324,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       canSpeak,
     }),
     [
-      active.messages, active.id, store.unseen, pending, status, send, imagine, uploadFile, vocabulary, interim, stop, newConversation,
+      active.messages, active.id, store.unseen, pending, status, send, imagine, editMessage, uploadFile, vocabulary, interim, stop, newConversation,
       conversations, openConversation, renameConversation, pinConversation, deleteConversation, downloadConversation,
       prefill, setPrefill, attachRequest, requestAttach, markDone, markDismissed, acknowledge,
       briefingLoading, open, setOpen, focusRequest, requestFocus, lookingAt, handsFree,

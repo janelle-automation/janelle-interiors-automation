@@ -228,7 +228,9 @@ assistantRouter.get(
 
     let file: Awaited<ReturnType<typeof fetchGrantedContent>>;
     try {
-      file = await fetchGrantedContent(grant);
+      // A page preview is trimmed to what can be returned, rather than
+      // refused whole for the weight of its least relevant page.
+      file = await fetchGrantedContent(grant, { maxBytes: MAX_RELAY_BYTES });
     } catch (err) {
       if (err instanceof FileFetchError) return res.status(err.status).json({ error: err.message });
       throw err;
@@ -284,9 +286,22 @@ assistantRouter.get(
   }),
 );
 
+/**
+ * How long Image mode may spend on one request.
+ *
+ * This request is nothing BUT the picture — no Claude turn shares its clock —
+ * so it gets most of the function (60s on Vercel), less what storing the
+ * result and answering take. It used to inherit the 25s cap written for a
+ * render inside one of Jenny's turns, and a long brief at 2K ran past it.
+ */
+const IMAGINE_BUDGET_MS = Number(process.env.IMAGINE_BUDGET_MS || 50_000);
+/** Held back for the upload, the job row and the reply once the picture is in. */
+const IMAGINE_STORE_RESERVE_MS = 6_000;
+
 assistantRouter.post(
   '/imagine',
   asyncHandler(async (req: Request, res: Response) => {
+    const startedAt = Date.now();
     const { db, orgId, userId, role, permissions } = req.auth!;
     if (!orgId) return res.status(400).json({ error: 'No studio is attached to this account.' });
 
@@ -350,8 +365,12 @@ assistantRouter.post(
       aspectRatio: typeof req.body?.aspect_ratio === 'string' ? req.body.aspect_ratio : undefined,
       resolution: req.body?.resolution === '1K' ? '1K' : '2K',
       projectId: typeof req.body?.project_id === 'string' ? req.body.project_id : null,
+      // Whatever reading the attachments left of the budget.
+      timeoutMs: Math.max(15_000, IMAGINE_BUDGET_MS - (Date.now() - startedAt) - IMAGINE_STORE_RESERVE_MS),
     });
-    if (!drawn.ok) return res.status(400).json({ error: drawn.reason });
+    // `timedOut` lets the page offer the same brief again as it stands;
+    // a refusal or a missing key would only fail the same way twice.
+    if (!drawn.ok) return res.status(400).json({ error: drawn.reason, timedOut: drawn.timedOut === true });
     const picture = drawn.value;
 
     const lead =

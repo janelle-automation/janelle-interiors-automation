@@ -216,19 +216,142 @@ function MessageActions({ message }: { message: ChatMessage }) {
   );
 }
 
-function MessageView({ message, compact }: { message: ChatMessage; compact: boolean }) {
-  const { send, pending } = useAssistant();
+const IconPencil = (p: IconProps) => (
+  <svg {...stroke} {...p}><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4Z" /><path d="m13.5 6.5 4 4" /></svg>
+);
 
-  if (message.role === 'user') {
+/**
+ * A question the person asked — which they can take back and ask better.
+ *
+ * Asked wrongly ("the flooring plan" when they meant the finish plan), the
+ * only way on was to type the whole thing again underneath, and the wrong
+ * answer stayed in the history for the model to build on. Editing asks it
+ * again in place: what came after is replaced, so the conversation reads as
+ * though it had been asked right the first time.
+ */
+function UserMessage({ message }: { message: ChatMessage }) {
+  const { editMessage, pending, messages } = useAssistant();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(message.content);
+  const [copied, setCopied] = useState(false);
+  const box = useRef<HTMLTextAreaElement>(null);
+
+  // How much of the conversation an edit would replace, so it is said first.
+  const after = messages.length - 1 - messages.findIndex((m) => m.id === message.id);
+
+  // Open with the cursor at the end, sized to the words.
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!editing || !el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
+  }, [editing, draft]);
+  useEffect(() => {
+    const el = box.current;
+    if (!editing || !el) return;
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, [editing]);
+
+  const canSend = !pending && (!!draft.trim() || !!message.files?.length);
+  const submit = () => {
+    if (!canSend) return;
+    setEditing(false);
+    editMessage(message.id, draft);
+  };
+  const cancel = () => {
+    setEditing(false);
+    setDraft(message.content);
+  };
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard refused — nothing useful to say about it */
+    }
+  }
+
+  if (editing) {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[85%] rounded-2xl rounded-br-md bg-brass/10 px-4 py-2.5 text-[14px] leading-relaxed text-ink">
-          {message.content && <p className="whitespace-pre-line">{message.content}</p>}
+        <div className="w-full max-w-[85%] rounded-2xl rounded-br-md border border-brass/50 bg-brass/5 p-2.5">
+          <textarea
+            ref={box}
+            rows={1}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              // As in the box below: Enter sends, Shift+Enter is a new line.
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                submit();
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                cancel();
+              }
+            }}
+            aria-label="Edit your message"
+            className="block max-h-60 w-full resize-none bg-transparent px-1.5 py-1 text-[14px] leading-relaxed text-ink outline-none"
+          />
           {message.files?.length ? <AttachedFiles files={message.files} /> : null}
+          <div className="mt-2 flex flex-wrap items-center justify-end gap-2">
+            {after > 0 && (
+              <span className="mr-auto px-1.5 text-[11.5px] text-ink-faint">
+                Sending replaces {after === 1 ? 'the answer' : 'everything'} below
+              </span>
+            )}
+            <button type="button" onClick={cancel} className="btn-secondary btn-sm">
+              Cancel
+            </button>
+            <button type="button" onClick={submit} disabled={!canSend} className="btn-primary btn-sm">
+              {message.made === 'image' ? 'Draw it' : message.made === 'video' ? 'Make it' : 'Send'}
+            </button>
+          </div>
         </div>
       </div>
     );
   }
+
+  const btn =
+    'focusable inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11.5px] text-ink-faint transition-colors hover:bg-sunk hover:text-ink disabled:opacity-40 disabled:hover:bg-transparent';
+  return (
+    <div className="group flex flex-col items-end">
+      <div className="max-w-[85%] rounded-2xl rounded-br-md bg-brass/10 px-4 py-2.5 text-[14px] leading-relaxed text-ink">
+        {message.content && <p className="whitespace-pre-line">{message.content}</p>}
+        {message.files?.length ? <AttachedFiles files={message.files} /> : null}
+      </div>
+      {/* Always there on a phone, where nothing hovers; on hover elsewhere. */}
+      <div className="mt-1 flex items-center gap-0.5 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100">
+        <button type="button" onClick={copy} className={btn} aria-label="Copy your message">
+          {copied ? <IconCheck /> : <IconCopy />}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setDraft(message.content);
+            setEditing(true);
+          }}
+          disabled={pending}
+          className={btn}
+          aria-label="Edit this message and ask again"
+          title={pending ? 'Wait for the answer in progress first' : 'Edit and ask again'}
+        >
+          <IconPencil />
+          Edit
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function MessageView({ message, compact }: { message: ChatMessage; compact: boolean }) {
+  const { send, imagine, pending } = useAssistant();
+
+  if (message.role === 'user') return <UserMessage message={message} />;
 
   if (message.kind === 'error') {
     return (
@@ -240,11 +363,16 @@ function MessageView({ message, compact }: { message: ChatMessage; compact: bool
             <button
               type="button"
               disabled={pending}
-              onClick={() => send(message.retry ?? '', { files: message.retryFiles })}
+              onClick={() =>
+                // A failed picture is drawn again, not asked of Jenny.
+                message.retryKind
+                  ? imagine(message.retry ?? '', message.retryKind, { files: message.retryFiles })
+                  : send(message.retry ?? '', { files: message.retryFiles })
+              }
               className="btn-secondary btn-sm mt-2"
             >
               <IconRetry />
-              Try again
+              {message.retryKind === 'image' ? 'Draw it again' : message.retryKind === 'video' ? 'Make it again' : 'Try again'}
             </button>
           )}
         </div>
@@ -380,6 +508,119 @@ const readableType = (f: File) =>
   ACCEPT.includes(f.type) ||
   /\.(pdf|png|jpe?g|gif|webp|avif|heic|heif|bmp|tiff?|svg|xlsx?|docx?|csv|tsv|txt|md)$/i.test(f.name);
 
+type ComposeMode = 'ask' | 'image' | 'video';
+
+const IconChevron = (p: IconProps) => <svg {...stroke} {...p}><path d="m6 9 6 6 6-6" /></svg>;
+const IconChat = (p: IconProps) => (
+  <svg {...stroke} {...p}><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z" /></svg>
+);
+const IconImage = (p: IconProps) => (
+  <svg {...stroke} {...p}><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="9" cy="10" r="1.5" /><path d="m21 16-5-5-9 9" /></svg>
+);
+const IconVideo = (p: IconProps) => (
+  <svg {...stroke} {...p}><rect x="3" y="6" width="13" height="12" rx="2" /><path d="m16 10 5-3v10l-5-3" /></svg>
+);
+const MODE_ICON: Record<ComposeMode, (p: IconProps) => JSX.Element> = { ask: IconChat, image: IconImage, video: IconVideo };
+
+interface ModeOption {
+  key: ComposeMode;
+  label: string;
+  /** What this does, said once in the menu rather than on a line of its own under the box. */
+  hint: string;
+  enabled: boolean;
+  /** Why it is greyed out, when it is. */
+  unavailable?: string;
+}
+
+/**
+ * Ask, Image or Video — one control in the box, not three buttons over it.
+ *
+ * The three sat in a bar of their own above the composer, a whole row spent
+ * on a choice most messages never change. As a menu it takes the width of a
+ * word; what each mode does and costs is said inside it, where the choice
+ * is made. It opens upward because the box is at the bottom of the screen.
+ */
+function ModeMenu({ mode, options, onChange }: { mode: ComposeMode; options: ModeOption[]; onChange: (m: ComposeMode) => void }) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const outside = (e: MouseEvent) => {
+      if (!box.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const escape = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      setOpen(false);
+      trigger.current?.focus();
+    };
+    document.addEventListener('mousedown', outside);
+    document.addEventListener('keydown', escape);
+    return () => {
+      document.removeEventListener('mousedown', outside);
+      document.removeEventListener('keydown', escape);
+    };
+  }, [open]);
+
+  const current = options.find((o) => o.key === mode) ?? options[0];
+  const Icon = MODE_ICON[current.key];
+
+  return (
+    <div ref={box} className="relative shrink-0">
+      <button
+        ref={trigger}
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`Mode: ${current.label}. Change what this message does`}
+        title="Ask, or make an image or a video"
+        className={`focusable flex h-9 items-center gap-1 rounded-lg px-2 text-[12.5px] font-medium transition-colors ${
+          mode === 'ask' ? 'text-ink-soft hover:bg-sunk hover:text-ink' : 'bg-brass/10 text-brass-deep hover:bg-brass/15'
+        }`}
+      >
+        <Icon width={16} height={16} />
+        <span>{current.label}</span>
+        <IconChevron width={13} height={13} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label="What this message does"
+          className="absolute bottom-full left-0 z-30 mb-1.5 w-64 overflow-hidden rounded-xl border border-line bg-surface py-1 shadow-pop"
+        >
+          {options.map((o) => {
+            const ItemIcon = MODE_ICON[o.key];
+            const chosen = o.key === mode;
+            return (
+              <button
+                key={o.key}
+                type="button"
+                role="menuitemradio"
+                aria-checked={chosen}
+                disabled={!o.enabled}
+                onClick={() => {
+                  onChange(o.key);
+                  setOpen(false);
+                }}
+                className="flex w-full items-start gap-2.5 px-3 py-2 text-left transition-colors hover:bg-sunk disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent"
+              >
+                <ItemIcon width={16} height={16} className={`mt-0.5 shrink-0 ${chosen ? 'text-brass-deep' : 'text-ink-soft'}`} />
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[13px] font-medium text-ink">{o.label}</span>
+                  <span className="block text-[11.5px] leading-snug text-ink-faint">{o.enabled ? o.hint : o.unavailable}</span>
+                </span>
+                {chosen && <IconCheck width={15} height={15} className="mt-0.5 shrink-0 text-brass-deep" />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.MutableRefObject<((files: File[]) => void) | null> }) {
   const {
     send, imagine, pending, stop, canListen, lookingAt, focusRequest, setMicError, vocabulary, uploadFile, prefill, attachRequest,
@@ -393,7 +634,7 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
    * not: the person has already decided, so it goes straight to the
    * provider and costs no model tokens at all.
    */
-  const [mode, setMode] = useState<'ask' | 'image' | 'video'>('ask');
+  const [mode, setMode] = useState<ComposeMode>('ask');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
@@ -612,41 +853,18 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
           ))}
         </ul>
       )}
-      {canMake && (canMake.image.ready || canMake.video.ready) && (
-        <div className="mb-2 flex flex-wrap items-center gap-1.5">
-          <div className="flex gap-0.5 rounded-lg border border-line bg-surface p-0.5" role="group" aria-label="Ask, or make something">
-            {([
-              ['ask', 'Ask', true],
-              ['image', 'Image', canMake.image.ready],
-              ['video', 'Video', canMake.video.ready],
-            ] as const).map(([key, label, enabled]) => (
-              <button
-                key={key}
-                type="button"
-                disabled={!enabled}
-                aria-pressed={mode === key}
-                onClick={() => setMode(key)}
-                className={`focusable rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors disabled:opacity-35 ${
-                  mode === key ? 'bg-brass text-white' : 'text-ink-soft hover:bg-sunk hover:text-ink'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          {mode === 'video' && (
-            <span className="text-[11.5px] text-ink-faint">
-              {canMake.video.defaultSeconds}s · about {usdShort(canMake.video.usdPerSecond * canMake.video.defaultSeconds)}
-              {canMake.video.spentTodayUsd > 0 &&
-                ` · ${usdShort(canMake.video.spentTodayUsd)} of ${usdShort(canMake.video.dailyCapUsd)} used today`}
-            </span>
-          )}
-          {mode === 'image' && (
-            <span className="text-[11.5px] text-ink-faint">
-              {attachments.length > 0 ? 'Transforms what you attached' : 'Drawn from your words'} · no tokens spent
-            </span>
-          )}
-        </div>
+      {/* Only while making: the cost of what is about to be sent. Asking
+          needs no line of its own. */}
+      {canMake && mode !== 'ask' && (
+        <p className="mb-1.5 px-1 text-[11.5px] text-ink-faint">
+          {mode === 'video'
+            ? `${canMake.video.defaultSeconds}s clip · about ${usdShort(canMake.video.usdPerSecond * canMake.video.defaultSeconds)}${
+                canMake.video.spentTodayUsd > 0
+                  ? ` · ${usdShort(canMake.video.spentTodayUsd)} of ${usdShort(canMake.video.dailyCapUsd)} used today`
+                  : ''
+              }`
+            : `${attachments.length > 0 ? 'Transforms what you attached' : 'Drawn from your words'} · no tokens spent`}
+        </p>
       )}
       <form
         onSubmit={(e) => {
@@ -666,6 +884,32 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
             e.target.value = '';
           }}
         />
+        {canMake && (canMake.image.ready || canMake.video.ready) && (
+          <ModeMenu
+            mode={mode}
+            onChange={(next) => {
+              setMode(next);
+              ref.current?.focus();
+            }}
+            options={[
+              { key: 'ask', label: 'Ask', hint: `${ASSISTANT_NAME} answers from the studio's records, mail and Drive`, enabled: true },
+              {
+                key: 'image',
+                label: 'Image',
+                hint: `${attachments.length > 0 ? 'Transforms what you attached' : 'Drawn from your words'} · no tokens spent`,
+                enabled: canMake.image.ready,
+                unavailable: 'Needs an image key in Settings',
+              },
+              {
+                key: 'video',
+                label: 'Video',
+                hint: `${canMake.video.defaultSeconds}s clip · about ${usdShort(canMake.video.usdPerSecond * canMake.video.defaultSeconds)}`,
+                enabled: canMake.video.ready,
+                unavailable: 'Needs an xAI key in Settings',
+              },
+            ]}
+          />
+        )}
         <button
           type="button"
           onClick={() => picker.current?.click()}

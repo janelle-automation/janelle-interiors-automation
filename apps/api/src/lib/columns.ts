@@ -14,8 +14,9 @@ import { supabaseAdmin } from './supabase.js';
  * that is not there yet degrades to how the system behaved before it
  * existed, rather than failing.
  *
- * Covers seats (`profiles.seat`, 0008) and subtasks
- * (`tasks.parent_task_id`, 0009).
+ * Covers seats (`profiles.seat`, 0008), subtasks
+ * (`tasks.parent_task_id`, 0009) and task completion
+ * (`tasks.completed_at`, 0015).
  */
 const known = new Map<string, boolean>();
 const probes = new Map<string, Promise<boolean>>();
@@ -67,6 +68,11 @@ export function hasSeatColumn(): Promise<boolean> {
 /** Whether subtasks exist yet — migration 0009. */
 export function hasSubtasks(): Promise<boolean> {
   return hasColumn('tasks', 'parent_task_id');
+}
+
+/** Whether tasks record when they were finished, and why — migration 0015. */
+export function hasTaskCompletion(): Promise<boolean> {
+  return hasColumn('tasks', 'completed_at');
 }
 
 /**
