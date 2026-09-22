@@ -82,25 +82,81 @@ export async function pdfPageCount(bytes: Buffer): Promise<number | null> {
  * the pages that were right.
  */
 export async function pdfSubset(bytes: Buffer, pages: number[]): Promise<Buffer> {
-  const source = await PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
-  const count = source.getPageCount();
-  const wanted = [...new Set(pages)].filter((p) => Number.isInteger(p) && p >= 1 && p <= count);
-  if (!wanted.length) throw new FileFetchError('None of those pages are in the document.', 404);
-  const out = await PDFDocument.create();
-  const copied = await out.copyPages(source, wanted.map((p) => p - 1));
-  copied.forEach((page) => out.addPage(page));
-  return Buffer.from(await out.save());
+  const cutter = await pdfCutter(bytes);
+  if (!cutter) throw new FileFetchError('That PDF could not be opened.', 422);
+  return cutter.cut(pages);
 }
 
-/** The file a grant stands for — cut down to its pages when it names some. */
-export async function fetchGrantedContent(grant: FileGrant): Promise<FetchedFile> {
+export interface PdfCutter {
+  pageCount: number;
+  /** A new PDF of these pages (1-based), in the order given. */
+  cut: (pages: number[]) => Promise<Buffer>;
+}
+
+/**
+ * One PDF, opened once and cut as many times as needed.
+ *
+ * Reading a 45MB plan set in parts cuts it five or six times; loading the
+ * source for each cut parsed the whole file again every time. Null when the
+ * file cannot be opened at all.
+ */
+export async function pdfCutter(bytes: Buffer): Promise<PdfCutter | null> {
+  let source: PDFDocument;
+  try {
+    source = await PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
+  } catch {
+    return null;
+  }
+  const count = source.getPageCount();
+  return {
+    pageCount: count,
+    cut: async (pages) => {
+      const wanted = [...new Set(pages)].filter((p) => Number.isInteger(p) && p >= 1 && p <= count);
+      if (!wanted.length) throw new FileFetchError('None of those pages are in the document.', 404);
+      const out = await PDFDocument.create();
+      const copied = await out.copyPages(source, wanted.map((p) => p - 1));
+      copied.forEach((page) => out.addPage(page));
+      return Buffer.from(await out.save());
+    },
+  };
+}
+
+/**
+ * The most pages, in the order given, whose cut stays within `maxBytes` —
+ * always at least the first. The order is relevance, so what is dropped is
+ * what mattered least.
+ */
+export async function fitPages(cutter: PdfCutter, pages: number[], maxBytes: number): Promise<{ pages: number[]; bytes: Buffer }> {
+  let take = pages.slice();
+  let bytes = await cutter.cut(take);
+  while (bytes.byteLength > maxBytes && take.length > 1) {
+    take = take.slice(0, -1);
+    bytes = await cutter.cut(take);
+  }
+  return { pages: take, bytes };
+}
+
+/**
+ * The file a grant stands for — cut down to its pages when it names some.
+ *
+ * `maxBytes` is what the caller can hand on. Pages of a plan set are
+ * pictures, three or four MB each, and six of them were over what the host
+ * will return: the preview failed with "too large" when the first page
+ * alone was the answer. Past the limit the least relevant pages go first.
+ */
+export async function fetchGrantedContent(grant: FileGrant, opts: { maxBytes?: number } = {}): Promise<FetchedFile> {
   const file = await fetchGrantedFile(grant);
   if (!grant.pages?.length || !isPdf(file.mimeType, file.name)) return file;
+  const cutter = await pdfCutter(file.bytes);
+  if (!cutter) throw new FileFetchError('That PDF could not be opened.', 422);
+  const { pages, bytes } = opts.maxBytes
+    ? await fitPages(cutter, grant.pages, opts.maxBytes)
+    : { pages: grant.pages, bytes: await cutter.cut(grant.pages) };
   const stem = file.name.replace(/\.pdf$/i, '');
-  const label = grant.pages.length === 1 ? `page ${grant.pages[0]}` : `pages ${grant.pages.join(', ')}`;
+  const label = pages.length === 1 ? `page ${pages[0]}` : `pages ${pages.join(', ')}`;
   return {
     ...file,
-    bytes: await pdfSubset(file.bytes, grant.pages),
+    bytes,
     name: `${stem} (${label}).pdf`,
     mimeType: 'application/pdf',
   };

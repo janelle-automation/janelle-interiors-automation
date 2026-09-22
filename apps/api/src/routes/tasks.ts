@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { TASK_KINDS, TASK_STATUSES, canManageTasks } from '@janelle/shared';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
-import { hasSubtasks } from '../lib/columns.js';
+import { hasSubtasks, hasTaskCompletion } from '../lib/columns.js';
 
 export const tasksRouter = Router();
 tasksRouter.use(requireAuth);
@@ -12,6 +12,12 @@ tasksRouter.use(requireAuth);
 // separately below.
 tasksRouter.use(requirePermission('tasks', 'read'));
 
+// When a task was finished, and the system's note when it closed it — only
+// once migration 0015 has added them. `updated_at` stands in until then.
+async function completionColumns(): Promise<string> {
+  return (await hasTaskCompletion()) ? ', completed_at, completion_note' : '';
+}
+
 // List tasks, newest first, with the names needed to render a row.
 tasksRouter.get(
   '/',
@@ -19,7 +25,7 @@ tasksRouter.get(
     const { data, error } = await req.auth!.db
       .from('tasks')
       .select(
-        'id, title, detail, kind, status, assigned_to, assigned_role, seat, next_step, project_id, vendor_id, source_email_id, due_date, created_at, projects(name), vendors(name), profiles(full_name)',
+        `id, title, detail, kind, status, assigned_to, assigned_role, seat, next_step, project_id, vendor_id, source_email_id, due_date, created_at, updated_at${await completionColumns()}, projects(name), vendors(name), profiles(full_name)`,
       )
       .order('created_at', { ascending: false });
     if (error) throw new Error(error.message);
@@ -46,7 +52,7 @@ tasksRouter.get(
       .select(
         `id, title, detail, kind, status, assigned_to, assigned_role, seat, next_step,
          project_id, vendor_id, source_email_id, due_date, created_at, updated_at,
-         reminded_at, reminder_count,
+         reminded_at, reminder_count${await completionColumns()},
          projects(name), vendors(name), profiles(full_name, email)`,
       )
       .eq('id', req.params.id)

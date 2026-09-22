@@ -12,7 +12,7 @@ import {
 import { PageHeading, Card, Pill, shortDate } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import {
-  useAddSubtask, useBackfillTasks, useDeleteTask, useTaskDetail, useTasks, useTeam, useUpdateTask,
+  daysEarly, useAddSubtask, useBackfillTasks, useDeleteTask, useTaskDetail, useTasks, useTeam, useUpdateTask,
   type TaskView, type TeamMember,
 } from '../lib/queries';
 
@@ -33,6 +33,14 @@ const HISTORY_LABELS: Partial<Record<FollowUpType, string>> = {
   task_no_next_step: 'Chased for a next step',
   task_no_due_date: 'Chased for a due date',
 };
+
+/** "2 days early", "on its due date", "1 day late" — how finished work met its date. */
+function finishedLabel(days: number | null): string | null {
+  if (days === null) return null;
+  if (days === 0) return 'on its due date';
+  const n = Math.abs(days);
+  return `${n} day${n === 1 ? '' : 's'} ${days > 0 ? 'early' : 'late'}`;
+}
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -66,6 +74,8 @@ function TaskPanel({ id, onClose }: { id: string; onClose: () => void }) {
   }, [onClose]);
 
   const t = data?.task;
+  const finishedAt = t?.status === 'done' ? t.completed_at ?? t.updated_at : null;
+  const finished = finishedLabel(daysEarly(t?.due_date ?? null, finishedAt ?? null));
   const done = (data?.subtasks ?? []).filter((s) => s.status === 'done').length;
   const total = data?.subtasks.length ?? 0;
 
@@ -259,7 +269,15 @@ function TaskPanel({ id, onClose }: { id: string; onClose: () => void }) {
                 {t.status === 'done' && (
                   <li className="relative text-[13px] text-ink-soft">
                     <span className="absolute -left-[21px] top-1.5 h-2 w-2 rounded-full bg-good" />
-                    Closed{t.updated_at && <> · {shortDate(t.updated_at)}</>}
+                    {t.completion_note ? 'Closed automatically' : 'Closed'}
+                    {finishedAt && <> · {shortDate(finishedAt)}</>}
+                    {finished && <> · {finished}</>}
+                    {/* The system's reason, in full: which email, and the words
+                        in it that finished the work. Dragging the card back
+                        out of Done reopens it and clears this. */}
+                    {t.completion_note && (
+                      <span className="block text-[12px] text-ink-faint">{t.completion_note}</span>
+                    )}
                   </li>
                 )}
               </ol>
@@ -348,10 +366,17 @@ const BoardCard = memo(function BoardCard({
       <div className="mb-1.5 flex items-center gap-2">
         <Pill tone={tone[t.kind]}>{TASK_KIND_LABELS[t.kind]}</Pill>
         {t.overdue && <Pill tone="crit">Overdue</Pill>}
+        {/* The system moved this one here on its own. Said on the card, not
+            only in the panel, so a close nobody expected is noticed. */}
+        {t.closedNote && (
+          <span title={t.closedNote}>
+            <Pill tone="good">Closed automatically</Pill>
+          </span>
+        )}
         {/* The board says these are raised from email. A card that was not
             is the exception, and worth being able to see at a glance rather
             than having to open it. */}
-        {!t.fromEmail && <Pill tone="neutral">Added by hand</Pill>}
+        {!t.fromEmail && !t.closedNote && <Pill tone="neutral">Added by hand</Pill>}
 
         {onDelete && (
           <button
@@ -374,8 +399,20 @@ const BoardCard = memo(function BoardCard({
       <p className="text-[13.5px] font-medium leading-snug text-ink">{t.title}</p>
 
       {/* The SOP wants one next step on every task; showing the gap on the
-          card is what makes it get filled in. */}
-      {t.nextStep ? (
+          card is what makes it get filled in. Finished work has no next
+          step to chase, so a Done card says when it was finished instead. */}
+      {t.status === 'done' ? (
+        t.completedAt && (
+          <p className="mt-1.5 text-[12px] text-ink-soft">
+            Done {shortDate(t.completedAt)}
+            {finishedLabel(t.daysEarly) && (
+              <span className={t.daysEarly !== null && t.daysEarly < 0 ? 'text-warn' : 'text-good'}>
+                {' '}· {finishedLabel(t.daysEarly)}
+              </span>
+            )}
+          </p>
+        )
+      ) : t.nextStep ? (
         <p className="mt-1.5 text-[12px] text-ink-soft">
           <span className="text-ink-faint">Next:</span> {t.nextStep}
         </p>
@@ -631,12 +668,19 @@ export default function Tasks() {
   const visible = showDone ? tasks : tasks.filter((t) => OPEN_STATUSES.includes(t.status));
 
   // The board always shows its Done column — that is what a board is for, and
-  // "Hide closed" was written for the list. Only the newest finished work,
-  // so a year of it does not bury the columns that still need a person.
+  // "Hide closed" was written for the list. Only the most recently FINISHED
+  // work, so a year of it does not bury the columns that still need a person.
+  // Ordered by when it was finished, not when it was raised: a task from last
+  // month closed this morning used to fall outside the twelve and vanish from
+  // the board instead of landing in Done.
   const DONE_ON_BOARD = 12;
+  const finishedAt = (t: TaskView) => (t.completedAt ? Date.parse(t.completedAt) : 0);
   const boardTasks = [
     ...tasks.filter((t) => OPEN_STATUSES.includes(t.status)),
-    ...tasks.filter((t) => t.status === 'done').slice(0, DONE_ON_BOARD),
+    ...tasks
+      .filter((t) => t.status === 'done')
+      .sort((a, b) => finishedAt(b) - finishedAt(a))
+      .slice(0, DONE_ON_BOARD),
   ];
 
   /** Anyone can work their own queue or claim an unowned task; only a
@@ -758,7 +802,15 @@ export default function Tasks() {
                 <div className="mt-0.5 text-[11px] text-ink-faint">
                   {t.project} · raised {t.age}
                   {t.due && <> · due {shortDate(t.due)}</>}
-                  {t.status !== 'open' && <> · {TASK_STATUS_LABELS[t.status]}</>}
+                  {t.status === 'done' && t.completedAt ? (
+                    <>
+                      {' '}· done {shortDate(t.completedAt)}
+                      {finishedLabel(t.daysEarly) && <>, {finishedLabel(t.daysEarly)}</>}
+                      {t.closedNote && <span title={t.closedNote}> · closed automatically</span>}
+                    </>
+                  ) : (
+                    t.status !== 'open' && <> · {TASK_STATUS_LABELS[t.status]}</>
+                  )}
                 </div>
               </div>
 

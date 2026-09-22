@@ -7,7 +7,7 @@ import {
 } from '@janelle/shared';
 import { UPLOAD_GRANT_TTL_MS, sealFileGrant } from '../lib/fileTokens.js';
 import { storeUpload, type UploadType } from '../lib/uploads.js';
-import { clampSeconds, generateImage, grokModels, isGrokReady, startVideo } from './grok.js';
+import { RenderTimeout, clampSeconds, generateImage, grokModels, isGrokReady, startVideo } from './grok.js';
 import { isImageReady, renderImage, type ImageReference } from './images.js';
 import { createJob, jobsTableReady } from './mediaJobs.js';
 
@@ -38,7 +38,10 @@ export interface ImagineActor {
   permissions?: PermissionOverrides | null;
 }
 
-export type Made<T> = { ok: true; value: T } | { ok: false; reason: string };
+export type Made<T> =
+  | { ok: true; value: T }
+  /** `timedOut`: the provider was slow, not unwilling — the same brief is worth another go. */
+  | { ok: false; reason: string; timedOut?: boolean };
 
 /**
  * What the studio may spend on video in one day.
@@ -163,6 +166,8 @@ export async function makePicture(input: {
   aspectRatio?: string;
   resolution?: '1K' | '2K';
   projectId?: string | null;
+  /** How long the render may take; see ImageRequest.timeoutMs. */
+  timeoutMs?: number;
 }): Promise<Made<MadePicture>> {
   const { actor } = input;
   if (!mayImagine(actor)) return { ok: false, reason: 'Drawing is not something this role may do.' };
@@ -207,6 +212,7 @@ export async function makePicture(input: {
           source: input.sources[0] ?? null,
           aspectRatio: input.sources.length ? undefined : aspect,
           resolution,
+          timeoutMs: input.timeoutMs,
         },
         { feature: 'image.render', orgId: actor.orgId, actor: actor.userId, entity: 'media_jobs', entityId: null },
       );
@@ -223,11 +229,15 @@ Aspect ratio ${aspect}.`,
         { feature: 'image.render', orgId: actor.orgId, actor: actor.userId, entity: 'media_jobs', entityId: null },
         // Bounded well inside a request: the board default is three
         // minutes, which outlives the function it runs in.
-        { timeoutMs: 30_000 },
+        { timeoutMs: input.timeoutMs ?? 30_000 },
       );
     }
   } catch (err) {
-    return { ok: false, reason: (err as Error).message };
+    return {
+      ok: false,
+      reason: (err as Error).message,
+      timedOut: err instanceof RenderTimeout || (err as Error)?.name === 'AbortError',
+    };
   }
 
   /**

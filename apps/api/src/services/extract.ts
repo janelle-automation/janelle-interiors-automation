@@ -196,6 +196,11 @@ export interface TaskExtraction {
   /** The person outside the studio to reach to do it. */
   contact_name?: string | null;
   contact_email?: string | null;
+  /**
+   * Open tasks this email shows are now finished, by the ref they were
+   * listed under, with the words that prove it. Empty when none were listed.
+   */
+  completes?: { ref: string; evidence: string }[];
 }
 
 const SEAT_TABLE = SEAT_KEYS.map((k) => {
@@ -251,6 +256,15 @@ Return JSON with exactly these keys:
 - "vendor": the supplier the work concerns — exactly as listed if it is a known vendor — else null.
 - "contact_name" and "contact_email": the person OUTSIDE the studio who has to be reached to do it (the
   vendor's or the client's person), as written in the email, else null. Never a studio address.
+- "completes": which of the OPEN TASKS listed above the email this email shows are now DONE, as
+  [{"ref": "T1", "evidence": "the few words of the email that prove it"}]. Decided separately from
+  needs_task: an email can finish one task and raise another. A task is done when the email itself
+  shows the thing it was waiting for has happened — the vendor sent the quote it was chasing, the
+  client gave the approval it asked for, the order it chased is confirmed, the delivery it booked is
+  booked, or a teammate says they have done it. It is NOT done on a promise ("I'll send it Friday"),
+  an acknowledgement ("got it, looking into it"), a question back, a partial answer, or a different
+  item for the same job. When in doubt, leave it open: a task closed wrongly disappears from the
+  board, while one left open costs a click. Use [] when none is finished or no open tasks are listed.
 
 SEATS — one owner per outcome. Match on what the seat OWNS, and rule a seat out when the
 work is in its "does NOT own" list. A drawing or elevation is design, never technical
@@ -266,6 +280,11 @@ export interface TaskFiling {
   /** The vendor the email is filed under, with its contact where known. */
   vendor?: string | null;
   names?: StudioNames | null;
+  /**
+   * Live tasks this email could plausibly finish — same thread, job or
+   * supplier — each one line under its ref ("T1"). Only these can be closed.
+   */
+  openTasks?: { ref: string; line: string }[];
 }
 
 /**
@@ -285,6 +304,13 @@ export async function extractTask(
       ? ['', `This email has been filed against the project "${filing.project}"${filing.client ? ` (client: ${filing.client})` : ''}. Refer to the job by that name.`]
       : []),
     ...(filing.vendor ? ['', `The vendor on this email is "${filing.vendor}". Use that name for the vendor.`] : []),
+    ...(filing.openTasks?.length
+      ? [
+          '',
+          'OPEN TASKS this email might have finished (for "completes"; only these refs can be used):',
+          ...filing.openTasks.map((t) => `[${t.ref}] ${t.line}`),
+        ]
+      : []),
     '',
     '— THE EMAIL —',
     '',
