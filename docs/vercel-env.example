@@ -47,6 +47,11 @@ CRON_SECRET=
 # ── CORS ────────────────────────────────────────────────────
 # The web app and the API share an origin on Vercel, so this only
 # matters if something else calls the API. Harmless to set.
+# The address the app is reachable at from outside the server. Used in any
+# email the system sends — an invitation linking to localhost is a dead link,
+# so sending is refused rather than delivering one.
+APP_URL=https://YOUR-DOMAIN.vercel.app
+
 CORS_ORIGINS=https://YOUR-DOMAIN.vercel.app
 
 

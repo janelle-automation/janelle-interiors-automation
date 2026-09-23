@@ -10,9 +10,49 @@ import { gmailFor, sendMessage } from '../services/gmail.js';
 import { inviteEmail } from '../services/emailTemplate.js';
 import crypto from 'node:crypto';
 
-/** Where the person should go to sign in — the web app, not the API. */
-function webAppUrl(): string {
-  return env.corsOrigins[0] ?? 'http://localhost:5173';
+/**
+ * Addresses that mean nothing to anyone else.
+ *
+ * A recipient's `localhost` is their own machine, and a 10.x or 192.168.x
+ * address is a network they are not on. A link to either is not a weaker
+ * link — it is a broken one.
+ */
+function isLocalUrl(raw: string): boolean {
+  let host: string;
+  try {
+    host = new URL(raw).hostname.toLowerCase();
+  } catch {
+    return true;
+  }
+  return (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '0.0.0.0' ||
+    host === '::1' ||
+    host === '[::1]' ||
+    host.endsWith('.local') ||
+    host.endsWith('.localhost') ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2[0-9]|3[01])\./.test(host)
+  );
+}
+
+/**
+ * Where the person should go to sign in, as somewhere they can actually
+ * reach. Throws rather than returning a local address: an invitation
+ * carrying a dead link is worse than one that was never sent, because the
+ * password inside it has already been set and the recipient has no way to
+ * tell the link is the problem.
+ */
+function publicAppUrl(): string {
+  const candidates = [env.appUrl, ...env.corsOrigins].map((u) => (u ?? '').trim()).filter(Boolean);
+  const reachable = candidates.find((u) => !isLocalUrl(u));
+  if (reachable) return reachable.replace(/\/+$/, '');
+  throw new Error(
+    'No public address is configured, so the invitation would have linked to localhost. ' +
+      'Set APP_URL to the address the studio uses, then send it again.',
+  );
 }
 
 /**
@@ -61,7 +101,9 @@ async function issueCredentials(
     const sender = await orgSourceUserId(orgId);
     const gmail = sender ? await gmailFor(sender) : null;
     if (!gmail) throw new Error('No Google account is connected to send from');
-    const mail = inviteEmail({ name: fullName, email, password, url: webAppUrl() });
+    // Resolved before anything is sent: a bad address should stop the mail,
+    // not produce one nobody can use.
+    const mail = inviteEmail({ name: fullName, email, password, url: publicAppUrl() });
     await sendMessage(gmail, {
       to: email,
       cc: env.invite.cc,
