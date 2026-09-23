@@ -6,6 +6,7 @@ import { useFollowUps, useDrafts, ageFrom } from '../lib/queries';
 import { useAssistant } from '../context/AssistantContext';
 import { AssistantLauncher, AssistantPanel } from './AssistantPanel';
 import { TaskReminder } from './TaskReminder';
+import { ConnectGooglePrompt } from './ConnectGooglePrompt';
 import { ASSISTANT_NAME, ROLE_LABELS, canSupervise, type Resource } from '@janelle/shared';
 import {
   IconDashboard, IconProjects, IconVendors, IconInbox, IconDoc,
@@ -578,6 +579,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
       {/* Outside the main column so it is not affected by the page padding,
           and last so it opens over everything the shell draws. */}
+      <ConnectGooglePrompt />
       <TaskReminder />
     </div>
   );

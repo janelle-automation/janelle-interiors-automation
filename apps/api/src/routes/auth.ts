@@ -23,14 +23,25 @@ function sign(payload: string): string {
     .slice(0, 32);
 }
 
-function signState(userId: string, service: string): string {
-  return `${userId}.${service}.${sign(`${userId}.${service}`)}`;
+/**
+ * Where to land once Google is done.
+ *
+ * Carried in the signed state rather than a query parameter, because the
+ * round trip goes out to Google and back and anything not signed could be
+ * changed on the way — an open redirect is exactly how that goes wrong. Two
+ * fixed destinations, never a URL.
+ */
+export type ReturnTo = 'settings' | 'dashboard';
+
+function signState(userId: string, service: string, next: ReturnTo = 'settings'): string {
+  return `${userId}.${service}.${next}.${sign(`${userId}.${service}.${next}`)}`;
 }
 
-function verifyState(state: string): { userId: string; service: string } | null {
-  const [userId, service, mac] = state.split('.');
-  if (!userId || !service || !mac) return null;
-  return sign(`${userId}.${service}`) === mac ? { userId, service } : null;
+function verifyState(state: string): { userId: string; service: string; next: ReturnTo } | null {
+  const [userId, service, next, mac] = state.split('.');
+  if (!userId || !service || !next || !mac) return null;
+  if (next !== 'settings' && next !== 'dashboard') return null;
+  return sign(`${userId}.${service}.${next}`) === mac ? { userId, service, next } : null;
 }
 
 function parseService(raw: unknown): GoogleService | 'all' {
@@ -47,7 +58,9 @@ authRouter.get(
       return res.status(503).json({ error: 'Google integration is not configured on the server' });
     }
     const service = parseService(req.query.service);
-    const url = consentUrl(signState(req.auth!.userId, service), service);
+    // Only the two names are accepted; anything else lands on Settings.
+    const next: ReturnTo = req.query.next === 'dashboard' ? 'dashboard' : 'settings';
+    const url = consentUrl(signState(req.auth!.userId, service, next), service);
     res.json({ data: { url } });
   }),
 );
@@ -142,7 +155,10 @@ authRouter.get(
         .catch((err) => console.error('[auth] first sync failed:', (err as Error).message));
     }
 
-    res.redirect(`${webApp}/settings?google=connected&service=${service}`);
+    // Back where they started: Settings when they went looking for it, the
+    // dashboard when this was the first-run prompt after an invitation.
+    const landing = state.next === 'dashboard' ? '/' : '/settings';
+    res.redirect(`${webApp}${landing}?google=connected&service=${service}`);
   }),
 );
 
