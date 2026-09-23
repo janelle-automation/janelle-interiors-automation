@@ -1218,8 +1218,13 @@ export function useUpdateProject() {
 /** Start Google consent for one service (gmail | drive) or both. */
 export function useConnectGoogle() {
   return useMutation({
-    mutationFn: async (service: GoogleService | 'all' = 'all') => {
-      const { url } = await api<{ url: string }>(`/auth/google/url?service=${service}`);
+    mutationFn: async (
+      v: GoogleService | 'all' | { service?: GoogleService | 'all'; next?: 'settings' | 'dashboard' } = 'all',
+    ) => {
+      // Called both ways: Settings passes a service name, the first-run
+      // prompt passes where it wants Google to come back to.
+      const { service = 'all', next = 'settings' } = typeof v === 'string' ? { service: v } : v;
+      const { url } = await api<{ url: string }>(`/auth/google/url?service=${service}&next=${next}`);
       window.location.href = url;
     },
   });

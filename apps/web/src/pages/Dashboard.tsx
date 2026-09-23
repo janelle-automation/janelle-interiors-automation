@@ -1,4 +1,4 @@
-import { useState, type ReactNode, type SVGProps } from 'react';
+import { useEffect, useState, type ReactNode, type SVGProps } from 'react';
 
 type IconProps = SVGProps<SVGSVGElement>;
 import { Link, useNavigate } from 'react-router-dom';
@@ -208,6 +208,51 @@ function OpsBar() {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * "It worked" — said where they land, not where they left.
+ *
+ * The first-run prompt sends Google back to the dashboard, so the usual
+ * confirmation on Settings would never be seen. Connecting also starts a
+ * read of their last thirty days in the background, which is why the board
+ * may still be empty for a few minutes: saying so here is the difference
+ * between waiting and assuming it is broken.
+ */
+function ConnectedNotice() {
+  const [shown, setShown] = useState(() => {
+    try {
+      return new URLSearchParams(window.location.search).get('google') === 'connected';
+    } catch {
+      return false;
+    }
+  });
+
+  // Taken out of the URL once read, so a refresh does not say it again.
+  useEffect(() => {
+    if (!shown) return;
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has('google')) return;
+    url.searchParams.delete('google');
+    url.searchParams.delete('service');
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+  }, [shown]);
+
+  if (!shown) return null;
+  return (
+    <div className="flex items-start gap-3 rounded-xl border border-good/30 bg-good/5 px-4 py-3">
+      <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full bg-good/15 text-good">
+        <IconOk />
+      </span>
+      <p className="flex-1 text-[13px] leading-relaxed text-ink-soft">
+        <span className="font-semibold text-ink">Gmail and Drive are connected.</span> Your last thirty days of
+        studio mail is being read now — tasks and follow-ups will appear here as it goes. It can take a few minutes.
+      </p>
+      <button type="button" onClick={() => setShown(false)} className="btn-ghost btn-sm shrink-0">
+        Dismiss
+      </button>
     </div>
   );
 }
@@ -616,6 +661,8 @@ export default function Dashboard() {
         title="Dashboard"
         action={<OpsBar />}
       />
+
+      <ConnectedNotice />
 
       <MorningDigest />
 

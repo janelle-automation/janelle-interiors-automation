@@ -36,6 +36,12 @@ interface AuthCtx {
   /** Set when the profile could not be loaded (e.g. API unreachable). */
   profileError: string | null;
   /**
+   * Whether this person's Google is connected — null while `/me` is still
+   * in flight. Read from the same call that loads the profile, so nothing
+   * that depends on it has to wait for a request of its own.
+   */
+  googleConnected: boolean | null;
+  /**
    * Whether this person may do something. Defaults to allowed while `/me`
    * is still loading, so the shell does not flicker every module away and
    * back on each refresh.
@@ -65,6 +71,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [access, setAccess] = useState<Access | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
+  /** Whether Google is connected; null until `/me` has answered. */
+  const [googleConnected, setGoogleConnected] = useState<boolean | null>(null);
   // Read from the URL before anything else: supabase-js consumes the hash
   // as it starts up, and by the time a listener is attached the evidence
   // that this was a recovery link can already be gone.
@@ -80,7 +88,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const loadProfile = useCallback(async () => {
     setProfileError(null);
     try {
-      const me = await api<{ profile: Profile | null; access?: Access }>('/me');
+      const me = await api<{
+        profile: Profile | null;
+        access?: Access;
+        google?: { status?: string };
+      }>('/me');
+      // `/me` already says whether Google is connected, and this call is
+      // awaited before the app renders. Reading it here means the first-run
+      // prompt can decide on the first paint; asking again from the prompt
+      // put a second request — and a visible delay — in front of it.
+      setGoogleConnected(me.google?.status === 'connected');
       if (me.profile?.org_id) {
         setProfile(me.profile);
         setAccess(me.access ?? null);
@@ -130,6 +147,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setAccess(null);
     setProfileError(null);
     setRecovery(false);
+    setGoogleConnected(null);
   };
 
   // Unknown means allowed: a slow /me must never look like a revoked module.
@@ -151,7 +169,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     <Ctx.Provider
       value={{
         configured: supabaseConfigured, loading, session, profile, user, profileError, may,
-        refresh: loadProfile, signOut,
+        refresh: loadProfile, signOut, googleConnected,
         recovery, endRecovery: () => setRecovery(false),
       }}
     >

@@ -7,9 +7,8 @@ import { hasSeatColumn, profileColumns } from '../lib/columns.js';
 import { env } from '../env.js';
 import { orgSourceUserId } from '../lib/tokens.js';
 import { gmailFor, sendMessage } from '../services/gmail.js';
+import { inviteEmail } from '../services/emailTemplate.js';
 import crypto from 'node:crypto';
-
-const STUDIO_NAME = 'Janelle Interiors';
 
 /** Where the person should go to sign in — the web app, not the API. */
 function webAppUrl(): string {
@@ -30,26 +29,6 @@ function newPassword(): string {
   return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('');
 }
 
-function inviteBody(name: string, email: string, password: string, url: string): string {
-  return [
-    `Hi ${name.split(' ')[0]},`,
-    '',
-    `You have an account on the ${STUDIO_NAME} workflow system — it keeps track of projects,`,
-    'tasks, vendor orders and the studio mailbox, so nothing gets lost between emails.',
-    '',
-    `Sign in here: ${url}`,
-    '',
-    `  Email:    ${email}`,
-    `  Password: ${password}`,
-    '',
-    'Please change that password once you are in: open Settings and use the Password panel.',
-    'It was generated for you and sent by email, so it should not stay in use.',
-    '',
-    'If you were not expecting this, you can ignore it and nothing will happen.',
-    '',
-    STUDIO_NAME,
-  ].join('\n');
-}
 
 /**
  * Give somebody a way in, and tell them what it is.
@@ -82,12 +61,14 @@ async function issueCredentials(
     const sender = await orgSourceUserId(orgId);
     const gmail = sender ? await gmailFor(sender) : null;
     if (!gmail) throw new Error('No Google account is connected to send from');
+    const mail = inviteEmail({ name: fullName, email, password, url: webAppUrl() });
     await sendMessage(gmail, {
       to: email,
       cc: env.invite.cc,
       bcc: env.invite.bcc,
-      subject: `Your ${STUDIO_NAME} workflow account`,
-      body: inviteBody(fullName || email.split('@')[0], email, password, webAppUrl()),
+      subject: mail.subject,
+      body: mail.text,
+      html: mail.html,
     });
     emailed = true;
   } catch (err) {

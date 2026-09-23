@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { google, type gmail_v1 } from 'googleapis';
 import { googleClientForUser } from '../lib/tokens.js';
 
@@ -591,19 +592,46 @@ export async function createDraft(
  */
 export async function sendMessage(
   gmail: gmail_v1.Gmail,
-  opts: { to: string; cc?: string; bcc?: string; subject: string; body: string },
+  opts: { to: string; cc?: string; bcc?: string; subject: string; body: string; html?: string },
 ): Promise<string> {
   const headers = [`To: ${opts.to}`];
   if (opts.cc) headers.push(`Cc: ${opts.cc}`);
   // Bcc is a header Gmail strips on the way out; recipients never see it.
   if (opts.bcc) headers.push(`Bcc: ${opts.bcc}`);
-  headers.push(
-    `Subject: ${opts.subject}`,
-    'MIME-Version: 1.0',
-    'Content-Type: text/plain; charset="UTF-8"',
-  );
+  headers.push(`Subject: ${encodeHeader(opts.subject)}`, 'MIME-Version: 1.0');
 
-  const raw = Buffer.from([...headers, '', opts.body].join('\r\n'))
+  let message: string;
+  if (opts.html) {
+    // multipart/alternative, plain text FIRST.
+    //
+    // Order is the specification, not a preference: a client shows the LAST
+    // part it can render, so text before HTML means a modern client shows
+    // the design and a text-only one still gets a readable message. Sending
+    // HTML alone is also what spam filters score hardest against.
+    const boundary = `b${crypto.randomBytes(12).toString('hex')}`;
+    headers.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
+    message = [
+      ...headers,
+      '',
+      `--${boundary}`,
+      'Content-Type: text/plain; charset="UTF-8"',
+      'Content-Transfer-Encoding: base64',
+      '',
+      wrap(Buffer.from(opts.body, 'utf8').toString('base64')),
+      `--${boundary}`,
+      'Content-Type: text/html; charset="UTF-8"',
+      'Content-Transfer-Encoding: base64',
+      '',
+      wrap(Buffer.from(opts.html, 'utf8').toString('base64')),
+      `--${boundary}--`,
+      '',
+    ].join('\r\n');
+  } else {
+    headers.push('Content-Type: text/plain; charset="UTF-8"');
+    message = [...headers, '', opts.body].join('\r\n');
+  }
+
+  const raw = Buffer.from(message)
     .toString('base64')
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
@@ -611,4 +639,16 @@ export async function sendMessage(
 
   const res = await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
   return res.data.id ?? '';
+}
+
+/** RFC 5322 forbids a line over 998 characters; base64 is wrapped at 76. */
+function wrap(b64: string): string {
+  return (b64.match(/.{1,76}/g) ?? []).join('\r\n');
+}
+
+/** A subject with anything outside ASCII has to say so, or it arrives as mojibake. */
+function encodeHeader(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  if (!/[^\x00-\x7F]/.test(value)) return value;
+  return `=?UTF-8?B?${Buffer.from(value, 'utf8').toString('base64')}?=`;
 }
