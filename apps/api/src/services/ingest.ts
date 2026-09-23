@@ -561,12 +561,15 @@ async function ingestInternal(
     // message being read twice is the gmail_id check below, not its being
     // marked read. A caller-supplied query is used exactly as given.
     // Whose mailbox this is decides both what may be read out of it and who
-    // may read it afterwards. The studio's own shared address belongs to
-    // everyone, so it is read whole and its mail stays shared (owner null).
-    // A person's own Google is theirs: narrowed to studio correspondence on
-    // the way in, and marked with their id on the way out.
+    // may read it afterwards.
+    //
+    // Every mailbox has an owner now, the studio's shared address included
+    // (0020). It is still read WHOLE — everything in systems@ is studio
+    // business, so there is nothing to narrow — but its mail belongs to that
+    // account rather than to everybody, so somebody invited today is not
+    // shown months of correspondence they had no part in.
     const shared = isStudioMailbox(selfEmail);
-    ownerId = shared ? null : userId;
+    ownerId = userId;
     ownerColumn = await hasEmailOwner();
     messageColumn = await hasMessageId();
 

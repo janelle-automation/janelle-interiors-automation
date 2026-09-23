@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { IconPeople, IconPerson } from './icons';
+import { useAuth } from '../context/AuthContext';
 
 /**
  * Whose work a screen is showing.
@@ -36,6 +37,7 @@ const CHANGED = 'janelle:scope';
 
 export function useScope(): [Scope, (next: Scope) => void] {
   const [scope, setScope] = useState<Scope>(read);
+  const { googleConnected } = useAuth();
 
   useEffect(() => {
     const onChange = () => setScope(read());
@@ -52,7 +54,15 @@ export function useScope(): [Scope, (next: Scope) => void] {
     window.dispatchEvent(new Event(CHANGED));
   }, []);
 
-  return [scope, set];
+  /**
+   * Somebody who has not connected their mail sees their own work only.
+   *
+   * Everything on the studio-wide view was read out of the shared mailbox,
+   * and showing months of it to a person invited this morning is the thing
+   * this is here to prevent. Their own tasks are still theirs — being new
+   * is not a reason to hide work somebody assigned them.
+   */
+  return [googleConnected === false ? 'mine' : scope, set];
 }
 
 /**
@@ -65,9 +75,16 @@ export function useScope(): [Scope, (next: Scope) => void] {
  */
 export function ScopeToggle({ mine, all }: { mine?: number; all?: number }) {
   const [scope, setScope] = useScope();
+  const { googleConnected } = useAuth();
+  const locked = googleConnected === false;
   const options: { key: Scope; label: string; n?: number; Icon: typeof IconPerson }[] = [
     { key: 'mine', label: 'Only my work', n: mine, Icon: IconPerson },
-    { key: 'all', label: "Everyone's work", n: all, Icon: IconPeople },
+    {
+      key: 'all',
+      label: locked ? 'Connect your Gmail to see the whole studio' : "Everyone's work",
+      n: locked ? undefined : all,
+      Icon: IconPeople,
+    },
   ];
 
   return (
@@ -77,12 +94,13 @@ export function ScopeToggle({ mine, all }: { mine?: number; all?: number }) {
           key={o.key}
           type="button"
           onClick={() => setScope(o.key)}
+          disabled={locked && o.key === 'all'}
           aria-pressed={scope === o.key}
           aria-label={o.label}
           title={o.label}
           className={`focusable flex items-center gap-1.5 rounded-md px-2 py-1 text-[12.5px] font-semibold transition-colors ${
             scope === o.key ? 'bg-brass text-white' : 'text-ink-soft hover:text-ink'
-          }`}
+          } ${locked && o.key === 'all' ? 'cursor-not-allowed opacity-40 hover:text-ink-soft' : ''}`}
         >
           <o.Icon width={15} height={15} />
           {o.n !== undefined && <span className="tabular-nums">{o.n}</span>}
