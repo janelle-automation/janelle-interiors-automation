@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Page, PageHeading, Card, Pill } from '../components/ui';
-import { useFollowUps, useOps, useFollowUpStatus, useSnoozeFollowUp, useTeam, type FollowUpView } from '../lib/queries';
+import { useFollowUps, useOps, useFollowUpStatus, useSnoozeFollowUp, type FollowUpView } from '../lib/queries';
 import { ScopeToggle, useScope } from '../components/ScopeToggle';
 import { useAuth } from '../context/AuthContext';
 
@@ -128,33 +128,27 @@ export default function FollowUps() {
   const { followUps: runFollowUps } = useOps();
   const [scope] = useScope();
   const { user } = useAuth();
-  const { data: team } = useTeam();
-
-  // Which addresses belong to a person here, so a nudge aimed at a vendor
-  // can be told apart from one aimed at a colleague.
-  const teamAddresses = useMemo(
-    () => new Set(team.map((m) => (m.email ?? '').trim().toLowerCase()).filter(Boolean)),
-    [team],
-  );
 
   /**
-   * A nudge is somebody else's only when it demonstrably is.
+   * A nudge is yours only when something says so.
    *
-   * The internal types are addressed to a teammate, and the rest chase a
-   * task somebody owns. Everything left — a silent vendor, an approval
-   * nobody has picked up — belongs to no one in particular, and hiding it
-   * from "Mine" would mean the work nobody owns is the work nobody sees.
-   * Same rule as the task board, where unassigned cards stay in view.
+   * This used to run the other way — anything with no owner counted as
+   * everybody's, so it stayed in "Mine" on the reasoning that work nobody
+   * owns should not be work nobody sees. In practice that showed a person
+   * invited this morning every silent vendor and every overdue approval in
+   * the studio, none of which were theirs.
+   *
+   * Three ways it can be yours: the task it chases is yours, it is
+   * addressed to you, or it concerns a job you run. Anything else belongs
+   * to the studio and lives under "Everyone", where whoever runs the board
+   * will find it.
    */
   const myEmail = (user?.email ?? '').trim().toLowerCase();
   const isMine = (f: FollowUpView) => {
     if (f.taskAssignee) return f.taskAssignee === user?.id;
+    if (f.projectOwner && f.projectOwner === user?.id) return true;
     const target = (f.target ?? '').trim().toLowerCase();
-    if (!target) return true;
-    if (target === myEmail) return true;
-    // Addressed to another person here: theirs. Addressed to a vendor or a
-    // client: nobody's, so it stays.
-    return !teamAddresses.has(target);
+    return Boolean(target) && target === myEmail;
   };
 
   const followUps = scope === 'mine' ? all.filter(isMine) : all;

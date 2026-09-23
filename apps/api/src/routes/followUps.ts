@@ -27,7 +27,7 @@ followUpsRouter.get(
       .select(
         `id, type, project_id, vendor_id, target, reason, due_date, status, draft_id, created_at, task_id${
           snoozeReady ? ', snoozed_until, note' : ''
-        }, projects(name), vendors(name), tasks(assigned_to)`,
+        }, projects(name, assigned_to), vendors(name), tasks(assigned_to)`,
       )
       .order('created_at', { ascending: false });
 

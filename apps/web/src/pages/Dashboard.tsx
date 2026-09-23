@@ -365,32 +365,33 @@ function MorningDigest() {
   const run = useRunDigest();
 
   const [scope] = useScope();
-  const { user } = useAuth();
+  const { user, googleConnected } = useAuth();
 
   /**
    * Whose figures these are.
    *
    * The briefing is written for the whole studio, so every count on it was
    * the studio's — "11 overdue" told you the studio was behind, not that
-   * you were. Filtered by owner, the same briefing answers the question
-   * somebody actually opens it with. Unowned work stays in both views: it
-   * is nobody's yet, which is exactly why it needs picking up.
+   * you were.
+   *
+   * Yours means YOURS. This once let unowned rows through on both views, on
+   * the reasoning that work nobody has picked up should not be invisible —
+   * but that showed somebody invited this morning the studio's entire
+   * backlog on their first screen. Unclaimed work belongs under "Everyone",
+   * where whoever runs the board will find it.
    */
   const me = (user?.name ?? '').trim().toLowerCase();
   const mine = <T extends { owner?: string }>(rows: T[]): T[] =>
-    scope === 'all' || !me
-      ? rows
-      : rows.filter((r) => {
-          const owner = (r.owner ?? '').trim().toLowerCase();
-          return owner === me || owner === 'unassigned' || owner === '';
-        });
+    scope === 'all' ? rows : !me ? [] : rows.filter((r) => (r.owner ?? '').trim().toLowerCase() === me);
 
   const raw = digest?.figures;
   const f = raw && {
     overdue: mine(raw.overdue),
     quote_breaches: mine(raw.quote_breaches),
     client_waiting: mine(raw.client_waiting),
-    unassigned: raw.unassigned,
+    // Unassigned is a studio-wide count by definition — nobody's, so nobody
+    // sees it as theirs. It returns the moment "Everyone" is selected.
+    unassigned: scope === 'all' ? raw.unassigned : [],
   };
   const escalations = mine(digest?.escalations ?? []);
   const stale = digest ? digest.digest_date !== new Date().toISOString().slice(0, 10) : false;
@@ -467,15 +468,28 @@ function MorningDigest() {
               <div className="mb-2.5 text-[10.5px] font-bold uppercase tracking-[0.07em] text-ink-faint">
                 What happened
               </div>
-              {points.length === 0 && <p className="text-[13.5px] text-ink-faint">No summary available.</p>}
-              <ul className="space-y-2.5">
-                {points.map((p, i) => (
-                  <li key={i} className="flex gap-2.5">
-                    <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-brass" aria-hidden="true" />
-                    <span className="text-[13.5px] leading-relaxed text-ink-soft">{p}</span>
-                  </li>
-                ))}
-              </ul>
+              {/* The briefing is written from the shared mailbox and names
+                  other people's jobs, clients and money. Somebody who has not
+                  connected their own mail has no part in any of it yet, so
+                  they are told how to get their own rather than shown it. */}
+              {googleConnected === false ? (
+                <p className="text-[13.5px] leading-relaxed text-ink-faint">
+                  This is written from the studio mailbox each morning. Connect your Gmail and your own
+                  projects, tasks and vendor mail will be read into it too.
+                </p>
+              ) : (
+                <>
+                  {points.length === 0 && <p className="text-[13.5px] text-ink-faint">No summary available.</p>}
+                  <ul className="space-y-2.5">
+                    {points.map((p, i) => (
+                      <li key={i} className="flex gap-2.5">
+                        <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-brass" aria-hidden="true" />
+                        <span className="text-[13.5px] leading-relaxed text-ink-soft">{p}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
             </div>
 
             <div className="bg-surface px-5 py-4">

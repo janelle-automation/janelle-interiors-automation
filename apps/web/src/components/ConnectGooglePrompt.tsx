@@ -1,36 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useConnectGoogle } from '../lib/queries';
-
-const SEEN_KEY = 'janelle.connect.deferred';
-
-/**
- * Asked once a day at most.
- *
- * Someone who has said "not now" has a reason — they are on a shared
- * machine, or it is not their mail to connect. A prompt that returns on
- * every page load is one people learn to dismiss without reading, and it
- * would be in the way of the work they signed in to do.
- */
-function deferredToday(userId: string): boolean {
-  try {
-    const raw = localStorage.getItem(SEEN_KEY);
-    if (!raw) return false;
-    const [who, day] = raw.split('|');
-    return who === userId && day === new Date().toDateString();
-  } catch {
-    return false;
-  }
-}
-
-function defer(userId: string) {
-  try {
-    localStorage.setItem(SEEN_KEY, `${userId}|${new Date().toDateString()}`);
-  } catch {
-    /* a private window refuses storage; it will simply ask again */
-  }
-}
 
 function IconGoogle() {
   return (
@@ -60,34 +29,24 @@ export function ConnectGooglePrompt() {
   // been awaited before the shell renders, so this is known on the first
   // paint. Fetching it here again is what made the prompt arrive late,
   // after the dashboard had drawn itself.
-  const { user, googleConnected } = useAuth();
+  const { user, googleConnected, signOut } = useAuth();
   const connect = useConnectGoogle();
-  const [dismissed, setDismissed] = useState(false);
-
-  const close = useCallback(() => {
-    if (user) defer(user.id);
-    setDismissed(true);
-  }, [user]);
 
   // `null` means the answer has not arrived — never guess "not connected"
   // and flash the prompt at somebody who has already done this.
-  const showing =
-    Boolean(user) && googleConnected === false && !dismissed && !deferredToday(user!.id);
-
-  useEffect(() => {
-    if (!showing) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [showing, close]);
+  //
+  // There is no dismissal. It used to defer for a day, which meant a person
+  // could spend that day in a system reading none of their mail, wondering
+  // why their board was empty. Connecting IS the setup step, so it stands
+  // until it is done — no backdrop click, no Escape, no "not now".
+  const showing = Boolean(user) && googleConnected === false;
 
   if (!showing) return null;
 
   return (
     <div className="dock-aware fixed inset-0 z-50 grid place-items-center px-4">
-      <div className="absolute inset-0 bg-black/50" onClick={close} aria-hidden />
+      {/* No click-to-close: there is nothing useful behind it until this is done. */}
+      <div className="absolute inset-0 bg-black/60" aria-hidden />
 
       <div
         role="dialog"
@@ -122,25 +81,23 @@ export function ConnectGooglePrompt() {
         </div>
 
         <div className="mt-6 flex items-center justify-between gap-3 border-t border-line-soft bg-sunk/40 px-6 py-3.5">
-          <button type="button" onClick={close} className="btn-ghost btn-sm">
-            Not now
+          {/* The only way past it other than connecting. Somebody who cannot
+              do this right now — wrong machine, wrong account — needs a way
+              out that is not a dead end. */}
+          <button type="button" onClick={() => void signOut()} className="btn-ghost btn-sm">
+            Sign out
           </button>
-          <div className="flex items-center gap-2">
-            <Link to="/settings" onClick={close} className="btn-secondary btn-sm">
-              Later, in Settings
-            </Link>
-            <button
-              type="button"
-              disabled={connect.isPending}
-              // `dashboard`: this is the first-run prompt, so Google comes
-              // back to the board rather than to the Settings screen they
-              // never asked for.
-              onClick={() => connect.mutate({ service: 'all', next: 'dashboard' })}
-              className="btn-primary btn-sm"
-            >
-              {connect.isPending ? 'Opening Google…' : 'Connect'}
-            </button>
-          </div>
+          <button
+            type="button"
+            disabled={connect.isPending}
+            // `dashboard`: this is the first-run prompt, so Google comes back
+            // to the board rather than to the Settings screen they never
+            // asked for.
+            onClick={() => connect.mutate({ service: 'all', next: 'dashboard' })}
+            className="btn-primary btn-sm"
+          >
+            {connect.isPending ? 'Opening Google…' : 'Connect Gmail & Drive'}
+          </button>
         </div>
 
         {connect.isError && (

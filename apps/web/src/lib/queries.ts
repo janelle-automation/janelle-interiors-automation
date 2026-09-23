@@ -32,6 +32,8 @@ export interface FollowUpView {
   target: string | null;
   /** Who owns the task this nudge is chasing, when it is chasing one. */
   taskAssignee: string | null;
+  /** Who runs the job it concerns, when it names one. */
+  projectOwner: string | null;
 }
 export interface VendorView {
   id: string; name: string; category: string;
@@ -244,8 +246,9 @@ export function usePurchaseOrders() {
 // ── Follow-ups ──────────────────────────────────────────────
 interface FollowUpRow {
   id: string; type: FollowUpView['type']; reason: string | null; created_at: string;
-  target: string | null; projects: { name: string } | null; vendors: { name: string } | null;
+  target: string | null; vendors: { name: string } | null;
   task_id: string | null; tasks: { assigned_to: string | null } | null;
+  projects: { name: string; assigned_to?: string | null } | null;
 }
 export function useFollowUps() {
   const q = useQuery({
@@ -257,6 +260,7 @@ export function useFollowUps() {
         who: r.vendors?.name ?? r.projects?.name ?? r.target ?? '—',
         project: r.projects?.name ?? '—', reason: r.reason ?? '', age: ageFrom(r.created_at),
         target: r.target, taskAssignee: r.tasks?.assigned_to ?? null,
+        projectOwner: r.projects?.assigned_to ?? null,
       }));
     },
   });
