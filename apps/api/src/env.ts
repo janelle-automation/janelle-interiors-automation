@@ -63,6 +63,18 @@ export const env = {
     bcc: optional('INVITE_BCC', 'dfaldu387@gmail.com'),
   },
 
+  /**
+   * The address the app is reachable at from outside this machine.
+   *
+   * Separate from CORS_ORIGINS on purpose. That list is about which browser
+   * origins may call the API, and in development its first entry is
+   * localhost — which is correct there and useless in an email, because the
+   * recipient's localhost is their own machine, not the studio's server.
+   *
+   * Set APP_URL in any environment that sends mail.
+   */
+  appUrl: optional('APP_URL'),
+
   anthropic: {
     apiKey: optional('ANTHROPIC_API_KEY'),
     model: optional('ANTHROPIC_MODEL', 'claude-opus-5'),
