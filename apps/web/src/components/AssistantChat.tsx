@@ -4,7 +4,7 @@ import { ASSISTANT_NAME } from '@janelle/shared';
 import { useAssistant, type AttachedFile, type ChatMessage } from '../context/AssistantContext';
 import { api } from '../lib/api';
 import { useConfirmAction } from '../lib/queries';
-import { bestHearing, listen, speak, type StopListening } from '../lib/speech';
+import { bestHearing, listen, speak, type MicLevel, type StopListening } from '../lib/speech';
 import { AssistantAnswerView, AttachedFiles, answerIsWide, sizeLabel } from './AssistantAnswer';
 import { useImagineOptions } from '../lib/queries';
 import { readableAttachment } from '../lib/attachments';
@@ -639,6 +639,9 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
   const [attachError, setAttachError] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
   const [listening, setListening] = useState(false);
+  // What the microphone is actually picking up. Without it, a person talking
+  // too quietly watched the button pulse away as though it were working.
+  const [mic, setMic] = useState<MicLevel | null>(null);
   // What the microphone last heard, with every hearing of it. Sent along only
   // while the words in the box are still exactly what was heard — once the
   // person corrects them, the correction is the question.
@@ -784,6 +787,7 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
       interrupt: true,
       // Nothing is sent without Enter, so a thinking pause can be longer.
       pauseMs: 2_600,
+      onLevel: setMic,
       onInterim: (words) => setText(withBefore(words)),
       onResult: (hearings) => {
         const ranked = bestHearing(hearings, vocabulary);
@@ -803,6 +807,7 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
       },
       onEnd: () => {
         setListening(false);
+        setMic(null);
         stopListening.current = null;
       },
     });
@@ -810,6 +815,29 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
 
   return (
     <div className="border-t border-line px-4 pb-4 pt-3">
+      {/* A live meter while listening. It answers the question the old
+          "Listening…" placeholder could not: is it hearing ME? A voice too
+          quiet to transcribe is told so while there is still time to move
+          closer, rather than after the attempt has already failed. */}
+      {listening && mic && (
+        <div className="mb-2 flex items-center gap-2">
+          <span className="h-1 flex-1 overflow-hidden rounded-full bg-sunk" aria-hidden="true">
+            <span
+              className={`block h-full rounded-full transition-[width,background-color] duration-75 ${
+                mic.speaking ? 'bg-good' : mic.faint ? 'bg-warn' : 'bg-ink-faint/50'
+              }`}
+              style={{ width: `${Math.round(mic.level * 100)}%` }}
+            />
+          </span>
+          <span
+            className={`shrink-0 text-[11px] ${mic.faint ? 'font-medium text-warn' : 'text-ink-faint'}`}
+            role="status"
+            aria-live="polite"
+          >
+            {mic.faint ? 'Too quiet — move closer' : mic.speaking ? 'Hearing you' : 'Listening…'}
+          </span>
+        </div>
+      )}
       {lookingAt && (
         <div className="mb-2 flex items-center gap-1.5 text-[11.5px] text-ink-faint">
           <span className="h-1.5 w-1.5 rounded-full bg-brass" aria-hidden="true" />
@@ -1015,13 +1043,18 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
  * it is. Typing is still a tap away — "Type instead" ends the loop.
  */
 function VoiceBar() {
-  const { voice, status, setHandsFree, skipSpeaking, doneTalking, interim } = useAssistant();
+  const { voice, status, setHandsFree, skipSpeaking, doneTalking, interim, micLevel } = useAssistant();
 
-  const label =
-    voice === 'listening'
+  const faint = voice === 'listening' && micLevel?.faint && !interim;
+
+  const label = faint
+    ? 'I can barely hear you — move closer or speak up'
+    : voice === 'listening'
       ? interim
         ? 'Listening — pause when you’re done'
-        : 'Listening — go ahead'
+        : micLevel?.speaking
+          ? 'Hearing you — keep going'
+          : 'Listening — go ahead'
       : voice === 'speaking'
         ? 'Speaking'
         : `${status ?? 'Thinking'}…`;
@@ -1029,10 +1062,26 @@ function VoiceBar() {
   return (
     <div className="border-t border-line px-4 pb-4 pt-4">
       <div className="flex flex-col items-center gap-3">
-        <span className={`voice-orb voice-orb--${voice}`} aria-hidden="true">
+        {/* While listening the orb grows with the voice, so it is obvious
+            whether the microphone is getting anything. It used to pulse on a
+            timer whatever the room sounded like, which told someone talking
+            too quietly that all was well. */}
+        <span
+          className={`voice-orb voice-orb--${voice}`}
+          aria-hidden="true"
+          style={
+            voice === 'listening' && micLevel
+              ? { transform: `scale(${(1 + micLevel.level * 0.35).toFixed(3)})`, transition: 'transform 80ms linear' }
+              : undefined
+          }
+        >
           {voice === 'listening' ? <IconMic width={22} height={22} /> : <JennyAvatar size={40} />}
         </span>
-        <p className="text-[13.5px] font-medium text-ink" role="status" aria-live="polite">
+        <p
+          className={`text-[13.5px] font-medium ${faint ? 'text-warn' : 'text-ink'}`}
+          role="status"
+          aria-live="polite"
+        >
           {label}
         </p>
         {/* The words as they are heard, so a mishearing is visible before it is sent. */}

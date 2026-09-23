@@ -1,7 +1,9 @@
 import { useState } from 'react';
-import { PageHeading, Card } from '../components/ui';
+import { Page, PageHeading, Card } from '../components/ui';
 import { RichTextEditor, toEditorHtml, htmlToPlainText } from '../components/RichTextEditor';
 import { useDrafts, useDeleteDraft, useUpdateDraft, type DraftRow } from '../lib/queries';
+import { ScopeToggle, useScope } from '../components/ScopeToggle';
+import { useAuth } from '../context/AuthContext';
 
 /** Split a stored draft into its To / Cc header lines and the message body. */
 function parseDraft(text: string): { to: string; cc: string; body: string } {
@@ -116,7 +118,24 @@ function DraftEditor({ draft, onDone }: { draft: DraftRow; onDone: () => void })
 }
 
 export default function Drafts() {
-  const { data: drafts, isLoading } = useDrafts();
+  const { data: all, isLoading } = useDrafts();
+  const [scope] = useScope();
+  const { user } = useAuth();
+
+  /**
+   * Whose draft it is.
+   *
+   * A draft the reading pass wrote off the studio's shared mailbox belongs
+   * to nobody in particular, so it stays in both views — somebody has to
+   * pick it up. A draft answering a member's own mail carries their id and
+   * is theirs; row security (0018) already keeps it from anyone else, so
+   * this only decides what is shown first.
+   */
+  const isMine = (d: DraftRow) => {
+    const owner = d.owner_id ?? d.created_by ?? null;
+    return !owner || owner === user?.id;
+  };
+  const drafts = scope === 'mine' ? all.filter(isMine) : all;
   const del = useDeleteDraft();
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<string | null>(null);
@@ -134,10 +153,10 @@ export default function Drafts() {
   };
 
   return (
-    <>
+    <Page>
       <PageHeading
         title="Drafts"
-        sub="Reply drafts and follow-up nudges, kept here for your review. Edit them here, then open in Gmail to send — nothing is sent from this app."
+        action={<ScopeToggle mine={all.filter(isMine).length} all={all.length} />}
       />
 
       {isLoading && <div className="py-12 text-center text-[13px] font-medium text-ink-faint">Loading…</div>}
@@ -240,6 +259,6 @@ export default function Drafts() {
           })}
         </div>
       )}
-    </>
+    </Page>
   );
 }

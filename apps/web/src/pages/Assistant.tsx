@@ -1,13 +1,60 @@
-import { useEffect, useState, type SVGProps } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type SVGProps } from 'react';
 import { ASSISTANT_NAME } from '@janelle/shared';
-import { PageHeading, Card } from '../components/ui';
+import { Page, PageHeading, Card } from '../components/ui';
 import { AssistantChat } from '../components/AssistantChat';
 import { AssistantGuide } from '../components/AssistantGuide';
 import { AssistantHistory } from '../components/AssistantHistory';
-import { IconTalk, SHORTCUT_LABEL } from '../components/AssistantPanel';
+import { IconTalk } from '../components/AssistantPanel';
 import { useAssistant } from '../context/AssistantContext';
 
 type IconProps = SVGProps<SVGSVGElement>;
+
+/** Never shorter than this, however little room the window has. */
+const MIN_CHAT_PX = 448;
+
+/** The page's own bottom padding, left clear beneath the card. */
+const BOTTOM_GAP_PX = 32;
+
+/**
+ * Stretch from wherever this lands to the bottom of the window.
+ *
+ * The height was `calc(100vh - 15rem)` — a guess at everything above it,
+ * which went stale the moment the page heading changed size and left a band
+ * of dead space under the conversation. Measuring is right whatever the
+ * heading does, and stays right the next time it changes.
+ *
+ * It cannot feed back on itself: this element is the last block in its
+ * column, so its own height can never move its top, and a measurement that
+ * has not changed writes no state.
+ */
+function useFillsViewport<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+  const [height, setHeight] = useState<number | null>(null);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    const measure = () => {
+      const { top } = el.getBoundingClientRect();
+      const next = Math.max(MIN_CHAT_PX, Math.round(window.innerHeight - top - BOTTOM_GAP_PX));
+      setHeight((prev) => (prev !== null && Math.abs(prev - next) < 2 ? prev : next));
+    };
+
+    measure();
+    window.addEventListener('resize', measure);
+    // Anything above it changing height — a heading wrapping, a banner
+    // appearing — moves where it starts, so the page itself is watched.
+    const observer = new ResizeObserver(measure);
+    observer.observe(document.body);
+    return () => {
+      window.removeEventListener('resize', measure);
+      observer.disconnect();
+    };
+  }, []);
+
+  return [ref, height] as const;
+}
 const stroke = {
   width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
   strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const,
@@ -56,12 +103,12 @@ export default function Assistant() {
   const { handsFree, setHandsFree, canListen, canSpeak, speakReplies, setSpeakReplies, conversations } = useAssistant();
   const [guide, setGuide] = useState(false);
   const [history, setHistory] = useState(false);
+  const [fillRef, fillHeight] = useFillsViewport<HTMLDivElement>();
 
   return (
-    <>
+    <Page>
       <PageHeading
         title={ASSISTANT_NAME}
-        sub={`Your assistant for the studio's work — projects, tasks, orders, email and files. She briefs you each day, follows you around the app (${SHORTCUT_LABEL} from anywhere), reads the files you attach, and says so when she cannot check something.`}
         action={
           <div className="flex flex-wrap items-center gap-2">
             <button type="button" onClick={() => setHistory(true)} className="btn-secondary btn-sm lg:hidden">
@@ -97,8 +144,12 @@ export default function Assistant() {
         }
       />
 
-      <div className="grid gap-4 lg:grid-cols-[17.5rem_minmax(0,1fr)] 2xl:grid-cols-[20rem_minmax(0,1fr)]">
-        <Card className="hidden h-[calc(100vh-15rem)] min-h-[28rem] flex-col overflow-hidden lg:flex">
+      <div
+        ref={fillRef}
+        style={fillHeight ? { height: fillHeight } : undefined}
+        className="grid gap-4 lg:grid-cols-[17.5rem_minmax(0,1fr)] 2xl:grid-cols-[20rem_minmax(0,1fr)]"
+      >
+        <Card className="hidden h-full min-h-0 flex-col overflow-hidden lg:flex">
           <div className="border-b border-line px-4 py-3">
             <h2 className="text-[13.5px] font-semibold text-ink">Conversations</h2>
             <p className="text-[11.5px] text-ink-faint">Kept in this browser</p>
@@ -106,15 +157,19 @@ export default function Assistant() {
           <AssistantHistory />
         </Card>
 
-        <Card className="flex h-[calc(100vh-15rem)] min-h-[28rem] flex-col overflow-hidden">
+        <Card className="flex h-full min-h-0 flex-col overflow-hidden">
           <AssistantChat />
         </Card>
       </div>
 
-      <p className="mt-3 text-[12.5px] text-ink-faint">
-        {ASSISTANT_NAME} never sends email or changes records on her own — anything she prepares waits for you to confirm.
-        {!canListen && ' Voice is not available in this browser; Chrome, Edge and Safari support it.'}
-      </p>
+      {/* Only when it explains something the person can see is missing: the
+          microphone button is absent in a browser that cannot listen, and
+          without a word that reads as the app being broken. */}
+      {!canListen && (
+        <p className="mt-3 text-[12.5px] text-ink-faint">
+          Voice is not available in this browser; Chrome, Edge and Safari support it.
+        </p>
+      )}
 
       {history && (
         <Sheet side="left" title="Conversations" onClose={() => setHistory(false)}>
@@ -128,6 +183,6 @@ export default function Assistant() {
           </div>
         </Sheet>
       )}
-    </>
+    </Page>
   );
 }

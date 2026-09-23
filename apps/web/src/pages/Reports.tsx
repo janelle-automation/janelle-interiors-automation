@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { PageHeading, Card, money } from '../components/ui';
+import { Page, PageHeading, Card, money } from '../components/ui';
 import { useReports, useOps } from '../lib/queries';
 
 function generatedAt(iso: string | null | undefined): string {
@@ -43,10 +43,9 @@ export default function Reports() {
   }, [location.search, navigate, refetch]);
 
   return (
-    <>
+    <Page>
       <PageHeading
         title="Weekly Report"
-        sub="Generated every Monday, and on demand — the whole studio in one read."
         action={
           <button
             onClick={() =>
@@ -76,7 +75,7 @@ export default function Reports() {
       )}
 
       {latest ? (
-        <Card className="mb-6 p-6">
+        <Card className="p-6">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="text-[12px] font-semibold text-brass-deep">Week of {latest.week_of}</div>
             <div className="text-[12px] text-ink-faint">Generated {generatedAt(latest.created_at)}</div>
@@ -97,7 +96,7 @@ export default function Reports() {
           </div>
         </Card>
       ) : (
-        <Card className="mb-6 p-6">
+        <Card className="p-6">
           <div className="text-[12px] font-semibold text-brass-deep">Preview outline</div>
           <p className="mt-3 max-w-2xl text-[1.35rem] leading-snug text-ink">
             A calm, one-page summary of the studio's week, written by the intelligence layer and delivered in-app with an optional emailed copy.
@@ -116,6 +115,6 @@ export default function Reports() {
           </Card>
         ))}
       </div>
-    </>
+    </Page>
   );
 }

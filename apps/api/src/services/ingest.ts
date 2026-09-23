@@ -1,9 +1,10 @@
 import { supabaseAdmin } from '../lib/supabase.js';
-import { isGoogleAuthFailure, orgSourceUserId } from '../lib/tokens.js';
+import { connectedMailboxUserIds, isGoogleAuthFailure, orgSourceUserId } from '../lib/tokens.js';
 import {
-  gmailFor, getEmail, listMessageIds, downloadAttachment, addressOf, addressesOf, type PdfAttachment,
-  getProfileEmail, ignoredSenderQuery, isIgnoredSender, linksIn,
+  gmailFor, getEmail, listMessageIds, listAllMessageIds, downloadAttachment, addressOf, addressesOf, type PdfAttachment,
+  getProfileEmail, ignoredSenderQuery, noiseQuery, isIgnoredSender, isBulkMail, linksIn, studioOnlyQuery,
 } from './gmail.js';
+import { advanceIngestCursor, gmailAfter, readIngestWindow } from '../lib/ingestCursor.js';
 import { driveFor, listPdfs, downloadFile, type DriveFile } from './drive.js';
 import { listProjectPdfs, loadDriveProjects, syncProjectStatusDoc, syncProjectsFromDrive, type ProjectFolder } from './driveProjects.js';
 import {
@@ -16,11 +17,12 @@ import {
   promoteDocument, promoteEmail, removeVendorProjects,
 } from './promote.js';
 import { loadStudioNames, type StudioNames } from '../lib/studioNames.js';
-import { isStudioAddress } from '../lib/studioTeam.js';
+import { STUDIO_MAILBOXES, STUDIO_TEAM, isStudioAddress, isStudioMailbox } from '../lib/studioTeam.js';
 import { createTaskFromEmail, mergeDuplicateTasks } from './tasks.js';
 import { isAiReady, sweepStaleUploads } from './anthropic.js';
 import { readIngestSettings } from '../lib/ingestSettings.js';
 import { bodyColumnsReady, bodyFields, readStoredText } from '../lib/emailStore.js';
+import { hasEmailOwner, hasMessageId } from '../lib/columns.js';
 
 export interface IngestResult {
   ok: boolean;
@@ -45,6 +47,12 @@ export interface IngestOptions {
    * Defaults to DEFAULT_BUDGET_MS.
    */
   budgetMs?: number;
+  /**
+   * Read only this member's mailbox, rather than every connected one.
+   * Used to sync somebody the moment they connect their Google, without
+   * making them wait on the whole studio being read first.
+   */
+  onlyUserId?: string;
 }
 
 /**
@@ -225,6 +233,101 @@ function nothing(reason: string): IngestResult {
   return { ok: false, reason, emails: 0, documents: 0, replies: 0, tasks: 0, skipped: 0, done: false, remaining: 0 };
 }
 
+/**
+ * The most message ids one pass will hold in memory.
+ *
+ * A studio reading thirty days of mail for the first time can list
+ * thousands. The cap bounds the pass, and because the watermark only moves
+ * when a pass finishes everything it listed, a capped pass simply means the
+ * next one starts where this one stopped. Nothing is skipped by capping.
+ */
+const MAX_IDS_PER_PASS = 500;
+
+/**
+ * Which of these Gmail ids the studio has not stored yet.
+ *
+ * One question per batch rather than one per message. On a catch-up pass
+ * most of the listing is already stored, and asking the database about each
+ * id in turn was the slowest part of a pass that had no work to do.
+ */
+async function unstoredIds(orgId: string, ids: string[]): Promise<string[]> {
+  if (!supabaseAdmin || ids.length === 0) return [];
+  const known = new Set<string>();
+  // `in` is a URL query parameter, so the list is chunked to keep it short.
+  for (let i = 0; i < ids.length; i += 200) {
+    const chunk = ids.slice(i, i + 200);
+    const { data } = await supabaseAdmin
+      .from('emails')
+      .select('gmail_id')
+      .eq('org_id', orgId)
+      .in('gmail_id', chunk);
+    for (const row of data ?? []) known.add((row as { gmail_id: string }).gmail_id);
+  }
+  return ids.filter((id) => !known.has(id));
+}
+
+/**
+ * The mail domains of suppliers the studio already works with.
+ *
+ * Used to spare a known vendor from the bulk-mail filter. Some suppliers
+ * genuinely send quotes and order confirmations through a mailing platform,
+ * and dropping those would cost the studio real work to save it an advert.
+ */
+async function knownVendorDomains(orgId: string): Promise<Set<string>> {
+  const domains = new Set<string>();
+  if (!supabaseAdmin) return domains;
+  try {
+    const { data } = await supabaseAdmin.from('vendors').select('contacts').eq('org_id', orgId);
+    for (const row of data ?? []) {
+      const contacts = (row as { contacts: { email?: string }[] | null }).contacts;
+      for (const c of Array.isArray(contacts) ? contacts : []) {
+        const at = (c.email ?? '').lastIndexOf('@');
+        if (at > 0) domains.add(c.email!.slice(at + 1).toLowerCase());
+      }
+    }
+  } catch (err) {
+    console.error('[ingest] vendor domains unreadable:', (err as Error).message);
+  }
+  return domains;
+}
+
+/**
+ * The people this studio actually corresponds with, as Gmail search terms.
+ *
+ * Its own addresses, and the mail domains of every vendor and client on
+ * file. Used to narrow a PERSONAL mailbox so nothing outside the studio's
+ * own correspondence is ever fetched — see `studioOnlyQuery`.
+ */
+async function studioScopeFor(orgId: string): Promise<string> {
+  const addresses = [...STUDIO_MAILBOXES, ...STUDIO_TEAM.map((p) => p.email)].filter(Boolean);
+  const domains = new Set<string>();
+  for (const d of await knownVendorDomains(orgId)) domains.add(d);
+  if (supabaseAdmin) {
+    // Who the studio has actually corresponded with about a job. A client's
+    // address is nowhere on the project record, but it is on every message
+    // already filed against one — which is a better list than a field
+    // somebody has to remember to fill in.
+    const { data } = await supabaseAdmin
+      .from('emails')
+      .select('from_addr')
+      .eq('org_id', orgId)
+      .not('project_id', 'is', null)
+      .order('received_at', { ascending: false, nullsFirst: false })
+      .limit(400);
+    for (const row of data ?? []) {
+      const domain = senderDomain((row as { from_addr: string | null }).from_addr ?? '');
+      if (domain && !isIgnoredSender(`x@${domain}`) && !isStudioAddress(`x@${domain}`)) domains.add(domain);
+    }
+  }
+  return studioOnlyQuery([...domains], addresses);
+}
+
+function senderDomain(from: string): string {
+  const address = addressOf(from || '');
+  const at = address.lastIndexOf('@');
+  return at === -1 ? '' : address.slice(at + 1).toLowerCase();
+}
+
 export async function runIngest(
   orgId: string,
   opts: IngestOptions = {},
@@ -238,12 +341,53 @@ export async function runIngest(
   if (useAi && !(await isAiReady())) return nothing('anthropic_not_configured');
   if (ingestStartedAt && Date.now() - ingestStartedAt < LOCK_TTL_MS) return nothing('busy');
 
-  const userId = await orgSourceUserId(orgId);
-  if (!userId) return nothing('no_source_user');
+  // Every connected mailbox, not just the studio's own. A team member who
+  // connects their Google used to change nothing: the pass looked up one
+  // source user — the first connected principal — and read that alone.
+  const mailboxes = opts.onlyUserId ? [opts.onlyUserId] : await connectedMailboxUserIds(orgId);
+  if (!mailboxes.length) {
+    const fallback = await orgSourceUserId(orgId);
+    if (!fallback) return nothing('no_source_user');
+    mailboxes.push(fallback);
+  }
 
   ingestStartedAt = Date.now();
   try {
-    return await ingestInternal(orgId, userId, opts, useAi);
+    // The budget is the whole pass, shared out, so adding a fifth mailbox
+    // makes each pass shallower rather than making the request time out.
+    const budgetEach = Math.max(4_000, Math.floor((opts.budgetMs ?? DEFAULT_BUDGET_MS) / mailboxes.length));
+    const totals: IngestResult = {
+      ok: true, emails: 0, documents: 0, replies: 0, tasks: 0, skipped: 0, done: true, remaining: 0,
+    };
+    let anyRan = false;
+
+    for (const userId of mailboxes) {
+      let result: IngestResult;
+      try {
+        result = await ingestInternal(orgId, userId, { ...opts, budgetMs: budgetEach }, useAi);
+      } catch (err) {
+        // One member's expired grant must not stop the studio's own mail
+        // being read, nor anybody else's.
+        console.error(`[ingest] mailbox ${userId} failed:`, (err as Error).message);
+        continue;
+      }
+      if (!result.ok) {
+        // A member who has not finished connecting is not an error for the
+        // pass — only every mailbox failing is.
+        console.warn(`[ingest] mailbox ${userId} skipped: ${result.reason}`);
+        continue;
+      }
+      anyRan = true;
+      totals.emails += result.emails;
+      totals.documents += result.documents;
+      totals.replies += result.replies;
+      totals.tasks += result.tasks;
+      totals.skipped += result.skipped;
+      totals.remaining += result.remaining;
+      if (result.done === false) totals.done = false;
+    }
+
+    return anyRan ? totals : nothing('no_source_user');
   } finally {
     ingestStartedAt = 0;
   }
@@ -358,6 +502,11 @@ async function ingestInternal(
   let done = true;
   let remaining = 0;
 
+  // Set once the mailbox's own address is known — see the Gmail block below.
+  let ownerId: string | null = null;
+  let ownerColumn = false;
+  let messageColumn = false;
+
   let emailCount = 0;
   let docCount = 0;
   let replyCount = 0;
@@ -411,14 +560,43 @@ async function ingestInternal(
     // scoped to `is:unread` would miss most of the work; what stops a
     // message being read twice is the gmail_id check below, not its being
     // marked read. A caller-supplied query is used exactly as given.
-    const query = opts.emailQuery ?? `newer_than:3d -in:sent ${ignoredSenderQuery()}`;
-    let ids: string[];
+    // Whose mailbox this is decides both what may be read out of it and who
+    // may read it afterwards. The studio's own shared address belongs to
+    // everyone, so it is read whole and its mail stays shared (owner null).
+    // A person's own Google is theirs: narrowed to studio correspondence on
+    // the way in, and marked with their id on the way out.
+    const shared = isStudioMailbox(selfEmail);
+    ownerId = shared ? null : userId;
+    ownerColumn = await hasEmailOwner();
+    messageColumn = await hasMessageId();
+
+    // A caller-supplied query is a manual scan — a person asking for a
+    // specific search — and never moves the watermark, which belongs to the
+    // automatic reading alone.
+    const manual = Boolean(opts.emailQuery);
+    const window = manual ? null : await readIngestWindow(orgId, userId);
+    const scope = shared ? '' : await studioScopeFor(orgId);
+    const query = opts.emailQuery ?? `${gmailAfter(window!.since)} -in:sent ${noiseQuery()} ${scope}`.trim();
+
+    let listed: { ids: string[]; capped: boolean };
     try {
-      ids = await listMessageIds(gmail, query, 25);
+      listed = manual
+        ? { ids: await listMessageIds(gmail, query, 25), capped: false }
+        : await listAllMessageIds(gmail, query, MAX_IDS_PER_PASS);
     } catch (err) {
       if (isGoogleAuthFailure(err)) return nothing('google_auth_failed');
       throw err;
     }
+
+    // More than one pass can carry: the rest is not lost, it is next.
+    if (listed.capped) done = false;
+
+    // Oldest first, and only what is not already stored. Both matter for the
+    // watermark: the pass walks forward through the mail in the order it
+    // arrived, so wherever it stops, everything behind it is finished.
+    const ids = await unstoredIds(orgId, listed.ids);
+    const vendorDomains = ids.length ? await knownVendorDomains(orgId) : new Set<string>();
+
     for (const [index, id] of ids.entries()) {
       // Between messages is the only safe place to stop: the one in flight
       // may already have written an email row and a reply draft.
@@ -429,14 +607,6 @@ async function ingestInternal(
       }
       const emailStarted = Date.now();
       try {
-        const { data: existing } = await supabaseAdmin
-          .from('emails')
-          .select('id')
-          .eq('org_id', orgId)
-          .eq('gmail_id', id)
-          .maybeSingle();
-        if (existing) continue;
-
         const email = await getEmail(gmail, id);
 
         // Machinery, not studio work — a Slack invite, a bot's comment on a
@@ -448,6 +618,43 @@ async function ingestInternal(
         if (isIgnoredSender(email.from)) {
           skippedCount++;
           continue;
+        }
+
+        // Advertising. Gmail's own Promotions category is excluded in the
+        // query above; this catches the mailers it did not categorise —
+        // anything addressed to a list rather than to a person. A supplier
+        // the studio already works with is never dropped this way: some of
+        // them really do send quotes through a mailing platform, and losing
+        // one of those to save an advert is the wrong trade.
+        if (isBulkMail(email) && !vendorDomains.has(senderDomain(email.from))) {
+          skippedCount++;
+          continue;
+        }
+
+        // The same message in a second mailbox.
+        //
+        // `gmail_id` is Gmail's id for a message in ONE mailbox, so a vendor
+        // who writes to systems@ and copies Brianna arrives twice with two
+        // different ids. The RFC Message-ID is the same in both, and this is
+        // the last moment before the expensive part — checked here, the
+        // duplicate costs one query instead of three Claude calls, a second
+        // Inbox row and a second copy of the same task.
+        //
+        // Only against copies this mailbox's owner could actually see: a
+        // colleague's private copy is invisible to them (0018), so skipping
+        // on it would lose them the message entirely.
+        if (messageColumn && email.messageIdHeader) {
+          let seen = supabaseAdmin
+            .from('emails')
+            .select('id')
+            .eq('org_id', orgId)
+            .eq('message_id', email.messageIdHeader);
+          seen = ownerId ? seen.or(`owner_id.is.null,owner_id.eq.${ownerId}`) : seen.is('owner_id', null);
+          const { data: already } = await seen.limit(1);
+          if (already?.length) {
+            skippedCount++;
+            continue;
+          }
         }
 
         const names = useAi ? await loadStudioNames(orgId) : null;
@@ -562,6 +769,13 @@ async function ingestInternal(
               (extracted ?? null) as Record<string, unknown> | null,
             )),
             received_at: email.receivedAt,
+            // Null for the studio's shared address, so its history stays the
+            // studio's; the connecting member's id for a personal mailbox,
+            // which is what row security reads to keep it theirs — 0018.
+            ...(ownerColumn ? { owner_id: ownerId } : {}),
+            // The sender's own id for this message, identical in every
+            // mailbox it reached — how a second copy is recognised (0019).
+            ...(messageColumn ? { message_id: email.messageIdHeader || null } : {}),
             project_id: projectId,
             vendor_id: vendorId,
             class: extracted?.class ?? 'unclassified',
@@ -715,6 +929,10 @@ async function ingestInternal(
                       org_id: orgId,
                       subject: reply.subject,
                       body_preview: composed,
+                      // A reply quotes the thread it answers, so it inherits
+                      // that mail's privacy — otherwise the draft would hand
+                      // over the very words owner_id exists to protect.
+                      ...(ownerColumn ? { owner_id: ownerId } : {}),
                     });
                   }
                   replyCount++;
@@ -857,6 +1075,16 @@ async function ingestInternal(
   // decide two names are the same job, and the next pass will do it anyway.
   // Never fatal — the mail is already stored, and a tidy-up that failed
   // must not turn a good pass into an error.
+  // The watermark moves only here, and only on a pass that finished
+  // everything Gmail offered it. An interrupted pass leaves the mark where
+  // it was and the next one re-lists the same window — re-listing is cheap
+  // and everything already stored is dropped without a Claude call, whereas
+  // advancing past unread mail would lose it for good.
+  //
+  // `now`, not the last message's own date: a message delivered while the
+  // pass was running is covered by the overlap the cursor reads back with.
+  if (done && !opts.emailQuery) await advanceIngestCursor(orgId, userId);
+
   let mergedProjects = 0;
   let mergedTasks = 0;
   let refiled = 0;

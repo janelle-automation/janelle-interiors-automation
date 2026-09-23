@@ -28,6 +28,13 @@ export interface ParsedEmail {
   files?: MessageAttachment[];
   /** RFC Message-ID header of this email, for threading a reply. */
   messageIdHeader: string;
+  /**
+   * Sent to a list rather than to a person — it carries List-Unsubscribe.
+   *
+   * The one header that marketing reliably sets and a person writing to
+   * the studio never does. See `isBulkMail`.
+   */
+  bulk: boolean;
 }
 
 /** Extract the bare address from a "Name <a@b.com>" header value. */
@@ -171,6 +178,110 @@ export function ignoredSenderQuery(): string {
 }
 
 /**
+ * Everything the studio does not want read, as Gmail search terms.
+ *
+ * `-category:promotions` is the cheap half of keeping advertising out: Gmail
+ * has already sorted the studio's mail, and a message it filed under
+ * Promotions is a fabric house's seasonal mailer, not a quote. Excluded in
+ * the query, so it is never listed, never fetched, and never costs a Claude
+ * call — on this pass or any later one.
+ *
+ * Deliberately NOT `-category:social` or `-category:updates`: order
+ * confirmations and shipping notices land in Updates, and those are exactly
+ * the mail this system exists to read.
+ */
+export function noiseQuery(): string {
+  return `-category:promotions ${ignoredSenderQuery()}`;
+}
+
+/** Gmail's OR list caps out well before this; a long query is rejected. */
+const MAX_QUERY_DOMAINS = 25;
+
+/**
+ * Narrow a PERSONAL mailbox to the studio's own correspondence.
+ *
+ * The shared address can be read whole — everything in it is the studio's.
+ * A team member's own Google is not: it has their bank, their doctor and
+ * their family in it, and the honest way to keep that out of a work system
+ * is never to fetch it. So their mailbox is read only where it overlaps
+ * with people the studio already knows — its own addresses, its suppliers,
+ * its clients.
+ *
+ * The cost is real and worth stating: a genuine work email from a sender
+ * nobody has dealt with before is not picked up on the first pass. It
+ * arrives once that vendor or client exists on file, and anything urgent
+ * reaches the studio's own address anyway.
+ */
+export function studioOnlyQuery(domains: string[], addresses: string[]): string {
+  const terms = [...new Set([...addresses, ...domains].map((d) => d.trim().toLowerCase()).filter(Boolean))]
+    .slice(0, MAX_QUERY_DOMAINS);
+  if (!terms.length) return '';
+  const list = terms.join(' OR ');
+  // Either side of the conversation: mail from them, and mail the studio
+  // sent them that they replied to.
+  return `{from:(${list}) to:(${list}) cc:(${list})}`;
+}
+
+/**
+ * The other half: mail sent to a list, whatever Gmail made of it.
+ *
+ * `List-Unsubscribe` is set by every bulk sender and by no one writing a
+ * real message, so it catches the marketing Gmail did not categorise. The
+ * risk is a supplier who sends genuine quotes through a bulk mailer, which
+ * is why an attachment excuses it — a PDF is how a quote, an invoice or an
+ * order confirmation arrives, and no advertisement needs one to make its
+ * point. The caller also spares known vendors outright.
+ */
+export function isBulkMail(email: ParsedEmail): boolean {
+  return email.bulk && (email.files?.length ?? 0) === 0 && email.attachments.length === 0;
+}
+
+/**
+ * One page of message ids, with the token for the next.
+ *
+ * The caller pages until Gmail stops offering one. Reading only the first
+ * page is what let mail go missing: Gmail answers newest-first, so a busy
+ * day filled the page with new messages and quietly left the older ones
+ * unlisted until they aged out of the search window entirely.
+ */
+export async function listMessagePage(
+  gmail: gmail_v1.Gmail,
+  query: string,
+  pageToken?: string,
+  max = 100,
+): Promise<{ ids: string[]; nextPageToken?: string }> {
+  const res = await gmail.users.messages.list({ userId: 'me', q: query, maxResults: max, pageToken });
+  return {
+    ids: (res.data.messages ?? []).map((m) => m.id!).filter(Boolean),
+    nextPageToken: res.data.nextPageToken ?? undefined,
+  };
+}
+
+/**
+ * Every message matching a query, oldest first, up to `cap`.
+ *
+ * Oldest-first is the point. Work the list in the order the mail arrived and
+ * an interrupted pass leaves a clean boundary behind it — everything before
+ * the stopping point is done — so the next pass resumes instead of starting
+ * over at the newest message and pushing the backlog further away.
+ */
+export async function listAllMessageIds(
+  gmail: gmail_v1.Gmail,
+  query: string,
+  cap = 500,
+): Promise<{ ids: string[]; capped: boolean }> {
+  const ids: string[] = [];
+  let pageToken: string | undefined;
+  do {
+    const page = await listMessagePage(gmail, query, pageToken, Math.min(100, cap - ids.length));
+    ids.push(...page.ids);
+    pageToken = page.nextPageToken;
+  } while (pageToken && ids.length < cap);
+  // Gmail returns newest-first within and across pages.
+  return { ids: ids.reverse(), capped: Boolean(pageToken) };
+}
+
+/**
  * Whether this sender is machinery. The query above keeps almost all of it
  * out; this catches the rest — a custom query, or a domain that slipped
  * past Gmail's own matching.
@@ -311,6 +422,7 @@ export async function getEmail(gmail: gmail_v1.Gmail, id: string): Promise<Parse
     snippet: msg.snippet ?? '',
     receivedAt: dateMs ? new Date(dateMs).toISOString() : null,
     body: decodeBody(payload).slice(0, 12000),
+    bulk: Boolean(header(payload, 'List-Unsubscribe')),
     attachments: collectPdfAttachments(payload),
     files: attachmentsOf(payload),
     messageIdHeader: header(payload, 'Message-ID') || header(payload, 'Message-Id'),
@@ -461,5 +573,42 @@ export async function createDraft(
     userId: 'me',
     requestBody: { message: opts.threadId ? { raw, threadId: opts.threadId } : { raw } },
   });
+  return res.data.id ?? '';
+}
+
+/**
+ * Send one message, now — the only thing in this system that does.
+ *
+ * Everything else the studio writes is left as a draft for a person to read
+ * and send, and the app says so on several screens. This is the deliberate
+ * exception, and it is kept deliberately narrow: an account invitation,
+ * triggered by a principal pressing Add, to an address they just typed. It
+ * is administration, not correspondence — nothing here can reach a client
+ * or a supplier.
+ *
+ * `gmail.compose`, already granted, covers sending as well as drafting, so
+ * this needs no new consent from the studio.
+ */
+export async function sendMessage(
+  gmail: gmail_v1.Gmail,
+  opts: { to: string; cc?: string; bcc?: string; subject: string; body: string },
+): Promise<string> {
+  const headers = [`To: ${opts.to}`];
+  if (opts.cc) headers.push(`Cc: ${opts.cc}`);
+  // Bcc is a header Gmail strips on the way out; recipients never see it.
+  if (opts.bcc) headers.push(`Bcc: ${opts.bcc}`);
+  headers.push(
+    `Subject: ${opts.subject}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset="UTF-8"',
+  );
+
+  const raw = Buffer.from([...headers, '', opts.body].join('\r\n'))
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+
+  const res = await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
   return res.data.id ?? '';
 }

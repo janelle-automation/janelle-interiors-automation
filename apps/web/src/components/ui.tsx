@@ -1,4 +1,5 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useState, type InputHTMLAttributes, type ReactNode } from 'react';
+import { IconEye, IconEyeOff } from './icons';
 import { STAGE_LABELS, type ProjectStage } from '@janelle/shared';
 
 export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
@@ -7,6 +8,67 @@ export function Card({ children, className = '' }: { children: ReactNode; classN
 
 export function Eyebrow({ children }: { children: ReactNode }) {
   return <span className="eyebrow">{children}</span>;
+}
+
+/**
+ * A password field you can look at.
+ *
+ * Typing a long password blind and then typing it again blind is how people
+ * end up locked out of an account they just set the password on — the two
+ * fields agree, and both are wrong. Being able to see it is the fix, and it
+ * matters most on exactly the screens where the stakes are highest.
+ *
+ * Starts hidden, always: someone reading over a shoulder is the reason the
+ * dots exist. The eye shows the ACTION rather than the state — an eye means
+ * "reveal" — which is the same convention the task board uses for its
+ * closed-work toggle, and it matches the label beside it.
+ */
+export function PasswordInput({
+  className = '',
+  wrapperClassName = 'block',
+  label: what = 'password',
+  ...rest
+}: Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> & {
+  /** For a field that sits in a flex or grid row rather than on its own. */
+  wrapperClassName?: string;
+  /** What is being revealed, when it is not a password — "API key". */
+  label?: string;
+}) {
+  const [shown, setShown] = useState(false);
+  const label = `${shown ? 'Hide' : 'Show'} ${what}`;
+
+  return (
+    <span className={`relative ${wrapperClassName}`}>
+      <input {...rest} type={shown ? 'text' : 'password'} className={`input pr-10 ${className}`} />
+      <button
+        type="button"
+        onClick={() => setShown((v) => !v)}
+        aria-pressed={shown}
+        aria-label={label}
+        title={label}
+        className="focusable absolute right-1 top-1/2 grid h-8 w-8 -translate-y-1/2 place-items-center rounded-md text-ink-faint transition-colors hover:text-ink"
+      >
+        {shown ? <IconEyeOff width={16} height={16} /> : <IconEye width={16} height={16} />}
+      </button>
+    </span>
+  );
+}
+
+/**
+ * The frame every in-shell page sits in.
+ *
+ * AppShell gives a page its outer padding and its measure; this gives the
+ * rhythm inside it. Pages used to each set their own — `space-y-8` on the
+ * dashboard, `mb-6` hung off individual cards on Permissions and Reports,
+ * nothing at all on a third — so the gap under a heading changed as you
+ * moved between screens, which reads as three apps rather than one.
+ *
+ * One container owns that rhythm now. A page inside it should add no
+ * vertical margin of its own; if a block needs to sit closer than the rest,
+ * group it with its neighbour rather than reaching for a margin.
+ */
+export function Page({ children, className = '' }: { children: ReactNode; className?: string }) {
+  return <div className={`space-y-6 ${className}`}>{children}</div>;
 }
 
 export function PageHeading({
@@ -21,7 +83,14 @@ export function PageHeading({
   action?: ReactNode;
 }) {
   return (
-    <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
+    // No bottom margin: the gap below a heading is the Page container's, so
+    // that it is the same gap the rest of the page is built on.
+    //
+    // `items-start`, not `items-end`: bottom-aligning the buttons dropped
+    // them to the foot of a two-line subtitle and left a band of nothing
+    // beside the title, which is the widest part of the page. Level with the
+    // title they read as belonging to it, and the empty band is gone.
+    <header className="flex flex-wrap items-start justify-between gap-4">
       <div>
         {eyebrow && <Eyebrow>{eyebrow}</Eyebrow>}
         <h1 className="mt-0.5 text-[26px] font-bold leading-tight tracking-[-0.01em] text-ink">

@@ -4,6 +4,99 @@ import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { hasSeatColumn, profileColumns } from '../lib/columns.js';
+import { env } from '../env.js';
+import { orgSourceUserId } from '../lib/tokens.js';
+import { gmailFor, sendMessage } from '../services/gmail.js';
+import crypto from 'node:crypto';
+
+const STUDIO_NAME = 'Janelle Interiors';
+
+/** Where the person should go to sign in — the web app, not the API. */
+function webAppUrl(): string {
+  return env.corsOrigins[0] ?? 'http://localhost:5173';
+}
+
+/**
+ * A password nobody has to invent.
+ *
+ * Random, not memorable: it exists to be used once and replaced. The
+ * alphabet leaves out the characters that get misread when somebody types
+ * this off a screen — O/0, I/l/1 — because that is exactly how it will be
+ * entered the first time.
+ */
+function newPassword(): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  const bytes = crypto.randomBytes(16);
+  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('');
+}
+
+function inviteBody(name: string, email: string, password: string, url: string): string {
+  return [
+    `Hi ${name.split(' ')[0]},`,
+    '',
+    `You have an account on the ${STUDIO_NAME} workflow system — it keeps track of projects,`,
+    'tasks, vendor orders and the studio mailbox, so nothing gets lost between emails.',
+    '',
+    `Sign in here: ${url}`,
+    '',
+    `  Email:    ${email}`,
+    `  Password: ${password}`,
+    '',
+    'Please change that password once you are in: open Settings and use the Password panel.',
+    'It was generated for you and sent by email, so it should not stay in use.',
+    '',
+    'If you were not expecting this, you can ignore it and nothing will happen.',
+    '',
+    STUDIO_NAME,
+  ].join('\n');
+}
+
+/**
+ * Give somebody a way in, and tell them what it is.
+ *
+ * Shared by adding a person and by sending an existing one their details
+ * again — the two differ only in whether the account was just made. Sets a
+ * fresh password either way, because the point of pressing this is that
+ * they cannot get in with whatever they have.
+ *
+ * Never throws on the mail: the password is already live by then, so a
+ * failed send has to come back with it rather than leave a changed password
+ * nobody knows.
+ */
+async function issueCredentials(
+  orgId: string,
+  userId: string,
+  email: string,
+  fullName: string,
+): Promise<{ emailed: boolean; mailError: string | null; password: string }> {
+  const password = newPassword();
+  const { error } = await supabaseAdmin!.auth.admin.updateUserById(userId, {
+    password,
+    email_confirm: true,
+  });
+  if (error) throw new Error(error.message);
+
+  let emailed = false;
+  let mailError: string | null = null;
+  try {
+    const sender = await orgSourceUserId(orgId);
+    const gmail = sender ? await gmailFor(sender) : null;
+    if (!gmail) throw new Error('No Google account is connected to send from');
+    await sendMessage(gmail, {
+      to: email,
+      cc: env.invite.cc,
+      bcc: env.invite.bcc,
+      subject: `Your ${STUDIO_NAME} workflow account`,
+      body: inviteBody(fullName || email.split('@')[0], email, password, webAppUrl()),
+    });
+    emailed = true;
+  } catch (err) {
+    mailError = (err as Error).message;
+    console.error('[team] invite email failed:', mailError);
+  }
+
+  return { emailed, mailError, password };
+}
 
 export const teamRouter = Router();
 teamRouter.use(requireAuth);
@@ -221,15 +314,27 @@ teamRouter.post(
     const orgId = req.auth!.orgId;
     if (!orgId) return res.status(400).json({ error: 'No organization for user' });
 
-    const { data: invited, error: inviteErr } = await supabaseAdmin.auth.admin.inviteUserByEmail(email);
-    if (inviteErr || !invited?.user) {
-      // Already registered is the common case and worth saying plainly.
-      const msg = inviteErr?.message ?? 'Invite failed';
-      return res.status(400).json({ error: /already/i.test(msg) ? 'That email already has an account' : msg });
+    // Created directly, not invited.
+    //
+    // `inviteUserByEmail` sends through Supabase's own mailer, which is what
+    // produced "email rate limit exceeded" — the built-in sender allows only
+    // a handful an hour. It also gives no way to add a password, a Cc or a
+    // Bcc, because its template is fixed. So the account is made here and the
+    // studio sends its own welcome from its own mailbox.
+    const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
+      email,
+      // No confirmation round-trip: they were added by a principal, and the
+      // password issued below is what proves they were meant to be here.
+      email_confirm: true,
+      user_metadata: { full_name: fullName || email.split('@')[0] },
+    });
+    if (createErr || !created?.user) {
+      const msg = createErr?.message ?? 'Could not create the account';
+      return res.status(400).json({ error: /already|registered/i.test(msg) ? 'That email already has an account' : msg });
     }
 
     const { error: profileErr } = await supabaseAdmin.from('profiles').insert({
-      id: invited.user.id,
+      id: created.user.id,
       org_id: orgId,
       full_name: fullName || email.split('@')[0],
       email,
@@ -237,16 +342,30 @@ teamRouter.post(
     });
     if (profileErr) throw new Error(profileErr.message);
 
+    // Sent from the studio's own mailbox, so it arrives from an address the
+    // person recognises and carries the Cc and Bcc the studio asked for.
+    // A failure here must not undo the account: they exist either way, and
+    // the password comes back so a principal can pass it on by hand.
+    const { emailed, mailError, password: sentPassword } = await issueCredentials(
+      orgId,
+      created.user.id,
+      email,
+      fullName,
+    );
+
     await supabaseAdmin.from('activity_log').insert({
       org_id: orgId,
       actor: req.auth!.userId,
       action: 'team.invite',
       entity: 'profiles',
-      entity_id: invited.user.id,
-      meta: { email, role },
+      entity_id: created.user.id,
+      // Never the password.
+      meta: { email, role, emailed },
     });
 
-    res.json({ data: { id: invited.user.id, email, role } });
+    // The password is returned so the principal can hand it over when the
+    // mail did not go. It is shown once and never stored anywhere readable.
+    res.json({ data: { id: created.user.id, email, role, emailed, mailError, password: sentPassword } });
   }),
 );
 
@@ -381,5 +500,57 @@ teamRouter.delete(
     });
 
     res.json({ data: { id, unassigned_tasks: openTasks ?? 0 } });
+  }),
+);
+
+/**
+ * Send an existing teammate their sign-in details.
+ *
+ * For the roster that was seeded offline, and for anyone who has lost their
+ * way in. It sets a NEW password, so it is not a way of looking up the old
+ * one — nobody, including a principal, can read an existing password, and
+ * this does not pretend otherwise.
+ *
+ * That makes it destructive in one specific way: whatever they were using
+ * stops working. The screen says so before it is pressed.
+ */
+teamRouter.post(
+  '/:id/invite',
+  requirePermission('team', 'update'),
+  asyncHandler(async (req, res) => {
+    if (!supabaseAdmin) return res.status(503).json({ error: 'Backend not configured' });
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const { data: person } = await supabaseAdmin
+      .from('profiles')
+      .select('id, full_name, email, org_id')
+      .eq('id', req.params.id)
+      .maybeSingle();
+    const target = person as { id: string; full_name: string | null; email: string | null; org_id: string } | null;
+
+    // Scoped to the caller's own studio: the admin client bypasses row
+    // security, so the check the database would have made is made here.
+    if (!target || target.org_id !== orgId) return res.status(404).json({ error: 'No such person' });
+    if (!target.email) return res.status(400).json({ error: 'That person has no email address on file' });
+
+    const { emailed, mailError, password } = await issueCredentials(
+      orgId,
+      target.id,
+      target.email,
+      target.full_name ?? '',
+    );
+
+    await supabaseAdmin.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'team.reinvite',
+      entity: 'profiles',
+      entity_id: target.id,
+      // Never the password.
+      meta: { email: target.email, emailed },
+    });
+
+    res.json({ data: { id: target.id, email: target.email, emailed, mailError, password } });
   }),
 );

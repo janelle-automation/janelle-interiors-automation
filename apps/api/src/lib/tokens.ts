@@ -70,6 +70,30 @@ export async function googleClientForUser(userId: string, service?: GoogleServic
  * The user whose Google account acts as the org's ingestion source.
  * For now this is the principal; later this can be configurable.
  */
+/**
+ * Everyone in the studio whose Google is connected, principal or not.
+ *
+ * `orgSourceUserId` answers "whose mailbox speaks for the studio" and
+ * returns exactly one. That was the whole model while a single shared
+ * address fed everything — and it meant a team member connecting their own
+ * Google achieved nothing at all: the reading pass never looked at it.
+ *
+ * Oldest connection first, so the studio's own mailbox — connected long
+ * before anyone else's — is read first and its mail keeps being filed as
+ * the shared history rather than as somebody's personal copy.
+ */
+export async function connectedMailboxUserIds(orgId: string): Promise<string[]> {
+  if (!supabaseAdmin) return [];
+  const { data } = await supabaseAdmin
+    .from('integrations')
+    .select('user_id, profiles!inner(org_id)')
+    .eq('org_id', orgId)
+    .eq('provider', 'google')
+    .eq('status', 'connected')
+    .order('connected_at', { ascending: true });
+  return [...new Set(((data ?? []) as { user_id: string }[]).map((r) => r.user_id).filter(Boolean))];
+}
+
 export async function orgSourceUserId(orgId: string): Promise<string | null> {
   if (!supabaseAdmin) return null;
   // The principal who actually connected Google. "Any principal" was fine

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { INGEST_INTERVALS, SELECTABLE_MODELS } from '@janelle/shared';
+import { DEFAULT_SLA, INGEST_INTERVALS, SELECTABLE_MODELS, type SlaSettings } from '@janelle/shared';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { supabaseAdmin } from '../lib/supabase.js';
@@ -204,6 +204,81 @@ settingsRouter.put(
     });
 
     res.json({ data: updated });
+  }),
+);
+
+/**
+ * The chasing ladder: how long the studio waits before it says something.
+ *
+ * Every one of these numbers was already read from the studio's settings by
+ * the nightly engine, the digest and the task board — but nothing could
+ * write them. Two were seeded when the organization was created and the
+ * other five had never been anything but the built-in default, so "the
+ * system chases too early" had no answer except changing the code.
+ */
+settingsRouter.get(
+  '/sla',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    const { data } = await supabaseAdmin!.from('organizations').select('settings').eq('id', orgId).maybeSingle();
+    const stored = ((data as { settings: Record<string, unknown> } | null)?.settings ?? {}) as Partial<SlaSettings>;
+    res.json({ data: { ...DEFAULT_SLA, ...stored }, defaults: DEFAULT_SLA });
+  }),
+);
+
+/** Each dial's sane range, so a typo cannot switch the engine off. */
+const SLA_LIMITS: Record<keyof SlaSettings, { min: number; max: number }> = {
+  quote_response_days: { min: 1, max: 30 },
+  client_waiting_hours: { min: 1, max: 336 },
+  vendor_silence_days: { min: 1, max: 30 },
+  client_approval_days: { min: 1, max: 60 },
+  escalation_days: { min: 1, max: 30 },
+  task_reminder_days: { min: 0, max: 30 },
+  reminder_repeat_days: { min: 1, max: 30 },
+};
+
+settingsRouter.put(
+  '/sla',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const patch: Partial<SlaSettings> = {};
+    for (const key of Object.keys(SLA_LIMITS) as (keyof SlaSettings)[]) {
+      const raw = req.body?.[key];
+      if (raw === undefined) continue;
+      const value = Number(raw);
+      const { min, max } = SLA_LIMITS[key];
+      if (!Number.isInteger(value) || value < min || value > max) {
+        return res.status(400).json({ error: `${key} must be a whole number between ${min} and ${max}` });
+      }
+      patch[key] = value;
+    }
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'Nothing to change' });
+
+    // Merged, never replaced: `settings` also holds the API key, the model
+    // and the permission overrides, and writing the column whole would take
+    // them with it.
+    const { data } = await supabaseAdmin!.from('organizations').select('settings').eq('id', orgId).maybeSingle();
+    const settings = ((data as { settings: Record<string, unknown> } | null)?.settings ?? {}) as Record<string, unknown>;
+    const next = { ...settings, ...patch };
+
+    const { error } = await supabaseAdmin!.from('organizations').update({ settings: next }).eq('id', orgId);
+    if (error) throw new Error(error.message);
+
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.sla_changed',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: patch,
+    });
+
+    res.json({ data: { ...DEFAULT_SLA, ...(next as Partial<SlaSettings>) } });
   }),
 );
 

@@ -79,6 +79,8 @@ export interface ListenOptions {
   interrupt?: boolean;
   /** How long a pause means they have finished. Longer after a word no sentence ends on. */
   pauseMs?: number;
+  /** What the microphone is hearing, so the screen can show it. */
+  onLevel?: (level: MicLevel) => void;
 }
 
 /**
@@ -116,6 +118,28 @@ const UNSETTLED_MS = 1_000;
 /** Nothing at all said for this long is silence. */
 const NO_SPEECH_MS = 8_000;
 
+/**
+ * The ways "nothing was transcribed" is reported.
+ *
+ * All three mean the same thing to a caller — try again — and differ only in
+ * what they tell the person to do about it. A hands-free loop has to be able
+ * to tell them apart from a real fault like a blocked microphone, and it used
+ * to do that by comparing against one of these strings, which quietly stopped
+ * working the moment there was more than one of them.
+ */
+export const UNHEARD = {
+  silence: 'I did not catch that.',
+  faint: 'You are coming through very faintly — move closer to the microphone or speak up.',
+  unclear: 'I heard you but could not make out the words. Try again a little slower.',
+} as const;
+
+const UNHEARD_MESSAGES: string[] = Object.values(UNHEARD);
+
+/** Whether an error means "say that again", rather than a fault worth stopping for. */
+export function isUnheard(message: string): boolean {
+  return UNHEARD_MESSAGES.includes(message);
+}
+
 /** Words a sentence does not end on: a pause after one is a breath, not the end. */
 const HANGING = new Set([
   'a', 'an', 'the', 'to', 'of', 'for', 'with', 'about', 'from', 'in', 'on', 'at', 'by', 'into', 'as',
@@ -125,6 +149,107 @@ const HANGING = new Set([
   'please', 'give', 'show', 'tell', 'find', 'send', 'get', 'make', 'add', 'create', 'put', 'move', 'assign',
   'what', 'which', 'who', 'where', 'when', 'how', 'why', 'um', 'uh', 'er', 'like',
 ]);
+
+// ── How loud the room actually is ───────────────────────────
+
+/**
+ * What the microphone is picking up, as the person is talking.
+ *
+ * The Web Speech API says nothing about volume: it reports words, or it
+ * reports `no-speech`, and a quiet talker gets the second one with no hint
+ * why. Meanwhile the orb pulsed away as though it were hearing them. So the
+ * microphone is opened separately, purely to measure — the recogniser keeps
+ * its own stream, and this one only ever looks at the level.
+ */
+export interface MicLevel {
+  /** 0..1, for something on screen to move with the voice. */
+  level: number;
+  /** Loud enough for the recogniser to work with. */
+  speaking: boolean;
+  /** Sound is arriving, but too quietly to be transcribed reliably. */
+  faint: boolean;
+}
+
+/** Speech sits around -35..-15 dBFS; a quiet room floor is below -55. */
+const FAINT_DB = -52;
+const CLEAR_DB = -38;
+
+/**
+ * Open the microphone with the browser's own cleanup turned on.
+ *
+ * `autoGainControl` is the one that matters here — it lifts a quiet voice
+ * toward a usable level before anything tries to read words out of it.
+ * Chrome applies the processing per device, so holding this stream open
+ * while the recogniser runs improves what the recogniser gets too. That
+ * last part is undocumented browser behaviour rather than a guarantee,
+ * which is why the meter is worth having on its own: if it turns out not to
+ * help, the person can at least SEE that they are too quiet.
+ */
+export async function openMicMeter(onLevel: (l: MicLevel) => void): Promise<() => void> {
+  if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) return () => {};
+  let stream: MediaStream | null = null;
+  let ctx: AudioContext | null = null;
+  let raf = 0;
+  let stopped = false;
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        autoGainControl: true,
+        noiseSuppression: true,
+        echoCancellation: true,
+      },
+    });
+  } catch {
+    // Blocked or unavailable: the recogniser will report that itself.
+    return () => {};
+  }
+  if (stopped) {
+    stream.getTracks().forEach((t) => t.stop());
+    return () => {};
+  }
+
+  try {
+    const Ctx = (window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext })
+      .AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctx) throw new Error('no AudioContext');
+    ctx = new Ctx();
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    // Long enough to ride over the gaps between syllables, short enough to
+    // still look like it is responding to a voice.
+    analyser.smoothingTimeConstant = 0.6;
+    source.connect(analyser);
+    const buffer = new Float32Array(analyser.fftSize);
+
+    const tick = () => {
+      if (stopped) return;
+      analyser.getFloatTimeDomainData(buffer);
+      let sum = 0;
+      for (const v of buffer) sum += v * v;
+      const rms = Math.sqrt(sum / buffer.length);
+      const db = rms > 0 ? 20 * Math.log10(rms) : -100;
+      onLevel({
+        // -60 dB is the bottom of the meter, -10 the top.
+        level: Math.max(0, Math.min(1, (db + 60) / 50)),
+        speaking: db >= CLEAR_DB,
+        faint: db >= FAINT_DB && db < CLEAR_DB,
+      });
+      raf = requestAnimationFrame(tick);
+    };
+    tick();
+  } catch {
+    /* metering is a nicety; never let it stop the microphone working */
+  }
+
+  return () => {
+    stopped = true;
+    if (raf) cancelAnimationFrame(raf);
+    stream?.getTracks().forEach((t) => t.stop());
+    void ctx?.close().catch(() => {});
+  };
+}
 
 /** One stretch of speech as the browser heard it, copied out of its live objects. */
 interface Heard {
@@ -205,11 +330,19 @@ export function listen(opts: ListenOptions): StopListening {
   let ended = false;
   let heard: Heard[] = [];
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let closeMic: (() => void) | null = null;
+
+  // What the room sounded like while we were listening, so silence can be
+  // told apart from a voice the recogniser could not make out.
+  let sawSpeech = false;
+  let sawFaint = false;
 
   const end = () => {
     if (ended) return;
     ended = true;
     clearTimeout(timer);
+    closeMic?.();
+    closeMic = null;
     opts.onEnd();
   };
 
@@ -229,6 +362,20 @@ export function listen(opts: ListenOptions): StopListening {
     }
   };
 
+  /**
+   * Why nothing was transcribed, in terms of what the room sounded like.
+   *
+   * "I did not catch that" was said to three different people with three
+   * different problems: one whose microphone was muted, one sitting too far
+   * from it, and one who simply had not spoken yet. Only the third was
+   * being told anything true, and the first two had nothing to act on.
+   */
+  const unheardReason = () => {
+    if (sawSpeech) return UNHEARD.unclear;
+    if (sawFaint) return UNHEARD.faint;
+    return UNHEARD.silence;
+  };
+
   if (opts.interrupt) stopSpeaking();
 
   void silence().then(() => {
@@ -236,6 +383,17 @@ export function listen(opts: ListenOptions): StopListening {
       end();
       return;
     }
+    // Opened before the recogniser so the browser has applied its gain and
+    // noise handling to the device by the time words start arriving.
+    void openMicMeter((l) => {
+      if (l.speaking) sawSpeech = true;
+      else if (l.faint) sawFaint = true;
+      opts.onLevel?.(l);
+    }).then((close) => {
+      if (ended || finished) close();
+      else closeMic = close;
+    });
+
     const r = new Ctor();
     rec = r;
     r.lang = LANG;
@@ -269,7 +427,7 @@ export function listen(opts: ListenOptions): StopListening {
         if (heard.length) return;
         finished = true;
         clearTimeout(timer);
-        opts.onError('I did not catch that.');
+        opts.onError(unheardReason());
         return;
       }
       finished = true;
@@ -286,7 +444,7 @@ export function listen(opts: ListenOptions): StopListening {
       r.start();
       timer = setTimeout(() => {
         if (heard.length || finished) return;
-        opts.onError('I did not catch that.');
+        opts.onError(unheardReason());
         finish(false);
       }, NO_SPEECH_MS);
     } catch {
@@ -312,25 +470,209 @@ const COMMON = new Set([
 ]);
 
 /**
- * The hearings, best first, judged by the names the studio actually uses.
+ * Ordinary English that a studio name must never be allowed to overwrite.
+ *
+ * The correction below rewrites what it believes is a mangled name. Left
+ * unguarded it would also rewrite real words that happen to sound like one,
+ * and a wrong "correction" is worse than the mishearing: the mishearing is
+ * visibly wrong, whereas a confident substitution reads as what was said.
+ */
+const EVERYDAY = new Set([
+  ...HANGING,
+  'all', 'any', 'are', 'ask', 'back', 'been', 'both', 'call', 'car', 'come', 'cost', 'date', 'day',
+  'days', 'due', 'each', 'email', 'end', 'few', 'file', 'first', 'from', 'go', 'good', 'got', 'here',
+  'job', 'just', 'know', 'last', 'late', 'left', 'let', 'list', 'look', 'lot', 'made', 'many', 'more',
+  'most', 'much', 'must', 'need', 'new', 'next', 'no', 'not', 'now', 'off', 'old', 'one', 'only',
+  'open', 'order', 'other', 'out', 'over', 'own', 'part', 'past', 'pay', 'quote', 'read', 'ready',
+  'right', 'same', 'say', 'see', 'sent', 'set', 'still', 'stop', 'sure', 'take', 'task', 'tasks',
+  'team', 'than', 'thanks', 'there', 'they', 'thing', 'time', 'today', 'told', 'too', 'top', 'try',
+  'two', 'up', 'us', 'use', 'very', 'want', 'was', 'way', 'we', 'week', 'well', 'went', 'were',
+  'work', 'yes', 'yet', 'you',
+]);
+
+/**
+ * Roughly what a word sounds like, with the detail a recogniser loses.
+ *
+ * Not a real phonetic algorithm — a deliberately coarse one. Vowels go
+ * (after the first letter, which a recogniser rarely gets wrong), spellings
+ * that sound alike collapse together, and doubles fold. "Bernthal" and
+ * "Burn Thal" land on the same key; so do "Pollick" and "Pollock".
+ */
+function soundKey(word: string): string {
+  let s = word.toLowerCase().replace(/[^a-z]/g, '');
+  if (!s) return '';
+  s = s
+    .replace(/^(?:kn|gn|pn|wr)/, 'n')
+    .replace(/ph/g, 'f')
+    .replace(/sch/g, 'sk')
+    .replace(/(?:sh|ch)/g, 'x')
+    .replace(/c(?=[eiy])/g, 's')
+    .replace(/(?:ck|cq|c|q|k)/g, 'k')
+    .replace(/gh/g, '')
+    .replace(/z/g, 's')
+    .replace(/v/g, 'f')
+    .replace(/[hwy]/g, '');
+  if (!s) return '';
+  const key = s[0] + s.slice(1).replace(/[aeiou]/g, '');
+  return key.replace(/(.)\1+/g, '$1');
+}
+
+/** Whether two sound keys are the same, or one letter apart on a long key. */
+function keysMatch(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  // A single slip is only forgiven on a key long enough for it to mean
+  // something; on short keys almost everything is one letter from everything.
+  if (Math.min(a.length, b.length) < 5 || Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  let j = 0;
+  let slips = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i++;
+      j++;
+      continue;
+    }
+    if (++slips > 1) return false;
+    if (a.length > b.length) i++;
+    else if (b.length > a.length) j++;
+    else {
+      i++;
+      j++;
+    }
+  }
+  return slips + (a.length - i) + (b.length - j) <= 1;
+}
+
+/** The studio's names, indexed by what they sound like. Built once per vocabulary. */
+function soundIndex(vocabulary: string[]): Map<string, string> {
+  const index = new Map<string, string>();
+  const add = (key: string, proper: string) => {
+    if (!key || key.length < 4) return;
+    // First writer wins, so a one-word name is not shadowed by a longer one
+    // that happens to collide with it.
+    if (!index.has(key)) index.set(key, proper);
+  };
+  for (const name of vocabulary) {
+    // The original spelling, so "ZAK+FOX" comes back punctuated as it is on file.
+    const parts = name.split(/\s+/).filter(Boolean);
+    const plain = parts.map((p) => p.replace(/[^\p{L}\p{N}']/gu, ''));
+    for (let i = 0; i < parts.length; i++) {
+      const word = plain[i];
+      if (word.length >= 4 && !COMMON.has(word.toLowerCase())) add(soundKey(word), parts[i]);
+      // Pairs and triples: a recogniser splits one name into two words as
+      // often as it mangles the letters — "Topa" becomes "toe pa".
+      if (i + 1 < parts.length) add(soundKey(plain[i] + plain[i + 1]), `${parts[i]} ${parts[i + 1]}`);
+      if (i + 2 < parts.length) {
+        add(soundKey(plain[i] + plain[i + 1] + plain[i + 2]), `${parts[i]} ${parts[i + 1]} ${parts[i + 2]}`);
+      }
+    }
+  }
+  return index;
+}
+
+/**
+ * Put the studio's own names back into what was heard.
+ *
+ * The recogniser knows English and this studio is not written in it: OVIS,
+ * Ojai, Topa, Bernthal, Ditchfield, Pollick, Schumacher. Ranking whole
+ * alternatives cannot help when all five of them mangle the same name, so
+ * the words themselves are repaired — the longest window first, because
+ * "Ojai Valley Inn" should be recognised as one name rather than three.
+ *
+ * Conservative on purpose. A window is only replaced when it sounds like a
+ * real name AND is not ordinary English, so "the car is late" survives
+ * intact even in a studio with a client called Carr.
+ */
+export function correctNames(text: string, vocabulary: string[]): { text: string; fixed: number } {
+  if (!text.trim() || !vocabulary.length) return { text, fixed: 0 };
+  const index = soundIndex(vocabulary);
+  if (!index.size) return { text, fixed: 0 };
+
+  // Kept with their separators, so punctuation and spacing come back out.
+  const tokens = text.match(/[\p{L}\p{N}']+|[^\p{L}\p{N}']+/gu) ?? [];
+  const isWord = (t: string) => /[\p{L}\p{N}]/u.test(t);
+  const wordAt: number[] = [];
+  tokens.forEach((t, i) => {
+    if (isWord(t)) wordAt.push(i);
+  });
+
+  let fixed = 0;
+  const out = [...tokens];
+  const done = new Set<number>();
+
+  for (let w = 0; w < wordAt.length; w++) {
+    if (done.has(w)) continue;
+    for (let span = Math.min(3, wordAt.length - w); span >= 1; span--) {
+      const idx = wordAt.slice(w, w + span);
+      if (idx.some((_, k) => done.has(w + k))) continue;
+      const words = idx.map((i) => tokens[i]);
+      const joined = words.join('');
+      // Ordinary English is left alone. A multi-word window is safe when any
+      // ONE of its words is unusual; a single word has to be unusual itself.
+      if (words.every((x) => EVERYDAY.has(x.toLowerCase()))) continue;
+      if (span === 1 && (EVERYDAY.has(words[0].toLowerCase()) || words[0].length < 4)) continue;
+
+      const key = soundKey(joined);
+      if (key.length < 4) continue;
+      let proper = index.get(key);
+      if (!proper) {
+        for (const [k, v] of index) {
+          if (keysMatch(k, key)) {
+            proper = v;
+            break;
+          }
+        }
+      }
+      if (!proper) continue;
+      // Already right — nothing to say.
+      if (proper.toLowerCase() === words.join(' ').toLowerCase()) break;
+
+      out[idx[0]] = proper;
+      for (let k = 1; k < idx.length; k++) out[idx[k]] = '';
+      // The separators inside the window go with the words they joined.
+      for (let i = idx[0] + 1; i < idx[idx.length - 1]; i++) if (!isWord(tokens[i])) out[i] = '';
+      for (let k = 0; k < span; k++) done.add(w + k);
+      fixed++;
+      break;
+    }
+  }
+
+  return { text: out.join('').replace(/\s+/g, ' ').trim(), fixed };
+}
+
+/**
+ * The hearings, best first, with the studio's names put back into them.
  *
  * A recogniser's confidence knows English, not this studio: it is sure of
  * "Danish" and unsure of "Denish". So a hearing that contains a real name —
  * a person, a project, a client, a vendor — is preferred over one that does
  * not, and confidence breaks the tie.
+ *
+ * Ranking now happens on the CORRECTED text, which is what makes the two
+ * halves work together: an alternative whose only fault was spelling a name
+ * the way it sounded is repaired first, and then wins on having the name in
+ * it, instead of losing to a worse hearing that got one word right.
  */
 export function bestHearing(hearings: Hearing[], vocabulary: string[]): Hearing[] {
   const known = new Set(
     vocabulary.flatMap((name) => wordsOf(name)).filter((w) => w.length >= 3 && !COMMON.has(w)),
   );
-  const score = (h: Hearing) => {
-    const names = wordsOf(h.transcript).filter((w) => known.has(w)).length;
-    return names * 0.35 + (h.confidence || 0);
+  const repaired = hearings.map((h) => {
+    const { text, fixed } = correctNames(h.transcript, vocabulary);
+    return { hearing: { transcript: text, confidence: h.confidence }, fixed };
+  });
+  const score = ({ hearing, fixed }: (typeof repaired)[number]) => {
+    const names = wordsOf(hearing.transcript).filter((w) => known.has(w)).length;
+    // A hearing that had to be repaired is very slightly behind one that was
+    // already right, so an alternative that named the job correctly first
+    // time still wins its tie.
+    return names * 0.35 + (hearing.confidence || 0) - fixed * 0.01;
   };
-  return hearings
-    .map((h, i) => ({ h, i, s: score(h) }))
+  return repaired
+    .map((r, i) => ({ r, i, s: score(r) }))
     .sort((a, b) => b.s - a.s || a.i - b.i)
-    .map((x) => x.h);
+    .map((x) => x.r.hearing);
 }
 
 /** What Jenny said last, and when she stopped — to recognise it coming back. */

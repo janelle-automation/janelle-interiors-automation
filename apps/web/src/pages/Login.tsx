@@ -1,11 +1,13 @@
 import { useState, type FormEvent } from 'react';
 import { supabase } from '../lib/supabase';
+import { PasswordInput } from '../components/ui';
 
 export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sent, setSent] = useState(false);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -15,6 +17,33 @@ export default function Login() {
     try {
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) throw error;
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Send the reset link.
+   *
+   * The answer is the same whether or not the address has an account here.
+   * Saying "no such user" would turn this box into a way of discovering who
+   * the studio employs, and the person who genuinely mistyped their address
+   * is helped just as well by being told to check their mail.
+   */
+  const forgot = async () => {
+    if (!supabase) return;
+    const address = email.trim();
+    if (!address) {
+      setError('Enter your email address first, then press this again.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await supabase.auth.resetPasswordForEmail(address, { redirectTo: window.location.origin });
+      setSent(true);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -49,12 +78,26 @@ export default function Login() {
 
           <form onSubmit={submit} className="space-y-3">
             <input className="input" type="email" required placeholder="you@studio.com" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
-            <input className="input" type="password" required minLength={6} placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+            <PasswordInput required minLength={6} placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
 
             {error && <p className="rounded-lg bg-crit/10 px-3 py-2 text-[12.5px] text-crit">{error}</p>}
+            {sent && (
+              <p className="rounded-lg bg-good/10 px-3 py-2 text-[12.5px] text-good">
+                If that address has an account, a reset link is on its way. It expires in an hour.
+              </p>
+            )}
 
             <button type="submit" disabled={busy} className="btn-primary w-full">
               {busy ? 'Please wait…' : 'Sign in'}
+            </button>
+
+            <button
+              type="button"
+              onClick={forgot}
+              disabled={busy}
+              className="focusable w-full rounded-lg py-1 text-[12.5px] font-medium text-ink-soft hover:text-ink"
+            >
+              Forgot your password?
             </button>
           </form>
 

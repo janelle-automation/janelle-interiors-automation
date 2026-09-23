@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { PageHeading, Card, StageBadge, Pill, money, shortDate } from '../components/ui';
+import { Page, PageHeading, Card, StageBadge, Pill, money, shortDate } from '../components/ui';
 import { IconArrow } from '../components/icons';
 import { useProject, useUpdateProject } from '../lib/queries';
 import { PROJECT_STAGES, STAGE_LABELS, type ProjectStage } from '@janelle/shared';
@@ -86,8 +86,8 @@ export default function ProjectDetail() {
   events.sort((a, b) => b.at - a.at);
 
   return (
-    <>
-      <Link to="/projects" className="focusable mb-4 inline-flex items-center gap-1.5 text-[13px] font-semibold text-brass-deep hover:underline">
+    <Page>
+      <Link to="/projects" className="focusable inline-flex items-center gap-1.5 text-[13px] font-semibold text-brass-deep hover:underline">
         <IconArrow width={14} height={14} className="rotate-180" /> All projects
       </Link>
       <PageHeading
@@ -119,7 +119,7 @@ export default function ProjectDetail() {
       />
 
       {editing && (
-        <Card className="mb-6 p-6">
+        <Card className="p-6">
           <h2 className="mb-4 text-[16px] font-semibold text-ink">Edit project</h2>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Client">
@@ -164,7 +164,7 @@ export default function ProjectDetail() {
         </Card>
       )}
 
-      <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <Card className="p-4"><div className="text-[12px] font-medium text-ink-soft">Budget</div><div className="mt-1 text-xl text-ink tabular-nums">{money(p.budget)}</div></Card>
         <Card className="p-4"><div className="text-[12px] font-medium text-ink-soft">Target install</div><div className="mt-1 text-xl text-ink">{shortDate(p.target_install)}</div></Card>
         <Card className="p-4"><div className="text-[12px] font-medium text-ink-soft">Purchase orders</div><div className="mt-1 text-xl text-ink tabular-nums">{pos.length}</div></Card>
@@ -172,7 +172,7 @@ export default function ProjectDetail() {
       </div>
 
       {/* Stage progress tracker */}
-      <Card className="mb-6 p-5">
+      <Card className="p-5">
         <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-faint">Progress · auto-updated from email</div>
         <div className="flex items-center gap-1 overflow-x-auto pb-1">
           {PROJECT_STAGES.map((s, i) => {
@@ -243,7 +243,7 @@ export default function ProjectDetail() {
       </div>
 
       {/* Progress timeline */}
-      <Card className="mt-5">
+      <Card>
         <div className="border-b border-line-soft px-5 py-4"><h2 className="text-[16px] font-semibold text-ink">Timeline</h2></div>
         {events.length === 0 ? (
           <div className="px-5 py-8 text-center text-[13px] text-ink-faint">No activity yet — events appear here as email and documents come in.</div>
@@ -268,7 +268,7 @@ export default function ProjectDetail() {
         )}
       </Card>
 
-      {p.notes && <Card className="mt-5 p-5"><div className="text-[12px] font-medium text-ink-soft">Notes</div><p className="mt-2 text-[14px] text-ink-soft">{p.notes}</p></Card>}
-    </>
+      {p.notes && <Card className="p-5"><div className="text-[12px] font-medium text-ink-soft">Notes</div><p className="mt-2 text-[14px] text-ink-soft">{p.notes}</p></Card>}
+    </Page>
   );
 }

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { PoStatus } from '@janelle/shared';
-import { PageHeading, Card, Pill, money, shortDate, usePager, Pager } from '../components/ui';
+import { Page, PageHeading, Card, Pill, money, shortDate, usePager, Pager } from '../components/ui';
 import { IconSearch, IconPlus } from '../components/icons';
 import {
   useVendors, usePurchaseOrders, useCreateVendor, useVendorAbilities,
@@ -271,10 +271,9 @@ export default function Vendors() {
   const total = shownPos.reduce((sum, o) => sum + o.amount, 0);
 
   return (
-    <>
+    <Page>
       <PageHeading
         title="Vendors & Purchase Orders"
-        sub="The vendor directory and every PO — auto-populated from parsed quotes and confirmations."
         action={
           can?.create ? (
             <button onClick={() => setAdding((v) => !v)} className="btn-primary btn-sm">
@@ -433,6 +432,6 @@ export default function Vendors() {
           <Pager {...poPager} count={poPager.rows.length} noun="order" />
         </Card>
       </div>
-    </>
+    </Page>
   );
 }

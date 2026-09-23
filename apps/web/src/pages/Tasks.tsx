@@ -9,7 +9,9 @@ import {
   type TaskKind,
   type TaskStatus,
 } from '@janelle/shared';
-import { PageHeading, Card, Pill, shortDate } from '../components/ui';
+import { Page, PageHeading, Card, Pill, shortDate } from '../components/ui';
+import { ScopeToggle, useScope } from '../components/ScopeToggle';
+import { IconBoard, IconEye, IconEyeOff, IconList, IconMailScan } from '../components/icons';
 import { useAuth } from '../context/AuthContext';
 import {
   daysEarly, useAddSubtask, useBackfillTasks, useDeleteTask, useTaskDetail, useTasks, useTeam, useUpdateTask,
@@ -24,6 +26,71 @@ const tone: Record<TaskKind, 'crit' | 'warn' | 'brass' | 'neutral'> = {
   scheduling: 'warn',
   admin: 'neutral',
 };
+
+/**
+ * The kind, as a dot rather than a filled badge.
+ *
+ * Every card carried a coloured pill for its kind, so a column of them was a
+ * column of loud blocks and nothing stood out — least of all the one word
+ * that should, which is "Overdue". A dot and a quiet label carry the same
+ * information and give the alert somewhere to be loud against.
+ *
+ * `spec_review` takes olive rather than the brass its pill uses: beside
+ * `quote_request` two identical greens said "these are the same kind".
+ */
+const KIND_DOT: Record<TaskKind, string> = {
+  quote_request: 'bg-brass',
+  order_followup: 'bg-warn',
+  client_approval: 'bg-crit',
+  spec_review: 'bg-olive',
+  scheduling: 'bg-warn',
+  admin: 'bg-ink-faint',
+};
+
+/** The accent each board column is headed with. */
+const COLUMN_DOT: Partial<Record<TaskStatus, string>> = {
+  open: 'bg-ink-faint',
+  in_progress: 'bg-brass',
+  blocked: 'bg-crit',
+  done: 'bg-good',
+};
+
+/** Replaces the platform's own select arrow, which cannot be themed. */
+function Chevron({ className = '' }: { className?: string }) {
+  return (
+    <svg
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  );
+}
+
+/** A quiet marker on the card — not an alert, just a fact worth seeing. */
+function Tag({ children, title, tone: t }: { children: ReactNode; title?: string; tone: 'crit' | 'good' | 'neutral' }) {
+  const tones = {
+    crit: 'bg-crit/15 text-crit',
+    good: 'bg-good/15 text-good',
+    neutral: 'bg-sunk text-ink-faint',
+  };
+  return (
+    <span
+      title={title}
+      className={`shrink-0 whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.05em] ${tones[t]}`}
+    >
+      {children}
+    </span>
+  );
+}
 
 /** Labels for the nudges raised against a task, in its history. */
 const HISTORY_LABELS: Partial<Record<FollowUpType, string>> = {
@@ -320,7 +387,7 @@ function Initials({ name }: { name: string }) {
     .toUpperCase();
   return (
     <span
-      className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-brass/15 text-[10.5px] font-bold text-brass-deep"
+      className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-brass/15 text-[9.5px] font-bold text-brass-deep"
       title={name}
     >
       {letters || '?'}
@@ -359,31 +426,46 @@ const BoardCard = memo(function BoardCard({
         e.dataTransfer.setData('text/plain', t.id);
       }}
       onClick={() => onOpen(t.id)}
-      className={`rounded-lg border bg-surface p-3 ${mayEdit ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} ${
-        t.overdue ? 'border-crit/50' : 'border-line-soft'
-      }`}
+      className={`board-card group relative overflow-hidden rounded-xl border bg-surface p-3.5 ${
+        mayEdit ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'
+      } ${t.overdue ? 'border-crit/35' : 'border-line-soft hover:border-line'}`}
     >
-      <div className="mb-1.5 flex items-center gap-2">
-        <Pill tone={tone[t.kind]}>{TASK_KIND_LABELS[t.kind]}</Pill>
-        {t.overdue && <Pill tone="crit">Overdue</Pill>}
+      {/* A bar down the edge rather than a red box around everything. The
+          full border fought the card's own outline and made a late task look
+          broken; an edge marker is read just as fast and stays legible when
+          three of them sit in a column together. */}
+      {t.overdue && <span className="absolute inset-y-0 left-0 w-[3px] bg-crit" aria-hidden="true" />}
+
+      <div className="mb-2 flex items-center gap-2">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${KIND_DOT[t.kind]}`} aria-hidden="true" />
+          <span className="truncate text-[10px] font-bold uppercase tracking-[0.07em] text-ink-faint">
+            {TASK_KIND_LABELS[t.kind]}
+          </span>
+        </span>
+        {t.overdue && <Tag tone="crit">Overdue</Tag>}
         {/* The system moved this one here on its own. Said on the card, not
             only in the panel, so a close nobody expected is noticed. */}
         {t.closedNote && (
-          <span title={t.closedNote}>
-            <Pill tone="good">Closed automatically</Pill>
-          </span>
+          <Tag tone="good" title={t.closedNote}>
+            Auto-closed
+          </Tag>
         )}
         {/* The board says these are raised from email. A card that was not
             is the exception, and worth being able to see at a glance rather
             than having to open it. */}
-        {!t.fromEmail && !t.closedNote && <Pill tone="neutral">Added by hand</Pill>}
+        {!t.fromEmail && !t.closedNote && (
+          <Tag tone="neutral" title="Added by hand, not raised from email">
+            By hand
+          </Tag>
+        )}
 
         {onDelete && (
           <button
             type="button"
             aria-label={`Delete "${t.title}"`}
             title="Delete this task"
-            className="focusable ml-auto rounded px-1 text-[13px] leading-none text-ink-faint hover:text-crit"
+            className="focusable ml-auto shrink-0 rounded px-1 text-[13px] leading-none text-ink-faint opacity-0 transition-opacity hover:text-crit focus:opacity-100 group-hover:opacity-100"
             draggable={false}
             onDragStart={(e) => e.stopPropagation()}
             onClick={(e) => {
@@ -396,7 +478,7 @@ const BoardCard = memo(function BoardCard({
         )}
       </div>
 
-      <p className="text-[13.5px] font-medium leading-snug text-ink">{t.title}</p>
+      <p className="text-[13.5px] font-semibold leading-snug tracking-[-0.005em] text-ink">{t.title}</p>
 
       {/* The SOP wants one next step on every task; showing the gap on the
           card is what makes it get filled in. Finished work has no next
@@ -426,46 +508,54 @@ const BoardCard = memo(function BoardCard({
 
       {/* Owner and date are changed here rather than on another screen: the
           board is where the gaps are visible, so it is where they get
-          filled. Inputs swallow the drag so picking a date is not a drag. */}
+          filled. Inputs swallow the drag so picking a date is not a drag.
+          A hairline separates what the card SAYS from what it can DO. */}
       <div
-        className="mt-2.5 flex flex-wrap items-center gap-2"
+        className="mt-3 flex items-center gap-1 border-t border-line-soft pt-2"
         draggable={false}
         onDragStart={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
       >
         {mayEdit ? (
-          <select
-            className="input input-sm min-w-0 flex-1"
-            value={t.assignedTo ?? ''}
-            aria-label={`Who owns "${t.title}"`}
-            onChange={(e) => onAssign(t.id, e.target.value || null)}
-          >
-            <option value="">Unassigned</option>
-            {team.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.full_name ?? m.email ?? 'Teammate'}
-              </option>
-            ))}
-          </select>
+          <span className="relative min-w-0 flex-1">
+            <select
+              className="control-quiet pr-5"
+              value={t.assignedTo ?? ''}
+              aria-label={`Who owns "${t.title}"`}
+              onChange={(e) => onAssign(t.id, e.target.value || null)}
+            >
+              <option value="">Unassigned</option>
+              {team.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.full_name ?? m.email ?? 'Teammate'}
+                </option>
+              ))}
+            </select>
+            <Chevron className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-ink-faint" />
+          </span>
         ) : unowned ? (
-          <span className="text-[11.5px] font-semibold text-warn">Unassigned</span>
+          <span className="min-w-0 flex-1 px-1.5 text-[11.5px] font-semibold text-warn">Unassigned</span>
         ) : (
-          <span className="flex items-center gap-1.5 text-[11.5px] text-ink-faint">
+          <span className="flex min-w-0 flex-1 items-center gap-1.5 px-1.5 text-[11.5px] text-ink-soft">
             <Initials name={t.assignee} />
-            {t.assignee}
+            <span className="truncate">{t.assignee}</span>
           </span>
         )}
 
         {mayEdit ? (
           <input
             type="date"
-            className={`input input-sm ${t.overdue ? 'text-crit' : ''}`}
+            className={`control-quiet w-auto shrink-0 tabular-nums ${t.overdue ? 'font-semibold text-crit' : ''}`}
             value={t.due ?? ''}
             aria-label={`Due date for "${t.title}"`}
             onChange={(e) => onDue(t.id, e.target.value || null)}
           />
         ) : (
-          <span className={`text-[11.5px] ${t.overdue ? 'font-semibold text-crit' : 'text-ink-faint'}`}>
+          <span
+            className={`shrink-0 px-1.5 text-[11.5px] tabular-nums ${
+              t.overdue ? 'font-semibold text-crit' : 'text-ink-faint'
+            }`}
+          >
             {t.due ? shortDate(t.due) : 'No due date'}
           </span>
         )}
@@ -545,16 +635,24 @@ function Board({
               e.preventDefault();
               drop(col.status);
             }}
-            className={`rounded-xl border p-3 transition-colors ${
-              over === col.status ? 'border-brass bg-brass/5' : 'border-line-soft bg-sunk/30'
+            className={`rounded-2xl border p-3 transition-colors ${
+              over === col.status ? 'border-brass bg-brass/5' : 'border-line-soft bg-sunk/40'
             }`}
           >
-            <header className="mb-3 flex items-baseline justify-between px-1">
-              <h3 className="text-[13px] font-semibold text-ink">{TASK_STATUS_LABELS[col.status]}</h3>
-              <span className="text-[11.5px] text-ink-faint">{items.length}</span>
+            <header className="mb-3 flex items-center gap-2 px-1">
+              <span
+                className={`h-2 w-2 shrink-0 rounded-full ${COLUMN_DOT[col.status] ?? 'bg-ink-faint'}`}
+                aria-hidden="true"
+              />
+              <h3 className="text-[12px] font-bold uppercase tracking-[0.06em] text-ink-soft">
+                {TASK_STATUS_LABELS[col.status]}
+              </h3>
+              <span className="ml-auto grid h-5 min-w-[20px] place-items-center rounded-full bg-sunk px-1.5 text-[11px] font-semibold tabular-nums text-ink-soft">
+                {items.length}
+              </span>
             </header>
 
-            <ul className="flex flex-col gap-2">
+            <ul className="flex flex-col gap-2.5">
               {items.map((t) => (
                 <BoardCard
                   key={t.id}
@@ -569,7 +667,7 @@ function Board({
                 />
               ))}
               {items.length === 0 && (
-                <li className="rounded-lg border border-dashed border-line px-3 py-6 text-center text-[12px] text-ink-faint">
+                <li className="rounded-xl border border-dashed border-line/70 px-3 py-7 text-center text-[11.5px] text-ink-faint">
                   {col.hint}
                 </li>
               )}
@@ -665,7 +763,18 @@ export default function Tasks() {
 
   // Whoever runs the board, by role or by seat — see canManageTasks.
   const supervisor = canManageTasks(user?.role ?? null, user?.seat ?? null);
-  const visible = showDone ? tasks : tasks.filter((t) => OPEN_STATUSES.includes(t.status));
+
+  // Mine first. The board opened on the whole studio, so the answer to
+  // "what do I owe" was to read every column and pick your own cards out.
+  // Unassigned work stays visible in "Mine": it is nobody's yet, and
+  // claiming it is exactly what the board is for.
+  const [scope] = useScope();
+  const isMine = (t: TaskView) => t.assignedTo === user?.id || !t.assignedTo;
+  const scoped = scope === 'mine' ? tasks.filter(isMine) : tasks;
+  const mineCount = tasks.filter((t) => isMine(t) && OPEN_STATUSES.includes(t.status)).length;
+  const allCount = tasks.filter((t) => OPEN_STATUSES.includes(t.status)).length;
+
+  const visible = showDone ? scoped : scoped.filter((t) => OPEN_STATUSES.includes(t.status));
 
   // The board always shows its Done column — that is what a board is for, and
   // "Hide closed" was written for the list. Only the most recently FINISHED
@@ -676,8 +785,8 @@ export default function Tasks() {
   const DONE_ON_BOARD = 12;
   const finishedAt = (t: TaskView) => (t.completedAt ? Date.parse(t.completedAt) : 0);
   const boardTasks = [
-    ...tasks.filter((t) => OPEN_STATUSES.includes(t.status)),
-    ...tasks
+    ...scoped.filter((t) => OPEN_STATUSES.includes(t.status)),
+    ...scoped
       .filter((t) => t.status === 'done')
       .sort((a, b) => finishedAt(b) - finishedAt(a))
       .slice(0, DONE_ON_BOARD),
@@ -701,49 +810,82 @@ export default function Tasks() {
   };
 
   return (
-    <>
+    <Page>
       <PageHeading
         title="Tasks"
-        sub="Raised automatically from email and assigned by role. Reassign or close anything here — nothing is sent to anyone."
         action={
           <div className="flex items-center gap-2">
+            <ScopeToggle mine={mineCount} all={allCount} />
             {supervisor && (
-              <div className="flex flex-col items-end gap-1">
-                <button
-                  onClick={() => backfill.mutate()}
-                  disabled={backfill.isPending}
-                  className="btn-secondary btn-sm"
-                  title="Raise tasks from email already in the system"
-                >
-                  {backfill.isPending
+              <button
+                onClick={() => backfill.mutate()}
+                disabled={backfill.isPending}
+                aria-label="Scan email already in the system for tasks"
+                title={
+                  backfill.isPending
                     ? 'Reading email…'
                     : backfill.data && backfill.data.remaining > 0
-                      ? `Keep reading (${backfill.data.remaining} left)`
-                      : 'Scan existing email'}
-                </button>
-                <ScanResult result={backfill.data} error={backfill.error as Error | null} />
-              </div>
+                      ? `Keep reading — ${backfill.data.remaining} left`
+                      : 'Scan email already in the system for tasks'
+                }
+                className="focusable relative grid h-8 w-8 place-items-center rounded-lg border border-line bg-surface text-ink-soft transition-colors hover:border-ink-faint hover:text-ink disabled:opacity-50"
+              >
+                <IconMailScan width={16} height={16} className={backfill.isPending ? 'animate-pulse' : ''} />
+                {/* How much is left is the one thing the icon cannot say,
+                    and the reason to press it a second time. */}
+                {!backfill.isPending && !!backfill.data?.remaining && (
+                  <span className="absolute -right-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-brass px-1 text-[9.5px] font-bold leading-none text-white ring-2 ring-surface">
+                    {backfill.data.remaining > 99 ? '99+' : backfill.data.remaining}
+                  </span>
+                )}
+              </button>
             )}
-            <div className="flex overflow-hidden rounded-lg border border-line">
-              {(['board', 'list'] as const).map((v) => (
+
+            <div className="inline-flex rounded-lg border border-line bg-surface p-0.5" role="group" aria-label="How to show the tasks">
+              {([
+                { v: 'board' as const, label: 'Board', Icon: IconBoard },
+                { v: 'list' as const, label: 'List', Icon: IconList },
+              ]).map(({ v, label, Icon }) => (
                 <button
                   key={v}
                   onClick={() => chooseView(v)}
                   aria-pressed={view === v}
-                  className={`focusable px-3 py-1.5 text-[12.5px] font-medium capitalize ${
+                  aria-label={label}
+                  title={label}
+                  className={`focusable grid h-7 w-7 place-items-center rounded-md transition-colors ${
                     view === v ? 'bg-brass text-white' : 'text-ink-soft hover:text-ink'
                   }`}
                 >
-                  {v}
+                  <Icon width={15} height={15} />
                 </button>
               ))}
             </div>
-            <button onClick={() => setShowDone((v) => !v)} className="btn-secondary btn-sm">
-              {showDone ? 'Hide closed' : 'Show closed'}
+
+            <button
+              onClick={() => setShowDone((v) => !v)}
+              aria-pressed={showDone}
+              aria-label={showDone ? 'Hide closed tasks' : 'Show closed tasks'}
+              title={showDone ? 'Hide closed tasks' : 'Show closed tasks'}
+              className={`focusable grid h-8 w-8 place-items-center rounded-lg border transition-colors ${
+                showDone
+                  ? 'border-brass bg-brass/10 text-brass-deep'
+                  : 'border-line bg-surface text-ink-soft hover:border-ink-faint hover:text-ink'
+              }`}
+            >
+              {/* The icon is the ACTION, not the state — matching the label
+                  beside it, which already reads "Hide closed tasks" when
+                  they are showing. An eye means "click to reveal". */}
+              {showDone ? <IconEyeOff width={16} height={16} /> : <IconEye width={16} height={16} />}
             </button>
           </div>
         }
       />
+
+      {(backfill.data || backfill.error) && (
+        <div className="-mt-2">
+          <ScanResult result={backfill.data} error={backfill.error as Error | null} />
+        </div>
+      )}
 
       {view === 'board' && (
         <>
@@ -890,6 +1032,6 @@ export default function Tasks() {
       )}
 
       {openTask && <TaskPanel id={openTask} onClose={() => setOpenTask(null)} />}
-    </>
+    </Page>
   );
 }

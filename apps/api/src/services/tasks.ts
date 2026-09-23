@@ -437,77 +437,149 @@ export async function advanceActiveTasks(orgId: string): Promise<number> {
   try {
     const { data: openTasks } = await supabaseAdmin
       .from('tasks')
-      .select('id, title, source_email_id, created_at')
+      .select('id, title, source_email_id, created_at, project_id, vendor_id')
       .eq('org_id', orgId)
-      .eq('status', 'open')
-      .not('source_email_id', 'is', null);
+      .eq('status', 'open');
 
     const tasks = (openTasks ?? []) as unknown as {
-      id: string; title: string; source_email_id: string; created_at: string;
+      id: string; title: string; source_email_id: string | null; created_at: string;
+      project_id: string | null; vendor_id: string | null;
     }[];
     if (!tasks.length) return 0;
 
     // The thread each task came out of.
-    const { data: sources } = await supabaseAdmin
-      .from('emails')
-      .select('id, thread_id')
-      .in('id', tasks.map((t) => t.source_email_id));
+    const sourceIds = tasks.map((t) => t.source_email_id).filter((id): id is string => !!id);
+    const { data: sources } = sourceIds.length
+      ? await supabaseAdmin.from('emails').select('id, thread_id').in('id', sourceIds)
+      : { data: [] };
     const threadOf = new Map(
       ((sources ?? []) as { id: string; thread_id: string | null }[])
         .filter((e) => e.thread_id)
         .map((e) => [e.id, e.thread_id as string]),
     );
 
-    const threads = [...new Set([...threadOf.values()])];
-    if (!threads.length) return 0;
-
-    // Anything ingested on those threads since — a reply in, or another
-    // message in the conversation.
+    // Everything the studio has read since the oldest open task was raised —
+    // not only mail on those threads.
+    //
+    // A conversation does not stay in its thread. Somebody drops out of it
+    // and writes a fresh email about the same job a week later, and to a
+    // thread-scoped check that is silence: the task sat at Open and aged
+    // into overdue while the work was visibly moving. What identifies the
+    // conversation is the job and the supplier, not the thread id.
+    const oldest = tasks.reduce((min, t) => (t.created_at < min ? t.created_at : min), tasks[0].created_at);
     const { data: later } = await supabaseAdmin
       .from('emails')
-      .select('thread_id, received_at')
+      .select('thread_id, received_at, project_id, vendor_id')
       .eq('org_id', orgId)
-      .in('thread_id', threads);
+      .gte('received_at', oldest)
+      .order('received_at', { ascending: false })
+      .limit(1000);
+
     const lastInbound = new Map<string, string>();
-    for (const row of (later ?? []) as { thread_id: string | null; received_at: string | null }[]) {
-      if (!row.thread_id || !row.received_at) continue;
-      const seen = lastInbound.get(row.thread_id);
-      if (!seen || seen < row.received_at) lastInbound.set(row.thread_id, row.received_at);
+    /** Latest mail per supplier, and per supplier-on-a-job. */
+    const lastByVendor = new Map<string, string>();
+    const lastByVendorJob = new Map<string, string>();
+    const keep = (map: Map<string, string>, key: string, at: string) => {
+      const seen = map.get(key);
+      if (!seen || seen < at) map.set(key, at);
+    };
+    for (const row of (later ?? []) as {
+      thread_id: string | null; received_at: string | null; project_id: string | null; vendor_id: string | null;
+    }[]) {
+      if (!row.received_at) continue;
+      if (row.thread_id) keep(lastInbound, row.thread_id, row.received_at);
+      if (row.vendor_id) {
+        keep(lastByVendor, row.vendor_id, row.received_at);
+        if (row.project_id) keep(lastByVendorJob, `${row.vendor_id}|${row.project_id}`, row.received_at);
+      }
+    }
+
+    // The addresses each supplier is reached at, so "we wrote to them" can
+    // be recognised on a thread this system has never seen.
+    const { data: vendorRows } = await supabaseAdmin
+      .from('vendors')
+      .select('id, contacts')
+      .eq('org_id', orgId);
+    const vendorAddresses = new Map<string, string[]>();
+    for (const v of (vendorRows ?? []) as { id: string; contacts: { email?: string }[] | null }[]) {
+      const list = (Array.isArray(v.contacts) ? v.contacts : [])
+        .map((c) => (c.email ?? '').trim().toLowerCase())
+        .filter(Boolean);
+      if (list.length) vendorAddresses.set(v.id, list);
     }
 
     // And the half ingestion cannot see: the studio replying from Gmail,
     // which is the most direct evidence there is that someone picked the
     // task up.
     let sentOnThread = new Map<string, string>();
+    let sentToAddress = new Map<string, string>();
     try {
-      const oldest = tasks.reduce((min, t) => (t.created_at < min ? t.created_at : min), tasks[0].created_at);
       const days = Math.ceil((Date.now() - new Date(oldest).getTime()) / 86400_000) + 1;
       const userId = await orgSourceUserId(orgId);
       const gmail = userId ? await gmailFor(userId) : null;
-      if (gmail) sentOnThread = (await readSentMail(gmail, Math.min(days, 30))).byThread;
+      if (gmail) {
+        const sent = await readSentMail(gmail, Math.min(days, 30));
+        sentOnThread = sent.byThread;
+        sentToAddress = sent.byAddress;
+      }
     } catch (err) {
       console.error('[tasks] sent-mail check failed', (err as Error).message);
     }
 
-    const moving = tasks.filter((t) => {
-      const thread = threadOf.get(t.source_email_id);
-      if (!thread) return false;
-      const replied = sentOnThread.get(thread);
-      const arrived = lastInbound.get(thread);
-      return (!!replied && replied > t.created_at) || (!!arrived && arrived > t.created_at);
-    });
+    /**
+     * Why this task is moving, or null if nothing says it is.
+     *
+     * Three kinds of evidence, strongest first. Each one is deliberately
+     * narrow: "in progress" has to keep meaning something, so a busy job is
+     * not allowed to advance every task attached to it. The supplier is
+     * what ties the evidence to the work — mail about the same job from
+     * somebody unrelated proves nothing about this particular task.
+     */
+    const movedBy = (t: (typeof tasks)[number]): string | null => {
+      const after = (at: string | undefined) => !!at && at > t.created_at;
+
+      const thread = t.source_email_id ? threadOf.get(t.source_email_id) : undefined;
+      if (thread && (after(sentOnThread.get(thread)) || after(lastInbound.get(thread)))) {
+        return 'a message on its own thread';
+      }
+
+      if (!t.vendor_id) return null;
+
+      // The studio wrote to this supplier — on any thread, including one
+      // composed fresh. The most direct evidence there is that a person
+      // picked the task up, and the case a thread check cannot see at all.
+      const addresses = vendorAddresses.get(t.vendor_id) ?? [];
+      if (addresses.some((a) => after(sentToAddress.get(a)))) return 'the studio wrote to the supplier';
+
+      // The supplier wrote back. Tied to the job where the task names one,
+      // so an unrelated order with the same vendor does not count.
+      const key = t.project_id ? `${t.vendor_id}|${t.project_id}` : null;
+      if (key ? after(lastByVendorJob.get(key)) : after(lastByVendor.get(t.vendor_id))) {
+        return 'the supplier wrote about this job';
+      }
+
+      return null;
+    };
+
+    const moving = tasks
+      .map((t) => ({ task: t, why: movedBy(t) }))
+      .filter((m): m is { task: (typeof tasks)[number]; why: string } => m.why !== null);
     if (!moving.length) return 0;
 
     await supabaseAdmin
       .from('tasks')
       .update({ status: 'in_progress' })
-      .in('id', moving.map((t) => t.id));
+      .in('id', moving.map((m) => m.task.id));
 
     await supabaseAdmin.from('activity_log').insert({
       org_id: orgId,
       action: 'tasks.advanced',
       entity: 'tasks',
-      meta: { count: moving.length, titles: moving.slice(0, 5).map((t) => t.title) },
+      // What moved each one, so a status nobody set can be accounted for.
+      meta: {
+        count: moving.length,
+        moved: moving.slice(0, 8).map((m) => ({ title: m.task.title, why: m.why })),
+      },
     });
 
     return moving.length;
@@ -689,6 +761,72 @@ async function loadClosable(orgId: string, email: EmailFacts): Promise<ClosableT
 }
 
 /** "Acme Sales" from `"Acme Sales" <sales@acme.com>`; the address when there is no name. */
+/**
+ * Where a stored message's text lives, which depends on whether migration
+ * 0010 has been applied — before it, the body was tucked inside
+ * `extracted_json`. `readStoredText` reads either shape.
+ */
+async function bodyFieldNames(): Promise<string[]> {
+  return (await bodyColumnsReady()) ? ['body_text', 'links', 'extracted_json'] : ['extracted_json'];
+}
+
+/** How many earlier messages of a thread are worth the tokens. */
+const THREAD_CONTEXT = 4;
+
+/** How much of each one — enough to carry the ask, not the whole history. */
+const THREAD_CHARS = 1500;
+
+/**
+ * What was said before this message, oldest first.
+ *
+ * The work an email implies is usually not in the email. A thread opens with
+ * the ask and closes with "approved, go ahead" — and the closing message,
+ * read on its own, was all the task extractor ever saw. It could not name
+ * the job, the supplier or the work, so it raised nothing, or raised a task
+ * whose title was the word "Approved".
+ *
+ * Bounded on purpose: the last few messages carry the ask, and a long thread
+ * would otherwise cost more in tokens than the task is worth. Never throws —
+ * a task read from one message is worse than one read from the conversation,
+ * but far better than no task at all.
+ */
+async function loadThreadContext(
+  orgId: string,
+  threadId: string | null,
+  exceptEmailId: string,
+): Promise<{ from: string; date: string; text: string }[]> {
+  if (!supabaseAdmin || !threadId) return [];
+  try {
+    const { data } = await supabaseAdmin
+      .from('emails')
+      .select(`id, from_addr, subject, snippet, received_at, ${(await bodyFieldNames()).join(', ')}`)
+      .eq('org_id', orgId)
+      .eq('thread_id', threadId)
+      .neq('id', exceptEmailId)
+      .order('received_at', { ascending: false })
+      .limit(THREAD_CONTEXT);
+
+    // A column list built at runtime cannot be parsed by the typed client.
+    const rows = (data ?? []) as unknown as Record<string, unknown>[];
+    return rows
+      .reverse() // oldest first: a conversation only reads forwards
+      .map((row) => {
+        const text = readStoredText(row as Parameters<typeof readStoredText>[0]).body
+          ?? (row.snippet as string | null)
+          ?? '';
+        return {
+          from: (row.from_addr as string | null) ?? 'unknown',
+          date: ((row.received_at as string | null) ?? '').slice(0, 10) || 'undated',
+          text: text.trim().slice(0, THREAD_CHARS),
+        };
+      })
+      .filter((m) => m.text.length > 0);
+  } catch (err) {
+    console.error('[tasks] thread context unreadable:', (err as Error).message);
+    return [];
+  }
+}
+
 function senderName(from: string | null): string {
   const raw = (from ?? '').trim();
   const name = raw.replace(/<[^>]*>/, '').replace(/["']/g, '').trim();
@@ -886,12 +1024,19 @@ export async function createTaskFromEmail(
   const closable = email ? await loadClosable(orgId, facts) : [];
 
   const names = await loadStudioNames(orgId);
+  // The conversation, not just the message: see loadThreadContext.
+  const thread = await loadThreadContext(
+    orgId,
+    (email as { thread_id: string | null } | null)?.thread_id ?? parsed.threadId ?? null,
+    emailId,
+  );
   const extracted = await extractTask(parsed, { orgId }, {
     project: filedUnder?.name ?? null,
     client: filedUnder?.client_name ?? null,
     vendor: filed?.vendors?.name ?? null,
     names,
     openTasks: closable.map(({ ref, line }) => ({ ref, line })),
+    thread,
   });
   // Unusable JSON is not an answer — leave it to be asked again.
   if (!extracted) return false;

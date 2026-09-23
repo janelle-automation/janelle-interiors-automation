@@ -28,6 +28,10 @@ export interface PoView {
 export interface FollowUpView {
   id: string; type: 'vendor_silence' | 'client_approval_overdue' | 'date_slipping' | 'spec_gap';
   who: string; project: string; reason: string; age: string;
+  /** The address being nudged — a teammate's for the internal types. */
+  target: string | null;
+  /** Who owns the task this nudge is chasing, when it is chasing one. */
+  taskAssignee: string | null;
 }
 export interface VendorView {
   id: string; name: string; category: string;
@@ -241,6 +245,7 @@ export function usePurchaseOrders() {
 interface FollowUpRow {
   id: string; type: FollowUpView['type']; reason: string | null; created_at: string;
   target: string | null; projects: { name: string } | null; vendors: { name: string } | null;
+  task_id: string | null; tasks: { assigned_to: string | null } | null;
 }
 export function useFollowUps() {
   const q = useQuery({
@@ -251,6 +256,7 @@ export function useFollowUps() {
         id: r.id, type: r.type,
         who: r.vendors?.name ?? r.projects?.name ?? r.target ?? '—',
         project: r.projects?.name ?? '—', reason: r.reason ?? '', age: ageFrom(r.created_at),
+        target: r.target, taskAssignee: r.tasks?.assigned_to ?? null,
       }));
     },
   });
@@ -279,6 +285,12 @@ export interface TaskView {
   closedNote: string | null;
   /** Days between finishing and the due date — positive is early, negative late. */
   daysEarly: number | null;
+  /**
+   * When the CURRENT owner got it — migration 0016, null before it applies.
+   * Not created_at: a task handed to someone else is new to them, whatever
+   * the day it was raised.
+   */
+  assignedAt: string | null;
 }
 interface TaskRow {
   id: string; title: string; detail: string | null; kind: TaskKind; status: TaskStatus;
@@ -286,6 +298,8 @@ interface TaskRow {
   updated_at?: string | null;
   /** Migration 0015; absent before it is applied. */
   completed_at?: string | null; completion_note?: string | null;
+  /** Migration 0016; absent before it is applied. */
+  assigned_at?: string | null;
   source_email_id?: string | null;
   next_step?: string | null; seat?: Seat | null;
   projects: { name: string } | null; vendors: { name: string } | null;
@@ -331,6 +345,7 @@ export function useTasks() {
           completedAt,
           closedNote: r.status === 'done' ? r.completion_note ?? null : null,
           daysEarly: daysEarly(r.due_date, completedAt),
+          assignedAt: r.assigned_at ?? null,
         };
       });
     },
@@ -413,14 +428,39 @@ export interface NewTeamMember {
   /** True sends them a sign-in email; false just creates the account. */
   invite: boolean;
 }
+/** What an invite came back with — see the /team/invite route. */
+export interface AddedMember {
+  id: string;
+  email: string;
+  role: string;
+  /** False when the welcome email could not be sent; the password then matters. */
+  emailed?: boolean;
+  mailError?: string | null;
+  /** The generated password. Shown once so it can be handed over by hand. */
+  password?: string;
+}
 export function useAddTeamMember() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (v: NewTeamMember) =>
-      api<{ id: string }>(v.invite ? '/team/invite' : '/team', {
+      api<AddedMember>(v.invite ? '/team/invite' : '/team', {
         method: 'POST',
         body: JSON.stringify({ email: v.email, full_name: v.full_name, role: v.role }),
       }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['team'] }),
+  });
+}
+
+/**
+ * Send an existing teammate their sign-in details again.
+ *
+ * Sets a NEW password — an old one cannot be read back by anyone — so the
+ * screen warns before calling this.
+ */
+export function useSendInvite() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api<AddedMember>(`/team/${id}/invite`, { method: 'POST', body: '{}' }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['team'] }),
   });
 }
@@ -848,6 +888,29 @@ export function useFollowUpStatus() {
   });
 }
 
+/**
+ * Put a nudge down for a few days without killing it.
+ *
+ * Deliberately not a status change: the follow-up stays open, so the nightly
+ * engine still counts it as raised and does not put a second copy of it on
+ * the queue when the date comes back around. Needs migration 0017; without
+ * it the API ignores the snooze and only a note-less status change lands.
+ */
+export function useSnoozeFollowUp() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { id: string; days: number; note?: string }) =>
+      api(`/follow-ups/${v.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ snoozeDays: v.days, ...(v.note ? { note: v.note } : {}) }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['follow-ups'] });
+      qc.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+}
+
 /** Change a task's status, or hand it to someone else. */
 /** Raise tasks from email ingested before the tasks table existed. */
 export function useBackfillTasks() {
@@ -1096,6 +1159,10 @@ export interface DraftRow {
   body_preview: string | null;
   follow_up_id: string | null;
   created_at: string;
+  /** Who saved it by hand; null for one the reading pass wrote. */
+  created_by?: string | null;
+  /** Whose mailbox it answers — migration 0018, absent before it applies. */
+  owner_id?: string | null;
 }
 export function useDrafts() {
   const q = useQuery({ queryKey: ['drafts'], queryFn: () => api<DraftRow[]>('/drafts') });
@@ -1317,6 +1384,42 @@ export function useSetMediaModel() {
   return useMediaMutation((v: { kind: 'image' | 'video'; model: string }) =>
     api<MediaConfig>('/settings/media/model', { method: 'PUT', body: JSON.stringify(v) }),
   );
+}
+
+/**
+ * The chasing ladder — how long the studio waits before it says something.
+ *
+ * Read by the nightly engine, the digest and the task board; until now it
+ * could only be changed in the database.
+ */
+export type Sla = {
+  quote_response_days: number;
+  client_waiting_hours: number;
+  vendor_silence_days: number;
+  client_approval_days: number;
+  escalation_days: number;
+  task_reminder_days: number;
+  reminder_repeat_days: number;
+};
+
+export function useSla() {
+  return useQuery({
+    queryKey: ['sla'],
+    queryFn: () => api<Sla>('/settings/sla'),
+  });
+}
+
+export function useSaveSla() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: Partial<Sla>) =>
+      api<Sla>('/settings/sla', { method: 'PUT', body: JSON.stringify(patch) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sla'] });
+      // The board's due dates are computed from these.
+      qc.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
 }
 
 export function useIngestSettings() {

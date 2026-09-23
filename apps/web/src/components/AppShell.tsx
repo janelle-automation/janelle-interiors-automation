@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import { useFollowUps, useDrafts, ageFrom } from '../lib/queries';
 import { useAssistant } from '../context/AssistantContext';
 import { AssistantLauncher, AssistantPanel } from './AssistantPanel';
+import { TaskReminder } from './TaskReminder';
 import { ASSISTANT_NAME, ROLE_LABELS, canSupervise, type Resource } from '@janelle/shared';
 import {
   IconDashboard, IconProjects, IconVendors, IconInbox, IconDoc,
@@ -556,13 +557,28 @@ export function AppShell({ children }: { children: ReactNode }) {
         {/* Jenny's page takes the whole width: conversations, a chat and its
             tables need the room more than a reading measure does. */}
         <main
-          className={`mx-auto w-full flex-1 px-4 py-6 md:px-8 md:py-8 ${base === '/assistant' ? '' : 'max-w-7xl'}`}
+          // 1600px, not Tailwind's 7xl (1280).
+          //
+          // 1280 was chosen for a reading measure, but almost nothing here is
+          // prose: the task board is four columns, Vendors and Projects are
+          // wide tables, and the pages that DO have prose already hold it to
+          // `max-w-2xl` themselves. On a normal studio monitor the cap was
+          // throwing away about 80px down each side — the board got narrower
+          // columns so that empty margins could exist.
+          //
+          // Still capped, not removed: on an ultra-wide screen a table with
+          // no limit stretches until a row is impossible to follow across.
+          className={`mx-auto w-full flex-1 px-4 py-6 md:px-8 md:py-8 ${base === '/assistant' ? '' : 'max-w-[1600px]'}`}
         >
           {children}
         </main>
       </div>
 
       <AssistantPanel />
+
+      {/* Outside the main column so it is not affected by the page padding,
+          and last so it opens over everything the shell draws. */}
+      <TaskReminder />
     </div>
   );
 }
