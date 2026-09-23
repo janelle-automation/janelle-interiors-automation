@@ -10,7 +10,7 @@ import {
   type Resource,
   type UserRole,
 } from '@janelle/shared';
-import { PageHeading, Card, Pill, Switch } from '../components/ui';
+import { Page, PageHeading, Card, Pill, Switch } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import {
   usePermissionMatrix,
@@ -143,10 +143,9 @@ export default function Permissions() {
   const error = (setPermission.error ?? resetPermission.error) as Error | undefined;
 
   return (
-    <>
+    <Page>
       <PageHeading
         title="Permissions"
-        sub="Which type of user may do what, in every module. Change it here — no deploy needed."
       />
 
       {matrix.isLoading && (
@@ -154,7 +153,7 @@ export default function Permissions() {
       )}
 
       {!matrix.isLoading && !storageReady && (
-        <Card className="mb-6 border-warn/40 p-5">
+        <Card className="border-warn/40 p-5">
           <div className="text-[13.5px] font-semibold text-ink">
             Showing the studio defaults — the database isn’t reachable
           </div>
@@ -166,7 +165,7 @@ export default function Permissions() {
       )}
 
       {!matrix.isLoading && storageReady && !canEdit && (
-        <Card className="mb-6 p-5 text-[13px] text-ink-soft">
+        <Card className="p-5 text-[13px] text-ink-soft">
           These are the rules you work under. Only a principal can change them.
         </Card>
       )}
@@ -341,6 +340,6 @@ export default function Permissions() {
           </Card>
         </div>
       </div>
-    </>
+    </Page>
   );
 }

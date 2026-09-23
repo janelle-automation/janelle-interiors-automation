@@ -22,12 +22,14 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useProject, type AssistantReply, type ProposedAction, type SavedProposal } from '../lib/queries';
 import {
   bestHearing,
+  isUnheard,
   listen,
   soundsLikeEcho,
   speak,
   speechInputSupported,
   speechOutputSupported,
   stopSpeaking,
+  type MicLevel,
   type StopListening,
 } from '../lib/speech';
 
@@ -197,6 +199,8 @@ interface AssistantCtx {
   setSpeakReplies: (on: boolean) => void;
   micError: string | null;
   setMicError: (message: string | null) => void;
+  /** What the microphone is hearing while listening; null when it is not. */
+  micLevel: MicLevel | null;
   canListen: boolean;
   canSpeak: boolean;
 }
@@ -523,6 +527,10 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const [speakReplies, setSpeakReplies] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
   const [interim, setInterim] = useState('');
+  // What the microphone is picking up right now, so the orb moves with the
+  // voice rather than with a state flag — and a voice too quiet to be
+  // transcribed is visible as it happens.
+  const [micLevel, setMicLevel] = useState<MicLevel | null>(null);
 
   // Names a recogniser has never heard of — Denish, Casa Elar, Nordhaus —
   // used to pick the hearing that contains them. Rarely changes.
@@ -1172,6 +1180,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     let heard = false;
     let echo = false;
     stopListeningRef.current = listen({
+      onLevel: setMicLevel,
       onInterim: (words) => setInterim(words),
       onResult: (hearings) => {
         const ranked = bestHearing(hearings, vocabularyRef.current);
@@ -1186,12 +1195,17 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         send(ranked[0].transcript, { alternatives: ranked.map((h) => h.transcript) });
       },
       onError: (error) => {
-        // "I did not catch that" is silence, which the end handler counts.
-        if (error !== 'I did not catch that.') endHandsFree(error);
+        // Not being heard is not a fault to stop for — the end handler
+        // counts it and listens again. But it is still worth saying, because
+        // "you are coming through very faintly" is the difference between
+        // someone moving closer and someone deciding voice does not work.
+        if (isUnheard(error)) setMicError(error);
+        else endHandsFree(error);
       },
       onEnd: () => {
         stopListeningRef.current = null;
         setInterim('');
+        setMicLevel(null);
         if (!handsFreeRef.current || heard) return;
         // An echo is not silence: listen again without counting it.
         if (!echo) silencesRef.current += 1;
@@ -1319,6 +1333,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       speakReplies,
       setSpeakReplies,
       micError,
+      micLevel,
       setMicError,
       canListen,
       canSpeak,
@@ -1328,7 +1343,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       conversations, openConversation, renameConversation, pinConversation, deleteConversation, downloadConversation,
       prefill, setPrefill, attachRequest, requestAttach, markDone, markDismissed, acknowledge,
       briefingLoading, open, setOpen, focusRequest, requestFocus, lookingAt, handsFree,
-      setHandsFree, voice, skipSpeaking, doneTalking, speakReplies, micError, canListen, canSpeak,
+      setHandsFree, voice, skipSpeaking, doneTalking, speakReplies, micError, micLevel, canListen, canSpeak,
     ],
   );
 

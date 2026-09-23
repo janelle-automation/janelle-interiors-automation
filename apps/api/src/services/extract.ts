@@ -27,6 +27,14 @@ export interface EmailExtraction {
   /** True when project_hint was copied from the studio's own project list. */
   project_is_existing?: boolean;
   /**
+   * The email is plainly about one specific job the studio does not have yet —
+   * a client or prospect writing about their own property. The signal that
+   * lets ordinary mail open a project, where `confidence` (about the whole
+   * reading, class included) was too vague to: a clear new-client request
+   * scored 0.3 because the model was unsure whether it was a quote.
+   */
+  new_job?: boolean;
+  /**
    * The proper name of a listed project whose listed name is poor ("Lemon's",
    * "Carissa 90826/Oak Kit"), when the email or its attachments show it.
    */
@@ -91,10 +99,18 @@ actually wrote or asked the question — is inside the quoted/forwarded text, no
 Read the forwarded headers ("From:", "To:", "Cc:") in the body to find who should receive the reply.
 
 Return JSON with exactly these keys:
-- "class": one of "vendor_quote", "order_confirmation", "client_approval", "houzz_notification", "general"
-- "confidence": number 0..1
-- "project_hint": the project's name, following PROJECT NAMES below, else null
+- "class": one of "vendor_quote" (a quote, estimate or pricing SENT BY a supplier), "order_confirmation" (a
+  supplier confirming an order), "client_approval" (a client approving or deciding something),
+  "houzz_notification" (an automated Houzz notice), "general" (everything else — including a client or
+  prospect ASKING the studio for a quote, a budget or design work: that is a request, not a vendor quote)
+- "confidence": number 0..1 — how sure you are of this reading as a whole
+- "project_hint": the project's name, following PROJECT NAMES below, else null. If your summary names the
+  job ("…for Meridian Ranch"), that job is project_hint: never leave it null while the summary names it.
 - "project_is_existing": true if project_hint was copied from the studio's project list, else false
+- "new_job": true when the email is plainly about one specific job that is NOT in the studio's list — a client
+  or prospect writing about their own property or project ("a quote for my Meridian ranch", "our new beach
+  house in Carpinteria"). project_hint is then that job's name and client_name who it is for. False for
+  anything else: a listed job, a supplier's own business, general studio mail, a passing mention.
 - "better_project_name": see BETTER NAMES below, else null
 - "vendor_hint": the supplier, manufacturer, workroom, fabricator, installer or trade the email concerns —
   exactly as listed if it is a known vendor — else null
@@ -171,8 +187,42 @@ export async function classifyEmail(
     email.body || email.snippet,
     attachmentsBlock(attachments),
   ].join('\n');
-  return extractJson<EmailExtraction>(EMAIL_SYSTEM, user, { feature: 'email.extract', ...ctx });
+  const parsed = await extractJson<EmailExtraction>(EMAIL_SYSTEM, user, { feature: 'email.extract', ...ctx });
+  return parsed ? withEmailJobFromSummary(parsed) : null;
 }
+
+/**
+ * The job an email's own summary names, when the project field came back empty.
+ *
+ * The documents' fix, for mail. Asked for a quote "for my Meridian ranch",
+ * the model wrote "…for Meridian Ranch" in its summary and still left
+ * project_hint empty, on every read — so a new client's request filed under
+ * nothing and no project was ever opened for it. Mail is written casually,
+ * so the property word may be lower case ("Meridian ranch"); the name
+ * before it must still be a proper one.
+ */
+export function withEmailJobFromSummary(email: EmailExtraction): EmailExtraction {
+  if (email.project_hint) return email;
+  const found = (email.summary ?? '').match(JOB_IN_SENTENCE)?.[1];
+  if (!found) return email;
+  const job = found
+    .replace(/^(the|a|an|this|its|their|his|her|my|our)\s+/i, '')
+    .trim()
+    // "Meridian ranch" → "Meridian Ranch": the studio files jobs capitalised.
+    .replace(/(\s)(\p{Ll})(\S*)$/u, (_m, space: string, c: string, rest: string) => space + c.toUpperCase() + rest);
+  if (job.split(/\s+/).length < 2) return email;
+  return { ...email, project_hint: job };
+}
+
+/** JOB_IN_TEXT's property words, either case: mail says "my Meridian ranch". */
+const JOB_IN_SENTENCE = new RegExp(
+  String.raw`\b((?:[A-Z][\w'’&.-]*\s+){1,4}(?:` +
+    ['Residence', 'House', 'Home', 'Hotel', 'Inn', 'Resort', 'Suite', 'Loft', 'Villa', 'Estate', 'Ranch', 'Lodge',
+     'Cottage', 'Apartment', 'Condo', 'Penthouse', 'Courtyard']
+      .map((w) => `[${w[0]}${w[0].toLowerCase()}]${w.slice(1)}`)
+      .join('|') +
+    String.raw`))\b`,
+);
 
 export interface TaskExtraction {
   /** False for anything that is merely informational — the important gate. */
@@ -285,6 +335,17 @@ export interface TaskFiling {
    * supplier — each one line under its ref ("T1"). Only these can be closed.
    */
   openTasks?: { ref: string; line: string }[];
+  /**
+   * What was said earlier in this thread, oldest first.
+   *
+   * A task was read off one message in isolation, and the message that
+   * arrives is rarely the one that explains the work: the first note asks
+   * for "a quote on the banquette fabric for Lemon", and the reply three
+   * days later says only "Approved — go ahead". Read alone, that reply is
+   * unintelligible and raised either nothing or a task called "Approved".
+   * With the conversation, it is the fabric order for Lemon Residence.
+   */
+  thread?: { from: string; date: string; text: string }[];
 }
 
 /**
@@ -309,6 +370,15 @@ export async function extractTask(
           '',
           'OPEN TASKS this email might have finished (for "completes"; only these refs can be used):',
           ...filing.openTasks.map((t) => `[${t.ref}] ${t.line}`),
+        ]
+      : []),
+    ...(filing.thread?.length
+      ? [
+          '',
+          'EARLIER IN THIS CONVERSATION (oldest first) — background only. Use it to understand what the',
+          'message below is about, who asked for what, and which job it concerns. Do NOT raise a task for',
+          'work that was already asked for and answered here; the task, if any, comes from the message below.',
+          ...filing.thread.map((m) => `\n--- ${m.date} · from ${m.from} ---\n${m.text}`),
         ]
       : []),
     '',

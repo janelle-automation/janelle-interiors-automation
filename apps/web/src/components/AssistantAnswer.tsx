@@ -94,6 +94,8 @@ function ItemRow({ item }: { item: AssistantItem }) {
   const external = Boolean(href && /^https?:/i.test(href));
   const label = KIND_LABELS[item.kind];
   const facts = (item.fields ?? []).filter((f) => f.value !== '—');
+  /** Longer than a date or a status, so it is prose and may be broken. */
+  const LONG_FACT = 28;
 
   return (
     <Target
@@ -114,14 +116,24 @@ function ItemRow({ item }: { item: AssistantItem }) {
           // the facts, so as inline spans there was nowhere to break and a
           // long row ran out of the bubble.
           <span className="mt-0.5 flex flex-wrap text-[12px] text-ink-soft">
-            {/* Each fact holds together, so a narrow panel breaks the line
-                between facts — never inside one, as in "Due Sep / 10". */}
-            {facts.map((f, i) => (
-              <span key={f.label} className="whitespace-nowrap">
-                {i > 0 && <span className="px-1.5 text-ink-faint">·</span>}
-                <span className="text-ink-faint">{f.label}</span> {f.value}
-              </span>
-            ))}
+            {facts.map((f, i) => {
+              /**
+               * A short fact holds together; a long one has to break.
+               *
+               * Keeping every fact on one line is right for "Due Sep 18" —
+               * broken, it reads as "Due Sep / 18". But a next step is a
+               * whole sentence, and an unbreakable sentence cannot wrap, so
+               * it pushed the answer card wider than the panel holding it
+               * and ran out past its own border. Length decides which it is.
+               */
+              const short = f.value.length <= LONG_FACT;
+              return (
+                <span key={f.label} className={short ? 'whitespace-nowrap' : 'min-w-0 break-words'}>
+                  {i > 0 && <span className="px-1.5 text-ink-faint">·</span>}
+                  <span className="whitespace-nowrap text-ink-faint">{f.label}</span> {f.value}
+                </span>
+              );
+            })}
           </span>
         )}
         {/* The URL is shown as well as linked: a person often wants to send

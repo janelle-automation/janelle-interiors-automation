@@ -4,6 +4,22 @@ import { hasSeatColumn } from '../lib/columns.js';
 import { orgSourceUserId } from '../lib/tokens.js';
 import { generate, isAiReady } from './anthropic.js';
 import { gmailFor, readSentMail } from './gmail.js';
+import { isStudioAddress } from '../lib/studioTeam.js';
+
+/**
+ * The nudges that are chasing a person for a response, and are therefore
+ * answered by one arriving.
+ *
+ * The internal ones are not here on purpose: a reminder that Joanna's task
+ * is overdue is not settled by Joanna sending an email, only by the work
+ * being done — and `causeIsGone` already closes those with their task.
+ */
+const REPLYABLE_TYPES: FollowUpType[] = [
+  'vendor_silence',
+  'date_slipping',
+  'quote_overdue',
+  'client_approval_overdue',
+];
 
 export interface FollowUpResult {
   ok: boolean;
@@ -194,6 +210,46 @@ async function causeIsGone(orgId: string, rows: OpenFollowUp[]): Promise<Set<str
           : !['received', 'cancelled'].includes(p.status) && !!p.eta && p.eta < today,
       );
       if (!stillWaiting) done.add(r.id);
+    }
+  }
+
+  // They answered.
+  //
+  // Everything above asks whether the STATE has changed — the order landed,
+  // the gap was filled, the stage moved on. None of that happens the moment
+  // a supplier writes back, so a vendor who replied on Tuesday with "the
+  // quote is coming Friday" kept being chased for silence all week, and the
+  // studio learned to ignore the queue. A reply is the answer the nudge was
+  // asking for, whatever the paperwork says afterwards.
+  //
+  // Inbound only, and only after the nudge was raised: the studio's own
+  // outgoing mail is not the vendor answering, and mail that arrived before
+  // the nudge is what the nudge was raised in spite of.
+  const chasing = rows.filter(
+    (r) => REPLYABLE_TYPES.includes(r.type) && (r.vendor_id || r.project_id),
+  );
+  for (const r of chasing) {
+    if (done.has(r.id)) continue;
+    try {
+      let q = supabaseAdmin
+        .from('emails')
+        .select('id, from_addr')
+        .eq('org_id', orgId)
+        .gt('received_at', r.created_at)
+        .limit(20);
+      // A vendor nudge is answered by that vendor; a client one by anybody
+      // writing about that job, since the approval can come from any of them.
+      if (r.vendor_id) q = q.eq('vendor_id', r.vendor_id);
+      else if (r.project_id) q = q.eq('project_id', r.project_id);
+      const { data: replies } = await q;
+      const answered = ((replies ?? []) as { from_addr: string | null }[]).some(
+        (e) => e.from_addr && !isStudioAddress(e.from_addr),
+      );
+      if (answered) done.add(r.id);
+    } catch (err) {
+      // Never let this turn a working scan into a failed one: the worst case
+      // is a nudge that stays open one more night.
+      console.error('[followups] reply check failed:', (err as Error).message);
     }
   }
 

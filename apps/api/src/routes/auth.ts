@@ -7,6 +7,7 @@ import { consentUrl, oauthClient, servicesGranted, scopesFor, type GoogleService
 import { decrypt } from '../lib/crypto.js';
 import { encrypt } from '../lib/crypto.js';
 import { supabaseAdmin } from '../lib/supabase.js';
+import { runIngest } from '../services/ingest.js';
 
 export const authRouter = Router();
 
@@ -123,6 +124,23 @@ authRouter.get(
       entity_id: userId,
       meta: { service, ...servicesGranted([...granted].join(' ')) },
     });
+
+    // Read their last thirty days straight away, rather than leaving them
+    // with an empty system until the half-hourly scheduler next comes round.
+    //
+    // Deliberately not awaited: a first sync is minutes of Gmail and Claude
+    // work, and this request is an OAuth redirect the browser is holding
+    // open. It starts here and carries on after the person lands back in
+    // Settings; the watermark makes it resumable if it is cut short, and
+    // only mail overlapping the studio's own correspondence is fetched.
+    if (servicesGranted([...granted].join(' ')).gmail) {
+      void runIngest(profile.org_id, { onlyUserId: userId, budgetMs: 45_000 })
+        .then((r) => {
+          if (r.ok) console.log(`[auth] first sync for ${userId}: ${r.emails} email(s), ${r.tasks} task(s)`);
+          else console.warn(`[auth] first sync for ${userId} did not run: ${r.reason}`);
+        })
+        .catch((err) => console.error('[auth] first sync failed:', (err as Error).message));
+    }
 
     res.redirect(`${webApp}/settings?google=connected&service=${service}`);
   }),

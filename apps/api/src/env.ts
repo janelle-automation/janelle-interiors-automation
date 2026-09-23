@@ -50,6 +50,19 @@ export const env = {
     scopes: optional('GOOGLE_SCOPES').split(' ').filter(Boolean),
   },
 
+  /**
+   * Who else hears about a new teammate.
+   *
+   * The studio wants the principal copied so she knows who has been let in,
+   * and the developer blind-copied while the system is being built. Both are
+   * configurable rather than written into the code: the second one in
+   * particular should be removable without a deploy.
+   */
+  invite: {
+    cc: optional('INVITE_CC', 'janelle@janelleinteriors.com'),
+    bcc: optional('INVITE_BCC', 'dfaldu387@gmail.com'),
+  },
+
   anthropic: {
     apiKey: optional('ANTHROPIC_API_KEY'),
     model: optional('ANTHROPIC_MODEL', 'claude-opus-5'),

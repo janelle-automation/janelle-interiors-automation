@@ -522,6 +522,56 @@ export async function promoteDocument(
   return Boolean(poId);
 }
 
+/**
+ * One conversation, one job.
+ *
+ * The first message of a thread is often the only one that names the job
+ * ("a quote for my Meridian ranch"); the replies say "Approved, please
+ * proceed" and name nothing. Each was filed on its own words, so the
+ * approval landed under no project — and a project opened by a later message
+ * left the earlier ones, and their tasks, behind.
+ *
+ * With a project: every unfiled message in the thread, and the tasks those
+ * messages raised, are filed under it. Without one: the email takes the
+ * project the thread is already filed under, if exactly one. Returns the
+ * project this email ends up on. Never throws.
+ */
+async function fileThread(orgId: string, emailId: string, projectId: string | null): Promise<string | null> {
+  if (!supabaseAdmin) return projectId;
+  try {
+    const { data: me } = await supabaseAdmin.from('emails').select('thread_id').eq('id', emailId).maybeSingle();
+    const thread = (me as { thread_id: string | null } | null)?.thread_id;
+    if (!thread) return projectId;
+
+    const { data: rows } = await supabaseAdmin
+      .from('emails')
+      .select('id, project_id')
+      .eq('org_id', orgId)
+      .eq('thread_id', thread);
+    const siblings = ((rows ?? []) as { id: string; project_id: string | null }[]).filter((r) => r.id !== emailId);
+
+    if (!projectId) {
+      // A thread split across two jobs is a question for a person, not a guess.
+      const placed = [...new Set(siblings.map((r) => r.project_id).filter((p): p is string => !!p))];
+      return placed.length === 1 ? placed[0] : null;
+    }
+
+    const unfiled = siblings.filter((r) => !r.project_id).map((r) => r.id);
+    if (unfiled.length) {
+      await supabaseAdmin.from('emails').update({ project_id: projectId }).in('id', unfiled).is('project_id', null);
+    }
+    await supabaseAdmin
+      .from('tasks')
+      .update({ project_id: projectId })
+      .in('source_email_id', [emailId, ...unfiled])
+      .is('project_id', null);
+    return projectId;
+  } catch (err) {
+    console.error('[promote] filing the thread failed:', (err as Error).message);
+    return projectId;
+  }
+}
+
 /** Create/link a vendor and project from one classified email. */
 export async function promoteEmail(
   orgId: string,
@@ -536,6 +586,7 @@ export async function promoteEmail(
       vendor_contact_email?: string | null;
       project_hint?: string | null;
       project_is_existing?: boolean | null;
+      new_job?: boolean | null;
       better_project_name?: string | null;
       client_name?: string | null;
       target_date?: string | null;
@@ -574,16 +625,24 @@ export async function promoteEmail(
   // email for correspondence that was never about a job in the first place.
   //
   // General mail opens a project only when it is plainly a new client job: the
-  // model is sure, says the job is not one on the list, names who it is for,
-  // and the name is a proper one ("Casa Elar Primary Suite", not "Hardware").
+  // model says it is one and not a job on the list, names who it is for, and
+  // the name is a proper one ("Casa Elar Primary Suite", not "Hardware").
+  //
+  // "Plainly" used to be read off `confidence` alone, which is about the whole
+  // reading — class included — and so a client asking for a quote "for my
+  // Meridian ranch" scored 0.3 for being unsure it was a quote, and no
+  // project was ever opened for it. `new_job` asks the question itself.
   const hint = namesAProject(ex.project_hint, ex.vendor_hint) ? ex.project_hint : null;
   const clientOk = Boolean(ex.client_name && !isStudioName(ex.client_name) && !isSoftwareService(ex.client_name));
   const properJob =
-    ex.project_is_existing === false && confidence >= 0.7 && clientOk && nameQuality(cleanProjectName(hint ?? '')) >= 1;
+    ex.project_is_existing !== true &&
+    (ex.new_job === true || confidence >= 0.7) &&
+    clientOk &&
+    nameQuality(cleanProjectName(hint ?? '')) >= 1;
   if (email.project_id) {
     await improveProjectById(orgId, email.project_id, { betterName: ex.better_project_name, client: ex.client_name, target: ex.target_date });
   }
-  const projectId =
+  const named =
     email.project_id ??
     (await upsertProject(orgId, hint, {
       client: ex.client_name,
@@ -591,6 +650,10 @@ export async function promoteEmail(
       betterName: ex.better_project_name,
       create: orderish ? confidence >= MIN_PROJECT_CONFIDENCE : properJob,
     }));
+  // The conversation is the job: a reply that names nothing belongs where its
+  // thread already is, and once any message places the thread, the messages
+  // before it — and the tasks they raised — go there too.
+  const projectId = await fileThread(orgId, email.id, named);
   if (vendorId !== email.vendor_id || projectId !== email.project_id) {
     await supabaseAdmin.from('emails').update({ vendor_id: vendorId, project_id: projectId }).eq('id', email.id);
   }

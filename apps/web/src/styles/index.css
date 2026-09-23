@@ -133,6 +133,59 @@ table,
   .input-sm {
     @apply px-2 py-1 text-[11.5px];
   }
+
+  /*
+   * A control that is quiet until it is wanted.
+   *
+   * Owner and due date are editable on the card, but they are not what the
+   * card is FOR — the title is. As boxed inputs they were the heaviest thing
+   * on every card: two bordered fields, full width, in a colour the eye goes
+   * to first. Here they carry no chrome at rest and earn it on hover, focus
+   * or keyboard, so the card reads title-first and stays just as editable.
+   */
+  .control-quiet {
+    @apply focusable w-full min-w-0 truncate rounded-md border border-transparent bg-transparent px-1.5 py-1 text-[11.5px] text-ink-soft transition-colors;
+  }
+  .control-quiet:hover {
+    @apply border-line bg-sunk text-ink;
+  }
+  .control-quiet:focus {
+    @apply border-brass bg-surface text-ink;
+  }
+}
+
+/* The native chevron is drawn by the platform and cannot be themed, so it is
+   removed and re-drawn as an SVG sibling that inherits our colours. */
+select.control-quiet {
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+/* Chrome draws its own calendar button. Dimming it at rest keeps the card
+   calm; `color-scheme` (set per theme above) already flips it for dark. */
+input[type='date'].control-quiet::-webkit-calendar-picker-indicator {
+  opacity: 0.4;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+input[type='date'].control-quiet:hover::-webkit-calendar-picker-indicator,
+input[type='date'].control-quiet:focus::-webkit-calendar-picker-indicator {
+  opacity: 0.9;
+}
+
+/* An empty date reads as a prompt rather than as a blank dd-mm-yyyy mask. */
+input[type='date'].control-quiet:not(:hover):not(:focus):invalid {
+  color: rgb(var(--warn));
+}
+
+/* Board cards lift slightly under the pointer — enough to say "this is a
+   thing you can pick up", which is exactly what a draggable card is. */
+.board-card {
+  transition: transform 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease;
+}
+.board-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px -6px rgb(0 0 0 / 0.25);
 }
 
 /* Floating sidebar collapse toggle: nudges on hover, springs on click */
@@ -336,4 +389,13 @@ table,
   html[data-assistant-docked='true'] .dock-aware {
     right: 440px;
   }
+}
+
+/* A job that runs for minutes: the gear turns slowly rather than spinning
+   like a loading indicator, which would read as "the page is stuck". */
+.animate-spin-slow {
+  animation: spin 2.4s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }

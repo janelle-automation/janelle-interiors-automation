@@ -1,8 +1,11 @@
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { ASSISTANT_NAME } from '@janelle/shared';
-import { PageHeading, Card, Pill, Switch } from '../components/ui';
+import { Page, PageHeading, Card, Pill, PasswordInput, Switch } from '../components/ui';
 import { useTheme } from '../context/ThemeContext';
+import { useAuth } from '../context/AuthContext';
+import { supabase } from '../lib/supabase';
+import { MIN_PASSWORD } from './ResetPassword';
 import {
   useMe,
   useConnectGoogle,
@@ -21,10 +24,208 @@ import {
   useRevokeUsageLink,
   useRotateUsageLink,
   useUsageLink,
+  useSla,
+  useSaveSla,
   type GoogleService,
+  type Sla,
 } from '../lib/queries';
 
 const SERVICE_LABEL: Record<GoogleService | 'all', string> = { gmail: 'Gmail', drive: 'Google Drive', all: 'Google' };
+
+/**
+ * How long the studio waits before it says something.
+ *
+ * Written the way the studio talks about the wait rather than as field
+ * names: someone tuning this is answering "we chase too early", not editing
+ * `vendor_silence_days`.
+ */
+const SLA_DIALS: { key: keyof Sla; label: string; unit: string; hint: string; min: number; max: number }[] = [
+  { key: 'vendor_silence_days', label: 'Chase a silent vendor after', unit: 'days', min: 1, max: 30,
+    hint: 'An order placed but not confirmed this long.' },
+  { key: 'quote_response_days', label: 'A quote is late after', unit: 'days', min: 1, max: 30,
+    hint: 'Past this, the client gets an update whether or not the vendor replied.' },
+  { key: 'client_approval_days', label: 'Chase a client for approval after', unit: 'days', min: 1, max: 60,
+    hint: 'A project parked in the approval stage this long.' },
+  { key: 'client_waiting_hours', label: 'A client left waiting is flagged after', unit: 'hours', min: 1, max: 336,
+    hint: 'Nudges whoever owns the reply, not the client.' },
+  { key: 'task_reminder_days', label: 'Remind an owner their task is late after', unit: 'days', min: 0, max: 30,
+    hint: 'Zero nudges on the due date itself.' },
+  { key: 'reminder_repeat_days', label: 'Repeat that reminder every', unit: 'days', min: 1, max: 30,
+    hint: 'A cadence rather than a nightly repeat of the same nudge.' },
+  { key: 'escalation_days', label: 'Escalate to the principal after', unit: 'days', min: 1, max: 30,
+    hint: 'A reminded task still open this long goes up.' },
+];
+
+function ChasingCard() {
+  const { data: sla, isLoading } = useSla();
+  const save = useSaveSla();
+  // Only what has actually been changed is sent, so two people tuning
+  // different dials do not overwrite each other's.
+  const [draft, setDraft] = useState<Partial<Sla>>({});
+
+  const value = (key: keyof Sla): number | '' => {
+    const pending = draft[key];
+    if (pending !== undefined) return pending;
+    return sla ? sla[key] : '';
+  };
+  const dirty = Object.keys(draft).length > 0;
+
+  return (
+    <Card className="p-6 lg:col-span-2">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-[16px] font-semibold text-ink">When the studio chases</h2>
+          <p className="mt-1 max-w-2xl text-[13.5px] text-ink-soft">
+            When a nudge is drafted for review. Nothing is ever sent automatically.
+          </p>
+        </div>
+        {dirty && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => save.mutate(draft, { onSuccess: () => setDraft({}) })}
+              disabled={save.isPending}
+              className="btn-primary btn-sm"
+            >
+              {save.isPending ? 'Saving…' : 'Save'}
+            </button>
+            <button onClick={() => setDraft({})} disabled={save.isPending} className="btn-ghost btn-sm">
+              Cancel
+            </button>
+          </div>
+        )}
+      </div>
+
+      {isLoading && <p className="mt-5 text-[13px] text-ink-faint">Loading…</p>}
+      {save.isError && <p className="mt-3 text-[12.5px] text-crit">{(save.error as Error).message}</p>}
+
+      {!isLoading && (
+        <div className="mt-5 grid gap-4 md:grid-cols-2">
+          {SLA_DIALS.map((d) => (
+            <label key={d.key} className="flex flex-col gap-1">
+              <span className="text-[13px] font-medium text-ink">{d.label}</span>
+              <span className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={d.min}
+                  max={d.max}
+                  step={1}
+                  value={value(d.key)}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setDraft((f) => ({ ...f, [d.key]: next === '' ? d.min : Number(next) }));
+                  }}
+                  className="input w-24 tabular-nums"
+                />
+                <span className="text-[12.5px] text-ink-soft">{d.unit}</span>
+              </span>
+              <span className="text-[11.5px] text-ink-faint">{d.hint}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/**
+ * Change the password, from inside the app.
+ *
+ * The current one is asked for and checked, which Supabase does not require
+ * — `updateUser` will change the password of whoever holds the session. So
+ * a laptop left open, or a stolen token, would be enough to take the
+ * account away from its owner. Re-authenticating first makes the person at
+ * the keyboard prove they are the person whose account it is.
+ */
+function PasswordCard() {
+  const { user } = useAuth();
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ text: string; tone: 'good' | 'crit' } | null>(null);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!supabase || !user?.email) return;
+    if (next.length < MIN_PASSWORD) return setMsg({ text: `Use at least ${MIN_PASSWORD} characters.`, tone: 'crit' });
+    if (next !== confirm) return setMsg({ text: 'The two new passwords do not match.', tone: 'crit' });
+    if (next === current) return setMsg({ text: 'That is already your password.', tone: 'crit' });
+
+    setBusy(true);
+    setMsg(null);
+    try {
+      // Proves who is at the keyboard. On success this also refreshes the
+      // session, which is harmless — it is the same account either way.
+      const { error: wrong } = await supabase.auth.signInWithPassword({ email: user.email, password: current });
+      if (wrong) throw new Error('That is not your current password.');
+
+      const { error: failed } = await supabase.auth.updateUser({ password: next });
+      if (failed) throw failed;
+
+      // Everywhere else is signed out — a password change should end any
+      // session the person did not know about.
+      try {
+        await supabase.auth.signOut({ scope: 'others' });
+      } catch {
+        /* the new password still stands */
+      }
+
+      setCurrent('');
+      setNext('');
+      setConfirm('');
+      setMsg({ text: 'Password changed. Any other device has been signed out.', tone: 'good' });
+    } catch (err) {
+      setMsg({ text: (err as Error).message, tone: 'crit' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card className="p-6">
+      <h2 className="text-[16px] font-semibold text-ink">Password</h2>
+      <p className="mt-1 text-[13.5px] text-ink-soft">
+        {user?.email ? `Signed in as ${user.email}.` : 'Change the password you sign in with.'}
+      </p>
+
+      <form onSubmit={submit} className="mt-4 max-w-sm space-y-3">
+        <PasswordInput
+          required
+          placeholder="Current password"
+          value={current}
+          onChange={(e) => setCurrent(e.target.value)}
+          autoComplete="current-password"
+        />
+        <PasswordInput
+          required
+          minLength={MIN_PASSWORD}
+          placeholder="New password"
+          value={next}
+          onChange={(e) => setNext(e.target.value)}
+          autoComplete="new-password"
+        />
+        <PasswordInput
+          required
+          minLength={MIN_PASSWORD}
+          placeholder="Repeat the new password"
+          value={confirm}
+          onChange={(e) => setConfirm(e.target.value)}
+          autoComplete="new-password"
+        />
+
+        {msg && (
+          <p className={`rounded-lg px-3 py-2 text-[12.5px] ${msg.tone === 'crit' ? 'bg-crit/10 text-crit' : 'bg-good/10 text-good'}`}>
+            {msg.text}
+          </p>
+        )}
+
+        <button type="submit" disabled={busy} className="btn-primary btn-sm">
+          {busy ? 'Changing…' : 'Change password'}
+        </button>
+      </form>
+    </Card>
+  );
+}
 
 function googleFlash(): { text: string; tone: 'good' | 'crit' } | null {
   const q = new URLSearchParams(window.location.search);
@@ -259,11 +460,12 @@ function AiSetupCard() {
 
             <div className="mt-2 flex flex-wrap items-center gap-2">
 
-              <input
+              <PasswordInput
 
                 id="ai-key"
 
-                type="password"
+                label="key"
+                wrapperClassName="min-w-0 flex-1"
 
                 autoComplete="off"
 
@@ -275,7 +477,7 @@ function AiSetupCard() {
 
                 placeholder={data.configured ? 'Paste a new key to replace it' : 'sk-ant-…'}
 
-                className="input min-w-0 flex-1"
+                className="w-full"
 
               />
 
@@ -419,15 +621,16 @@ function MediaSetupCard() {
               </p>
             )}
             <div className="mt-2 flex flex-wrap items-center gap-2">
-              <input
+              <PasswordInput
                 id="media-key"
-                type="password"
+                label="key"
+                wrapperClassName="min-w-0 flex-1"
                 autoComplete="off"
                 spellCheck={false}
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 placeholder={data.configured ? 'Paste a new key to replace it' : 'xai-…'}
-                className="input min-w-0 flex-1"
+                className="w-full"
               />
               <button
                 className="btn-primary btn-sm"
@@ -689,12 +892,12 @@ export default function Settings() {
   const overall = gmail && drive ? 'Fully connected' : anyConnected ? 'Partially connected' : 'Not connected';
 
   return (
-    <>
-      <PageHeading title="Settings" sub="Integrations, appearance, team and studio rules." />
+    <Page>
+      <PageHeading title="Settings" />
 
       {flash && (
         <div
-          className={`mb-5 rounded-lg border px-4 py-2.5 text-[13.5px] ${
+          className={`rounded-lg border px-4 py-2.5 text-[13.5px] ${
             flash.tone === 'good' ? 'border-good/30 bg-good/10 text-good' : 'border-crit/30 bg-crit/10 text-crit'
           }`}
         >
@@ -824,6 +1027,10 @@ export default function Settings() {
 
         <AiUsageLinkCard />
 
+        <PasswordCard />
+
+        <ChasingCard />
+
         <Card className="p-6 lg:col-span-2">
           <h2 className="text-[16px] font-semibold text-ink">Team &amp; roles</h2>
           <p className="mt-1 text-[13.5px] text-ink-soft">
@@ -833,6 +1040,6 @@ export default function Settings() {
           <Link to="/team" className="btn-secondary btn-sm mt-4 inline-flex">Open Team &amp; Roles →</Link>
         </Card>
       </div>
-    </>
+    </Page>
   );
 }

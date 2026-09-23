@@ -43,6 +43,18 @@ interface AuthCtx {
   may: (resource: Resource, action?: Action) => boolean;
   refresh: () => Promise<void>;
   signOut: () => Promise<void>;
+  /**
+   * Arrived from a "reset your password" link.
+   *
+   * The link signs the person IN — that is how it lets them set a new
+   * password without knowing the old one. So a session exists and the app
+   * would otherwise drop them straight onto the dashboard, with no way to
+   * finish the thing they came to do. While this is true the shell is held
+   * back and the reset screen is shown instead.
+   */
+  recovery: boolean;
+  /** Done resetting — release the app. */
+  endRecovery: () => void;
 }
 
 const Ctx = createContext<AuthCtx | null>(null);
@@ -53,6 +65,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [access, setAccess] = useState<Access | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
+  // Read from the URL before anything else: supabase-js consumes the hash
+  // as it starts up, and by the time a listener is attached the evidence
+  // that this was a recovery link can already be gone.
+  const [recovery, setRecovery] = useState(() => {
+    try {
+      return new URLSearchParams(window.location.hash.replace(/^#/, '')).get('type') === 'recovery';
+    } catch {
+      return false;
+    }
+  });
 
   /** Load the profile for the current session, bootstrapping if needed. */
   const loadProfile = useCallback(async () => {
@@ -88,7 +110,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setLoading(false);
     });
 
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_e, next) => {
+    const { data: sub } = supabase.auth.onAuthStateChange(async (event, next) => {
+      if (event === 'PASSWORD_RECOVERY') setRecovery(true);
       setSession(next);
       if (next) await loadProfile();
       else setProfile(null);
@@ -106,6 +129,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setProfile(null);
     setAccess(null);
     setProfileError(null);
+    setRecovery(false);
   };
 
   // Unknown means allowed: a slow /me must never look like a revoked module.
@@ -125,7 +149,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   return (
     <Ctx.Provider
-      value={{ configured: supabaseConfigured, loading, session, profile, user, profileError, may, refresh: loadProfile, signOut }}
+      value={{
+        configured: supabaseConfigured, loading, session, profile, user, profileError, may,
+        refresh: loadProfile, signOut,
+        recovery, endRecovery: () => setRecovery(false),
+      }}
     >
       {children}
     </Ctx.Provider>

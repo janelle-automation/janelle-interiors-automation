@@ -75,6 +75,31 @@ export function hasTaskCompletion(): Promise<boolean> {
   return hasColumn('tasks', 'completed_at');
 }
 
+/** Whether tasks record when their current owner got them — migration 0016. */
+export function hasTaskAssignment(): Promise<boolean> {
+  return hasColumn('tasks', 'assigned_at');
+}
+
+/** Whether mail can belong to one person rather than the studio — 0018. */
+export function hasEmailOwner(): Promise<boolean> {
+  return hasColumn('emails', 'owner_id');
+}
+
+/** Whether a draft can belong to one person rather than the studio — 0018. */
+export function hasDraftOwner(): Promise<boolean> {
+  return hasColumn('drafts', 'owner_id');
+}
+
+/** Whether mail records the sender's own Message-ID — migration 0019. */
+export function hasMessageId(): Promise<boolean> {
+  return hasColumn('emails', 'message_id');
+}
+
+/** Whether a follow-up can be put down for a few days — migration 0017. */
+export function hasFollowUpSnooze(): Promise<boolean> {
+  return hasColumn('follow_ups', 'snoozed_until');
+}
+
 /**
  * The profile columns to select, with `seat` only when it exists.
  * `base` is everything the caller needs regardless.

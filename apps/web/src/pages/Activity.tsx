@@ -1,4 +1,4 @@
-import { PageHeading, Card } from '../components/ui';
+import { Page, PageHeading, Card } from '../components/ui';
 import { useActivity } from '../lib/queries';
 
 const actionLabel: Record<string, string> = {
@@ -11,11 +11,10 @@ const actionLabel: Record<string, string> = {
 export default function Activity() {
   const { data: rows } = useActivity();
   return (
-    <>
+    <Page>
       <PageHeading
         eyebrow="Trust · Transparency"
         title="Audit Log"
-        sub="A record of everything the system read, extracted and drafted."
       />
       <Card>
         <ol className="divide-y divide-line-soft">
@@ -34,6 +33,6 @@ export default function Activity() {
           ))}
         </ol>
       </Card>
-    </>
+    </Page>
   );
 }

@@ -1,6 +1,6 @@
 import { Fragment, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { PageHeading, Card, Pill, StageBadge, money, shortDate } from '../components/ui';
+import { Page, PageHeading, Card, Pill, StageBadge, money, shortDate } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import { useImportHouzz, useProjects } from '../lib/queries';
 import { PROJECT_STAGES, STAGE_LABELS, canSupervise, type ProjectStage } from '@janelle/shared';
@@ -116,10 +116,9 @@ export default function Projects() {
     });
 
   return (
-    <>
+    <Page>
       <PageHeading
         title="Projects"
-        sub="The live studio pipeline. Expand a row to see its progress, or open it for POs, spec gaps and timeline."
         action={supervisor && <HouzzImport />}
       />
 
@@ -210,6 +209,6 @@ export default function Projects() {
           </div>
         </Card>
       )}
-    </>
+    </Page>
   );
 }

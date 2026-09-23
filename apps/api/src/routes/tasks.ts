@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { TASK_KINDS, TASK_STATUSES, canManageTasks } from '@janelle/shared';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
-import { hasSubtasks, hasTaskCompletion } from '../lib/columns.js';
+import { hasSubtasks, hasTaskAssignment, hasTaskCompletion } from '../lib/columns.js';
 
 export const tasksRouter = Router();
 tasksRouter.use(requireAuth);
@@ -18,6 +18,12 @@ async function completionColumns(): Promise<string> {
   return (await hasTaskCompletion()) ? ', completed_at, completion_note' : '';
 }
 
+// When the current owner got it — migration 0016. Absent before that, and
+// the reminder then simply has nothing new to announce.
+async function assignmentColumns(): Promise<string> {
+  return (await hasTaskAssignment()) ? ', assigned_at' : '';
+}
+
 // List tasks, newest first, with the names needed to render a row.
 tasksRouter.get(
   '/',
@@ -25,7 +31,7 @@ tasksRouter.get(
     const { data, error } = await req.auth!.db
       .from('tasks')
       .select(
-        `id, title, detail, kind, status, assigned_to, assigned_role, seat, next_step, project_id, vendor_id, source_email_id, due_date, created_at, updated_at${await completionColumns()}, projects(name), vendors(name), profiles(full_name)`,
+        `id, title, detail, kind, status, assigned_to, assigned_role, seat, next_step, project_id, vendor_id, source_email_id, due_date, created_at, updated_at${await completionColumns()}${await assignmentColumns()}, projects(name), vendors(name), profiles(full_name)`,
       )
       .order('created_at', { ascending: false });
     if (error) throw new Error(error.message);

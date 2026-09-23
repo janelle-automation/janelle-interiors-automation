@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ROLE_LABELS, SEATS, SEAT_KEYS, USER_ROLES, type Seat, type UserRole } from '@janelle/shared';
-import { PageHeading, Card, Pill } from '../components/ui';
+import { Page, PageHeading, Card, Pill } from '../components/ui';
 import {
-  useAddTeamMember, useEditTeamMember, useRemoveTeamMember, useSetRole, useTeam, useTeamAbilities,
-  type TeamMember,
+  useAddTeamMember, useEditTeamMember, useRemoveTeamMember, useSendInvite, useSetRole, useTeam, useTeamAbilities,
+  type AddedMember, type TeamMember,
 } from '../lib/queries';
 
 
@@ -24,6 +24,7 @@ function AddPerson({ onDone }: { onDone: () => void }) {
   const [name, setName] = useState('');
   const [role, setRole] = useState<UserRole>('assistant');
   const [invite, setInvite] = useState(false);
+  const [added, setAdded] = useState<AddedMember | null>(null);
 
   return (
     <form
@@ -32,10 +33,13 @@ function AddPerson({ onDone }: { onDone: () => void }) {
         add.mutate(
           { email: email.trim(), full_name: name.trim(), role, invite },
           {
-            onSuccess: () => {
+            onSuccess: (result) => {
               setEmail('');
               setName('');
-              onDone();
+              // Kept on screen rather than closing: the password is here, and
+              // closing the form would be the last anyone saw of it.
+              if (invite && result?.password) setAdded(result);
+              else onDone();
             },
           },
         );
@@ -79,11 +83,48 @@ function AddPerson({ onDone }: { onDone: () => void }) {
       </label>
       <p className="mt-1 text-[11px] text-ink-faint">
         {invite
-          ? 'Supabase will send them an invitation email.'
+          ? 'Sent from the studio mailbox, with a password to sign in and a copy to the principal.'
           : 'No email is sent. They sign in later with this address using “forgot password”.'}
       </p>
 
       {add.isError && <p className="mt-2 text-[12.5px] text-crit">{(add.error as Error).message}</p>}
+
+      {/* The password is shown once, here, and never again. It is the only
+          copy the studio has if the email did not arrive. */}
+      {added && (
+        <div
+          className={`mt-3 rounded-lg px-3 py-2.5 text-[12.5px] ${
+            added.emailed ? 'bg-good/10 text-good' : 'bg-warn/10 text-warn'
+          }`}
+        >
+          {added.emailed ? (
+            <>Invitation sent to {added.email}.</>
+          ) : (
+            <>
+              <span className="font-semibold">{added.email} was added, but the email did not send.</span>
+              {added.mailError ? ` (${added.mailError})` : ''} Give them this password yourself — it is not
+              shown again:
+            </>
+          )}
+          {added.password && (
+            <div className="mt-2 flex items-center gap-2">
+              <code className="select-all rounded bg-ink/10 px-2 py-1 font-mono text-[12.5px] text-ink">
+                {added.password}
+              </code>
+              <button
+                type="button"
+                onClick={() => void navigator.clipboard?.writeText(added.password ?? '')}
+                className="btn-secondary btn-sm"
+              >
+                Copy
+              </button>
+              <button type="button" onClick={() => setAdded(null)} className="btn-ghost btn-sm">
+                Done
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </form>
   );
 }
@@ -99,7 +140,11 @@ function PersonRow({
   const setRole = useSetRole();
   const edit = useEditTeamMember();
   const remove = useRemoveTeamMember();
-  const [mode, setMode] = useState<'view' | 'edit' | 'remove'>('view');
+  const [mode, setMode] = useState<'view' | 'edit' | 'remove' | 'invite' | null>('view');
+  const invite = useSendInvite();
+  // The issued password, shown once. Kept on the row rather than in a toast,
+  // because it belongs to this person and nothing else can recover it.
+  const [sent, setSent] = useState<AddedMember | null>(null);
   const [name, setName] = useState(m.full_name ?? '');
   const [email, setEmail] = useState(m.email ?? '');
 
@@ -220,6 +265,18 @@ function PersonRow({
                 Edit
               </button>
             )}
+            {canUpdate && m.email && (
+              <button
+                type="button"
+                className="btn-secondary btn-sm"
+                onClick={() => setMode('invite')}
+                disabled={invite.isPending}
+                title="Email them a new password to sign in with"
+                aria-label={`Send sign-in details to ${m.full_name ?? m.email}`}
+              >
+                {invite.isPending ? 'Sending…' : 'Invite'}
+              </button>
+            )}
             {canDelete && !m.is_you && (
               <button
                 type="button"
@@ -235,6 +292,67 @@ function PersonRow({
           </div>
         )}
       </div>
+
+      {/* Asked first, because it REPLACES whatever password they have.
+          Nobody can read an existing password back — not even a principal —
+          so "send it again" can only mean "issue a new one". */}
+      {mode === 'invite' && (
+        <div role="alertdialog" aria-label={`Send sign-in details to ${m.full_name ?? m.email}`} className="mt-3 rounded-lg border border-warn/30 bg-warn/5 px-4 py-3">
+          <p className="text-[13px] text-ink">
+            Email <span className="font-semibold">{m.email}</span> a new password? Their current one stops working,
+            and a copy of the message goes to the principal.
+          </p>
+          <div className="mt-2.5 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              className="btn-primary btn-sm"
+              disabled={invite.isPending}
+              onClick={() =>
+                invite.mutate(m.id, {
+                  onSuccess: (r) => {
+                    setSent(r);
+                    setMode(null);
+                  },
+                })
+              }
+            >
+              {invite.isPending ? 'Sending…' : 'Send it'}
+            </button>
+            <button type="button" className="btn-ghost btn-sm" onClick={() => setMode(null)}>
+              Cancel
+            </button>
+            {invite.isError && <span className="text-[12.5px] text-crit">{(invite.error as Error).message}</span>}
+          </div>
+        </div>
+      )}
+
+      {sent && (
+        <div className={`mt-3 rounded-lg px-4 py-3 text-[12.5px] ${sent.emailed ? 'bg-good/10 text-good' : 'bg-warn/10 text-warn'}`}>
+          {sent.emailed ? (
+            <>Sent to {sent.email}.</>
+          ) : (
+            <>
+              <span className="font-semibold">The email did not send.</span>
+              {sent.mailError ? ` (${sent.mailError})` : ''} Their password has still been changed — give them this:
+            </>
+          )}
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            {sent.password && (
+              <code className="select-all rounded bg-ink/10 px-2 py-1 font-mono text-[12.5px] text-ink">{sent.password}</code>
+            )}
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={() => void navigator.clipboard?.writeText(sent.password ?? '')}
+            >
+              Copy
+            </button>
+            <button type="button" className="btn-ghost btn-sm" onClick={() => setSent(null)}>
+              Done
+            </button>
+          </div>
+        </div>
+      )}
 
       {mode === 'remove' && (
         <div role="alertdialog" aria-label={`Remove ${m.full_name ?? m.email}`} className="mt-3 rounded-lg border border-crit/30 bg-crit/5 px-4 py-3">
@@ -274,10 +392,9 @@ export default function Team() {
   const manages = Boolean(can?.create || can?.update || can?.delete);
 
   return (
-    <>
+    <Page>
       <PageHeading
         title="Team & roles"
-        sub="Who is in the studio, what each role may do, and who owns what. Roles are enforced in the app and again in the database."
         action={
           can?.create ? (
             <button onClick={() => setAdding((v) => !v)} className="btn-primary btn-sm">
@@ -287,7 +404,7 @@ export default function Team() {
         }
       />
 
-      <div className="space-y-8">
+      <div className="space-y-6">
         <Card>
           <div className="flex items-center justify-between border-b border-line-soft px-5 py-4">
             <h2 className="text-[16px] font-semibold text-ink">People</h2>
@@ -348,6 +465,6 @@ export default function Team() {
           </div>
         </Card>
       </div>
-    </>
+    </Page>
   );
 }

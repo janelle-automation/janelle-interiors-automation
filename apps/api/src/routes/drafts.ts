@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
+import { hasDraftOwner } from '../lib/columns.js';
 import { asyncHandler } from '../middleware/error.js';
 
 export const draftsRouter = Router();
@@ -17,7 +18,11 @@ draftsRouter.get(
   asyncHandler(async (req, res) => {
     const { data, error } = await req.auth!.db
       .from('drafts')
-      .select('id, subject, body_preview, follow_up_id, created_at')
+      .select(
+        `id, subject, body_preview, follow_up_id, created_at, created_by${
+          (await hasDraftOwner()) ? ', owner_id' : ''
+        }`,
+      )
       .order('created_at', { ascending: false })
       .limit(100);
     if (error) throw new Error(error.message);

@@ -280,10 +280,15 @@ shorthand. When an email names only the client, a client with exactly one projec
   studio is replaced when a real one appears, is never shown to the model, and never files a
   document — which is how an Ojai Valley Inn quote once landed in the Lemon job.
 - **Software is never a vendor, client or project** — Slack, GitHub, Vercel, Dropbox, Houzz…
-- **General studio mail can open a project or record a vendor** — a project when the model is
-  sure it is a new client job with a proper name and a client; a vendor when the email carries the
-  vendor's own address. The vendor's contact is that address, never the reply-to, which was often
-  the client's.
+- **General studio mail can open a project or record a vendor** — a project when the model says it
+  is a new client job (`new_job`), names who it is for, and the name is a proper one; a vendor when
+  the email carries the vendor's own address. The vendor's contact is that address, never the
+  reply-to, which was often the client's. A client *asking* for a quote is general mail, not a vendor
+  quote, and a job the summary names ("…for Meridian Ranch") is the project even when the model
+  left the field empty (`withEmailJobFromSummary`).
+- **The conversation is the job** (`fileThread`). Once any message places a thread under a project,
+  the thread's unfiled messages and the tasks they raised follow it; a reply that names nothing
+  ("Approved, please proceed") takes the project its thread is already under.
 - **Merges keep the best name**, and a survivor whose client was the studio takes a real one.
 
 ### 6.2 Attachments name the job
@@ -389,6 +394,31 @@ the same title already live on the same job, or on a job and on none, is a dupli
 Tasks answer the studio's six questions — what, where, status, next step, who, when — which is
 why `seat` and `next_step` are columns (`0006`) rather than prose buried in `detail`. Subtasks
 are tasks owning tasks (`0009`), so a step gets its own owner, date and status.
+
+### 7.1 Closing finished work
+
+A task used to leave the board only when someone dragged it to Done, so work finished early sat
+in Open until its date passed and was then chased as overdue. Now every new email is also checked
+against the open work it could be the answer to — in the same Claude call that decides whether it
+raises a task, so it costs nothing extra:
+
+```
+  new email ─ loadClosable()   live tasks on the same thread, or the same job, or the same
+                               supplier on a job that does not contradict it — asked BEFORE
+                               this email, up to 8, closest first (rankClosable)
+                               minus: tasks a person reopened after a system close,
+                                      parents whose subtasks are still live
+           ─ extractTask()     … "completes": [{ ref, evidence }]
+           ─ closeFinished()   status → done, only for refs it was shown, only with evidence,
+                               only while still live; completion_note + activity_log
+                               task.auto_complete { evidence, finished: early | on_time | late }
+```
+
+A promise, an acknowledgement or a question back does not finish a task; when in doubt it stays
+open. The card says *Closed automatically* and the panel shows the email and the words that closed
+it. Dragging it back out of Done reopens it, clears the note (a trigger in `0015`), and it is never
+auto-closed again. `completed_at` is set by that trigger whoever closes a task, orders the Done
+column, and gives "finished 2 days early".
 
 ---
 
@@ -799,7 +829,7 @@ also reachable on demand from the UI.
 | `activity_log` | everything, plus every Claude call | Audit Log, usage report |
 | `organizations.settings` | Settings, Permissions | permissions, SLA, ingest dials, AI key + model |
 
-Schema lives in ordered migrations, `supabase/migrations/0001…0010`. Enum extensions
+Schema lives in ordered migrations, `supabase/migrations/0001…0015`. Enum extensions
 (`alter type … add value`) cannot run inside a transaction — `scripts/db-apply.mjs` knows which
 files those are.
 
@@ -885,7 +915,8 @@ packages/shared/src/index.ts
 
 supabase/migrations/  0001 baseline · 0002 tasks · 0003 digests + SLA · 0004 role permissions ·
                       0005 task reminders · 0006 seats + next step · 0007 dynamic permissions ·
-                      0008 profile seats · 0009 subtasks · 0010 email body + links
+                      0008 profile seats · 0009 subtasks · 0010 email body + links ·
+                      0011–0014 vendors, permissions, sheet fields, media · 0015 task completion
 ```
 
 ---

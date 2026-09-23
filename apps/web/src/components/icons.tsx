@@ -83,3 +83,36 @@ export const IconKey = (p: P) => (
 export const IconActivity = (p: P) => (
   <svg {...base} {...p}><path d="M3 12h4l2 6 4-14 2 8h6" /></svg>
 );
+
+// ── Controls ────────────────────────────────────────────────
+// Icon-only buttons where the meaning is carried by a shape people
+// already know: a board, a list, an eye. Every one of them is paired
+// with a title and an aria-label at the call site — an icon nobody can
+// name is a button nobody presses.
+
+/** One person: your own work. */
+export const IconPerson = (p: P) => (
+  <svg {...base} {...p}><circle cx="12" cy="8" r="3.5" /><path d="M5 20a7 7 0 0 1 14 0" /></svg>
+);
+/** Two people: the whole studio's. */
+export const IconPeople = (p: P) => (
+  <svg {...base} {...p}><circle cx="9" cy="8" r="3.2" /><path d="M2.5 20a6.5 6.5 0 0 1 13 0" /><path d="M16.5 5.5a3.2 3.2 0 0 1 0 5.9" /><path d="M18 20a5.6 5.6 0 0 0-2.4-4.6" /></svg>
+);
+/** Columns: the task board. */
+export const IconBoard = (p: P) => (
+  <svg {...base} {...p}><rect x="3" y="4" width="5" height="16" rx="1.4" /><rect x="9.5" y="4" width="5" height="11" rx="1.4" /><rect x="16" y="4" width="5" height="14" rx="1.4" /></svg>
+);
+/** Rows: the same work as a list. */
+export const IconList = (p: P) => (
+  <svg {...base} {...p}><path d="M8 6h13M8 12h13M8 18h13" /><circle cx="3.5" cy="6" r="1.2" fill="currentColor" stroke="none" /><circle cx="3.5" cy="12" r="1.2" fill="currentColor" stroke="none" /><circle cx="3.5" cy="18" r="1.2" fill="currentColor" stroke="none" /></svg>
+);
+export const IconEye = (p: P) => (
+  <svg {...base} {...p}><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12Z" /><circle cx="12" cy="12" r="2.8" /></svg>
+);
+export const IconEyeOff = (p: P) => (
+  <svg {...base} {...p}><path d="M10.6 6.2A9.9 9.9 0 0 1 12 5.5c6.4 0 10 6.5 10 6.5a18 18 0 0 1-3.2 4" /><path d="M6.5 7.9A17.6 17.6 0 0 0 2 12s3.6 6.5 10 6.5a9.8 9.8 0 0 0 4-.86" /><path d="M9.9 9.9a2.8 2.8 0 0 0 3.9 3.9" /><path d="m3 3 18 18" /></svg>
+);
+/** An envelope being searched: read the mail already in the system. */
+export const IconMailScan = (p: P) => (
+  <svg {...base} {...p}><path d="M21 11.5V6H3v12h8.5" /><path d="m3 7 9 6 9-6" /><circle cx="17.5" cy="17.5" r="3" /><path d="m20 20 2 2" /></svg>
+);

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { PageHeading, Card, Pill, usePager, Pager } from '../components/ui';
+import { Page, PageHeading, Card, Pill, usePager, Pager } from '../components/ui';
 import { IconSearch, IconArrow } from '../components/icons';
 import { Markdown } from '../components/Markdown';
 import {
@@ -405,10 +405,9 @@ export default function Prompts() {
   const pager = usePager(shown, 20);
 
   return (
-    <>
+    <Page>
       <PageHeading
         title="Prompt Studio"
-        sub="The studio's own prompts, run in-app on real project context — powered by Claude."
       />
 
       <Card>
@@ -526,6 +525,6 @@ export default function Prompts() {
       </Card>
 
       {active && <RunModal prompt={active} onClose={() => setActive(null)} />}
-    </>
+    </Page>
   );
 }

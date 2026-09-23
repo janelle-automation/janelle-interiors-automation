@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { PageHeading, Card, Pill, money, usePager, Pager } from '../components/ui';
+import { Page, PageHeading, Card, Pill, money, usePager, Pager } from '../components/ui';
 import { IconSearch } from '../components/icons';
 import { useEmails, useDocuments, type DocSource } from '../lib/queries';
 import { apiBlob } from '../lib/api';
@@ -83,10 +83,9 @@ export function Inbox() {
   const pager = usePager(shown, 25);
 
   return (
-    <>
+    <Page>
       <PageHeading
         title="Inbox Intelligence"
-        sub="Project mail, classified and linked to the right project and vendor."
       />
       <Card>
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line-soft px-5 py-3">
@@ -211,7 +210,7 @@ export function Inbox() {
 
         <Pager {...pager} count={pager.rows.length} noun="message" />
       </Card>
-    </>
+    </Page>
   );
 }
 
@@ -298,10 +297,9 @@ export function Documents() {
   const pager = usePager(shown, 25);
 
   return (
-    <>
+    <Page>
       <PageHeading
         title="Document Intelligence"
-        sub="PDF quotes and order confirmations, parsed into structured records. Each row shows who shared the file and when it arrived."
       />
       {error && (
         <div className="mb-4 rounded-lg bg-crit/10 px-4 py-2.5 text-[13px] text-crit">{error}</div>
@@ -401,6 +399,6 @@ export function Documents() {
 
         <Pager {...pager} count={pager.rows.length} noun="document" />
       </Card>
-    </>
+    </Page>
   );
 }
