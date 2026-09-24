@@ -74,9 +74,14 @@ function cursorFor(settings: Record<string, unknown>, userId: string): string | 
 export async function readIngestWindow(orgId: string, userId: string): Promise<IngestWindow> {
   try {
     const settings = await readSettings(orgId);
-    // The old single value stands in for whoever has not been read since
-    // 0018, so upgrading does not re-read a month of already-stored mail.
-    const stored = cursorFor(settings, userId) ?? settings[CURSOR_FIELD];
+    // The old single value stood in for whoever had not been read since
+    // 0018, so upgrading did not re-read a month of already-stored mail. It
+    // belongs to the studio mailbox that was read before then — and once
+    // per-mailbox marks exist, handing it to somebody who connects later
+    // started them at that date instead of thirty days back, silently
+    // skipping the history their first sync promises.
+    const hasPerMailbox = Boolean(settings[CURSORS_FIELD] && typeof settings[CURSORS_FIELD] === 'object');
+    const stored = cursorFor(settings, userId) ?? (hasPerMailbox ? null : settings[CURSOR_FIELD]);
     const at = typeof stored === 'string' ? Date.parse(stored) : NaN;
     if (Number.isNaN(at)) {
       return { since: new Date(Date.now() - BACKFILL_DAYS * 86_400_000), firstRun: true };

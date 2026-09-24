@@ -1,4 +1,9 @@
 import {
+  CLOUDFLARE_IMAGE_MODELS,
+  DEFAULT_CLOUDFLARE_MODEL,
+  DEFAULT_CLOUDFLARE_STEPS,
+  DEFAULT_PICTURE_ENGINE,
+  PICTURE_ENGINES,
   DEFAULT_GROK_IMAGE_MODEL,
   DEFAULT_IMAGE_MODEL,
   DEFAULT_MODEL,
@@ -320,8 +325,154 @@ export async function saveImageApiKey(orgId: string, apiKey: string): Promise<vo
   invalidateImageSettings(orgId);
 }
 
+// ── Cloudflare Workers AI: free photoreal renderings ────────
+//
+// Two credentials rather than one — the account the models run in, and a
+// token allowed to run them — plus which model and how many steps. The
+// token is encrypted like every other key; the account id is not secret
+// on its own (it appears in every dashboard URL) and is kept readable so
+// the settings screen can show which account is in use.
+
+const CF_ACCOUNT_FIELD = 'cloudflare_account_id';
+const CF_TOKEN_FIELD = 'cloudflare_api_token_encrypted';
+const CF_MODEL_FIELD = 'cloudflare_model';
+const CF_STEPS_FIELD = 'cloudflare_steps';
+
+export interface ResolvedCloudflare {
+  accountId: string | null;
+  apiToken: string | null;
+  model: string;
+  steps: number;
+  source: 'studio' | 'environment' | 'none';
+}
+
+export interface CloudflareSettingsView {
+  configured: boolean;
+  source: ResolvedCloudflare['source'];
+  keyHint: string | null;
+  accountId: string | null;
+  model: string;
+  steps: number;
+}
+
+function clampSteps(model: string, steps: unknown): number {
+  const max = CLOUDFLARE_IMAGE_MODELS.find((m) => m.id === model)?.maxSteps ?? 8;
+  const n = Math.round(Number(steps));
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, max) : Math.min(DEFAULT_CLOUDFLARE_STEPS, max);
+}
+
+export async function resolveCloudflare(given?: string | null): Promise<ResolvedCloudflare> {
+  const fromEnv: ResolvedCloudflare = {
+    accountId: env.cloudflare.accountId || null,
+    apiToken: env.cloudflare.apiToken || null,
+    model: DEFAULT_CLOUDFLARE_MODEL,
+    steps: DEFAULT_CLOUDFLARE_STEPS,
+    source: env.cloudflare.accountId && env.cloudflare.apiToken ? 'environment' : 'none',
+  };
+  const orgId = await resolveOrgId(given);
+  if (!orgId || !supabaseAdmin) return fromEnv;
+  try {
+    const settings = await readSettings(orgId);
+    let value = { ...fromEnv };
+    const account = settings[CF_ACCOUNT_FIELD];
+    const stored = settings[CF_TOKEN_FIELD];
+    if (typeof account === 'string' && account && typeof stored === 'string' && stored) {
+      try {
+        value = { ...value, accountId: account, apiToken: decrypt(stored), source: 'studio' };
+      } catch {
+        console.error('[cloudflare] stored token could not be decrypted — using the environment');
+      }
+    }
+    const model = settings[CF_MODEL_FIELD];
+    if (typeof model === 'string' && CLOUDFLARE_IMAGE_MODELS.some((m) => m.id === model)) value.model = model;
+    value.steps = clampSteps(value.model, settings[CF_STEPS_FIELD] ?? value.steps);
+    return value;
+  } catch (err) {
+    console.error('[cloudflare] settings unreadable, using the environment:', (err as Error).message);
+    return fromEnv;
+  }
+}
+
+export async function cloudflareSettingsView(orgId: string): Promise<CloudflareSettingsView> {
+  const r = await resolveCloudflare(orgId);
+  return {
+    configured: Boolean(r.accountId && r.apiToken),
+    source: r.source,
+    keyHint: r.apiToken ? r.apiToken.slice(-4) : null,
+    accountId: r.accountId,
+    model: r.model,
+    steps: r.steps,
+  };
+}
+
+export function looksLikeCloudflareAccount(id: string): boolean {
+  return /^[0-9a-f]{32}$/i.test(id.trim());
+}
+
+export async function saveCloudflareCredentials(orgId: string, accountId: string, apiToken: string): Promise<void> {
+  if (!supabaseAdmin) throw new Error('Backend not configured');
+  const settings = await readSettings(orgId);
+  const { error } = await supabaseAdmin
+    .from('organizations')
+    .update({
+      settings: { ...settings, [CF_ACCOUNT_FIELD]: accountId.trim(), [CF_TOKEN_FIELD]: encrypt(apiToken.trim()) },
+    })
+    .eq('id', orgId);
+  if (error) throw new Error(error.message);
+}
+
+export async function clearCloudflareCredentials(orgId: string): Promise<void> {
+  if (!supabaseAdmin) throw new Error('Backend not configured');
+  const settings = await readSettings(orgId);
+  delete settings[CF_ACCOUNT_FIELD];
+  delete settings[CF_TOKEN_FIELD];
+  const { error } = await supabaseAdmin.from('organizations').update({ settings }).eq('id', orgId);
+  if (error) throw new Error(error.message);
+}
+
+export async function saveCloudflareModel(orgId: string, model: string, steps?: number): Promise<void> {
+  if (!supabaseAdmin) throw new Error('Backend not configured');
+  if (!CLOUDFLARE_IMAGE_MODELS.some((m) => m.id === model)) throw new Error('Unknown model');
+  const settings = await readSettings(orgId);
+  const next: Record<string, unknown> = { ...settings, [CF_MODEL_FIELD]: model };
+  if (steps !== undefined) next[CF_STEPS_FIELD] = clampSteps(model, steps);
+  const { error } = await supabaseAdmin.from('organizations').update({ settings: next }).eq('id', orgId);
+  if (error) throw new Error(error.message);
+}
+
+const PICTURE_ENGINE_FIELD = 'picture_engine';
+
+/** Who makes the picture on a board: `gemini`, or a Claude model id. */
+export async function resolvePictureEngine(given?: string | null): Promise<string> {
+  const orgId = await resolveOrgId(given);
+  if (!orgId) return DEFAULT_PICTURE_ENGINE;
+  try {
+    const engine = (await readSettings(orgId))[PICTURE_ENGINE_FIELD];
+    return typeof engine === 'string' && PICTURE_ENGINES.some((e) => e.id === engine) ? engine : DEFAULT_PICTURE_ENGINE;
+  } catch {
+    return DEFAULT_PICTURE_ENGINE;
+  }
+}
+
+export async function savePictureEngine(orgId: string, engine: string): Promise<void> {
+  if (!supabaseAdmin) throw new Error('Backend not configured');
+  if (!PICTURE_ENGINES.some((e) => e.id === engine)) throw new Error('Unknown engine');
+  const settings = await readSettings(orgId);
+  const { error } = await supabaseAdmin
+    .from('organizations')
+    .update({ settings: { ...settings, [PICTURE_ENGINE_FIELD]: engine } })
+    .eq('id', orgId);
+  if (error) throw new Error(error.message);
+}
+
+/** Basic shape check — Google API keys begin AIza. */
+export function looksLikeGeminiKey(key: string): boolean {
+  return /^AIza[A-Za-z0-9_-]{30,}$/.test(key.trim());
+}
+
 export async function saveImageModel(orgId: string, model: string): Promise<void> {
   if (!supabaseAdmin) throw new Error('Backend not configured');
+  if (!IMAGE_MODELS.some((m) => m.id === model)) throw new Error('Unknown model');
   const settings = await readSettings(orgId);
   const { error } = await supabaseAdmin
     .from('organizations')

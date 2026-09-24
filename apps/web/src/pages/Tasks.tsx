@@ -715,6 +715,254 @@ function ScanResult({
   );
 }
 
+type DueFilter = 'any' | 'overdue' | 'today' | 'week' | 'next7' | 'none' | 'range';
+
+const DUE_OPTIONS: { v: DueFilter; label: string }[] = [
+  { v: 'any', label: 'Any due date' },
+  { v: 'overdue', label: 'Overdue' },
+  { v: 'today', label: 'Due today' },
+  { v: 'week', label: 'Due this week' },
+  { v: 'next7', label: 'Due in the next 7 days' },
+  { v: 'none', label: 'No due date' },
+  { v: 'range', label: 'Date range…' },
+];
+
+interface TaskFilters {
+  /** '' everyone, 'unassigned', or a teammate's id. */
+  person: string;
+  /** Empty means every status. */
+  statuses: TaskStatus[];
+  due: DueFilter;
+  from: string;
+  to: string;
+}
+
+const NO_FILTERS: TaskFilters = { person: '', statuses: [], due: 'any', from: '', to: '' };
+
+/** How many filters are switched on — the number on the button. */
+function activeFilterCount(f: TaskFilters): number {
+  return (f.person ? 1 : 0) + (f.statuses.length ? 1 : 0) + (f.due !== 'any' ? 1 : 0);
+}
+
+/** A local calendar date as YYYY-MM-DD — what `due_date` is stored as. */
+function isoDay(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** Whether a task's due date falls in the chosen window. Dates compare as text. */
+function dueMatches(t: TaskView, f: TaskFilters): boolean {
+  const due = t.due ? t.due.slice(0, 10) : null;
+  const now = new Date();
+  const today = isoDay(now);
+  switch (f.due) {
+    case 'any':
+      return true;
+    case 'none':
+      return !due;
+    case 'overdue':
+      return Boolean(due && due < today && t.status !== 'done');
+    case 'today':
+      return due === today;
+    case 'week': {
+      // Monday to Sunday of the current week.
+      const monday = new Date(now);
+      monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+      const sunday = new Date(monday);
+      sunday.setDate(monday.getDate() + 6);
+      return Boolean(due && due >= isoDay(monday) && due <= isoDay(sunday));
+    }
+    case 'next7': {
+      const end = new Date(now);
+      end.setDate(now.getDate() + 7);
+      return Boolean(due && due >= today && due <= isoDay(end));
+    }
+    case 'range':
+      if (!due) return !f.from && !f.to;
+      return (!f.from || due >= f.from) && (!f.to || due <= f.to);
+  }
+}
+
+function IconFilter(p: { width?: number; height?: number }) {
+  return (
+    <svg width={p.width ?? 16} height={p.height ?? 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3 5h18l-7 8.5V19l-4 2v-7.5L3 5Z" />
+    </svg>
+  );
+}
+
+/**
+ * Whose work, in what state, and when it is due — in a drop-down beside the
+ * other board controls rather than a bar across the page.
+ *
+ * The Mine/All toggle answers "mine or the studio's"; this answers what a
+ * coordinator asks in the morning: what is Joanna carrying, what is
+ * blocked, what falls due this week, what slipped.
+ */
+function TaskFilterMenu({
+  filters, onChange, team, shown, total,
+}: {
+  filters: TaskFilters;
+  onChange: (next: TaskFilters) => void;
+  team: TeamMember[];
+  shown: number;
+  total: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const count = activeFilterCount(filters);
+  const set = (patch: Partial<TaskFilters>) => onChange({ ...filters, ...patch });
+  const toggleStatus = (s: TaskStatus) =>
+    set({ statuses: filters.statuses.includes(s) ? filters.statuses.filter((x) => x !== s) : [...filters.statuses, s] });
+
+  // Closed by a click anywhere else, or Escape.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const label = 'mb-1.5 block text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-faint';
+  const field = 'input h-8 w-full py-0 text-[12.5px]';
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-label={count ? `Filters (${count} on)` : 'Filter tasks'}
+        title={count ? `${shown} of ${total} tasks shown` : 'Filter by person, status or due date'}
+        className={`focusable relative grid h-8 w-8 place-items-center rounded-lg border transition-colors ${
+          count || open
+            ? 'border-brass bg-brass/10 text-brass-deep'
+            : 'border-line bg-surface text-ink-soft hover:border-ink-faint hover:text-ink'
+        }`}
+      >
+        <IconFilter />
+        {count > 0 && (
+          <span className="absolute -right-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-brass px-1 text-[9.5px] font-bold leading-none text-white ring-2 ring-surface">
+            {count}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div
+          role="dialog"
+          aria-label="Filter tasks"
+          className="popover absolute right-0 top-full z-40 mt-1.5 w-[300px] overflow-hidden rounded-xl border border-line bg-surface shadow-pop"
+        >
+          <div className="flex items-center justify-between border-b border-line-soft px-4 py-2.5">
+            <span className="text-[13px] font-semibold text-ink">Filters</span>
+            <span className="text-[11.5px] text-ink-faint">{count ? `${shown} of ${total}` : `${total} tasks`}</span>
+          </div>
+
+          <div className="space-y-3.5 px-4 py-3.5">
+            <div>
+              <label className={label} htmlFor="filter-person">Person</label>
+              <select
+                id="filter-person"
+                className={`${field} ${filters.person ? 'border-brass' : ''}`}
+                value={filters.person}
+                onChange={(e) => set({ person: e.target.value })}
+              >
+                <option value="">Everyone</option>
+                <option value="unassigned">Unassigned</option>
+                {team.map((m) => (
+                  <option key={m.id} value={m.id}>{m.full_name ?? m.email ?? 'Teammate'}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <span className={label}>Status</span>
+              <div className="flex flex-wrap gap-1.5">
+                {TASK_STATUSES.map((s) => {
+                  const on = filters.statuses.includes(s);
+                  return (
+                    <button
+                      key={s}
+                      type="button"
+                      aria-pressed={on}
+                      onClick={() => toggleStatus(s)}
+                      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                        on ? 'border-brass bg-brass/15 text-ink' : 'border-line text-ink-soft hover:border-ink-faint hover:text-ink'
+                      }`}
+                    >
+                      <span className={`h-1.5 w-1.5 rounded-full ${COLUMN_DOT[s] ?? 'bg-ink-faint'}`} aria-hidden="true" />
+                      {TASK_STATUS_LABELS[s]}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div>
+              <label className={label} htmlFor="filter-due">Due</label>
+              <select
+                id="filter-due"
+                className={`${field} ${filters.due !== 'any' ? 'border-brass' : ''}`}
+                value={filters.due}
+                onChange={(e) => set({ due: e.target.value as DueFilter })}
+              >
+                {DUE_OPTIONS.map((o) => (
+                  <option key={o.v} value={o.v}>{o.label}</option>
+                ))}
+              </select>
+              {filters.due === 'range' && (
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <input
+                    type="date"
+                    aria-label="Due from"
+                    className={field}
+                    value={filters.from}
+                    max={filters.to || undefined}
+                    onChange={(e) => set({ from: e.target.value })}
+                  />
+                  <input
+                    type="date"
+                    aria-label="Due to"
+                    className={field}
+                    value={filters.to}
+                    min={filters.from || undefined}
+                    onChange={(e) => set({ to: e.target.value })}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between border-t border-line-soft bg-sunk/40 px-4 py-2">
+            <button
+              type="button"
+              className="btn-ghost btn-sm"
+              disabled={!count}
+              onClick={() => onChange(NO_FILTERS)}
+            >
+              Clear all
+            </button>
+            <button type="button" className="btn-primary btn-sm" onClick={() => setOpen(false)}>
+              Done
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Tasks() {
   const { data: tasks, isLoading } = useTasks();
   const { data: team } = useTeam();
@@ -770,11 +1018,42 @@ export default function Tasks() {
   // claiming it is exactly what the board is for.
   const [scope] = useScope();
   const isMine = (t: TaskView) => t.assignedTo === user?.id || !t.assignedTo;
-  const scoped = scope === 'mine' ? tasks.filter(isMine) : tasks;
+
+  // Remembered for the tab, so opening a task and coming back keeps them.
+  const [filters, setFilters] = useState<TaskFilters>(() => {
+    try {
+      const saved = sessionStorage.getItem('tasks.filters');
+      const parsed = saved ? { ...NO_FILTERS, ...(JSON.parse(saved) as Partial<TaskFilters>) } : NO_FILTERS;
+      return { ...parsed, statuses: Array.isArray(parsed.statuses) ? parsed.statuses : [] };
+    } catch {
+      return NO_FILTERS;
+    }
+  });
+  const changeFilters = (next: TaskFilters) => {
+    setFilters(next);
+    try {
+      sessionStorage.setItem('tasks.filters', JSON.stringify(next));
+    } catch {
+      // Private window: the filters just will not survive a reload.
+    }
+  };
+
+  // Choosing a person is a question about the whole studio, so it looks
+  // past Mine — "show me Joanna's work" should not come back empty because
+  // the toggle was left on Mine.
+  const byPerson = (t: TaskView) =>
+    !filters.person ||
+    (filters.person === 'unassigned' ? !t.assignedTo : t.assignedTo === filters.person);
+  const base = filters.person ? tasks : scope === 'mine' ? tasks.filter(isMine) : tasks;
+  const byStatus = (t: TaskView) => !filters.statuses.length || filters.statuses.includes(t.status);
+  const scoped = base.filter((t) => byPerson(t) && byStatus(t) && dueMatches(t, filters));
+  const unfilteredCount = base.length;
+  const filtering = activeFilterCount(filters) > 0;
   const mineCount = tasks.filter((t) => isMine(t) && OPEN_STATUSES.includes(t.status)).length;
   const allCount = tasks.filter((t) => OPEN_STATUSES.includes(t.status)).length;
 
-  const visible = showDone ? scoped : scoped.filter((t) => OPEN_STATUSES.includes(t.status));
+  const visible =
+    showDone || filters.statuses.includes('done') ? scoped : scoped.filter((t) => OPEN_STATUSES.includes(t.status));
 
   // The board always shows its Done column — that is what a board is for, and
   // "Hide closed" was written for the list. Only the most recently FINISHED
@@ -816,6 +1095,13 @@ export default function Tasks() {
         action={
           <div className="flex items-center gap-2">
             <ScopeToggle mine={mineCount} all={allCount} />
+            <TaskFilterMenu
+              filters={filters}
+              onChange={changeFilters}
+              team={team}
+              shown={view === 'board' ? boardTasks.length : visible.length}
+              total={unfilteredCount}
+            />
             {supervisor && (
               <button
                 onClick={() => backfill.mutate()}
@@ -887,17 +1173,29 @@ export default function Tasks() {
         </div>
       )}
 
+
       {view === 'board' && (
         <>
           {isLoading && (
             <div className="py-12 text-center text-[13px] text-ink-faint">Loading…</div>
           )}
-          {!isLoading && boardTasks.length === 0 && (
+          {/* Only a studio with no tasks at all gets the empty-state box.
+              Filtered down to nothing, the board keeps its columns — the
+              layout should not jump because a filter came back empty. */}
+          {!isLoading && boardTasks.length === 0 && !filtering && (
             <div className="rounded-xl border border-dashed border-line py-14 text-center text-[14px] text-ink-soft">
               No tasks yet. They appear here as the system reads email and spots work that needs doing.
             </div>
           )}
-          {!isLoading && boardTasks.length > 0 && (
+          {!isLoading && boardTasks.length === 0 && filtering && (
+            <div className="flex items-center gap-2 text-[12.5px] text-ink-soft">
+              <span>No tasks match these filters.</span>
+              <button type="button" className="font-medium text-brass hover:underline" onClick={() => changeFilters(NO_FILTERS)}>
+                Clear filters
+              </button>
+            </div>
+          )}
+          {!isLoading && (boardTasks.length > 0 || filtering) && (
             <Board
               tasks={boardTasks}
               team={team}
@@ -929,7 +1227,9 @@ export default function Tasks() {
           )}
           {!isLoading && visible.length === 0 && (
             <li className="px-5 py-10 text-center text-[13px] text-ink-faint">
-              No open tasks. They appear here as the system reads email and spots work that needs doing.
+              {filtering
+                ? 'No tasks match these filters.'
+                : 'No open tasks. They appear here as the system reads email and spots work that needs doing.'}
             </li>
           )}
           {visible.map((t) => (

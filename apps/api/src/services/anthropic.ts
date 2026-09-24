@@ -344,8 +344,9 @@ async function recorded(
 export function createMessage(
   ctx: CallContext,
   params: Omit<Anthropic.MessageCreateParamsNonStreaming, 'model'> & { model?: string },
+  options?: { timeoutMs?: number },
 ): Promise<Anthropic.Message> {
-  return recorded(ctx, params);
+  return recorded(ctx, params, options);
 }
 
 // ── Helpers ─────────────────────────────────────────────────

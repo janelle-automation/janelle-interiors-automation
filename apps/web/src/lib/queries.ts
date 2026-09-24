@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, apiBlob, apiUpload, NetworkError } from './api';
+import { readImpersonation } from './impersonate';
 import type {
   Action, AiSettingsView, AiUsageReport, AssistantAnswer, DashboardSummary, IngestSettingsView,
   Prompt, ProjectStage, PoStatus,
@@ -362,6 +363,12 @@ export interface TeamMember {
   /** The named seat from the roles document, where one is assigned. */
   seat?: Seat | null;
   created_at?: string; live_tasks?: number; is_you?: boolean;
+  /** Whether their Google is connected — until it is, none of their mail is read. */
+  google?: {
+    connected: boolean; gmail: boolean; drive: boolean; connected_at: string | null;
+    /** Set when Google has refused the stored access since they connected — only they can fix it. */
+    needs_reconnect?: string | null;
+  };
 }
 export function useTeam() {
   const q = useQuery({ queryKey: ['team'], queryFn: () => api<TeamMember[]>('/team') });
@@ -395,7 +402,7 @@ export function useSetRole() {
 export function useTeamAbilities() {
   return useQuery({
     queryKey: ['team', 'can'],
-    queryFn: () => api<{ create: boolean; update: boolean; delete: boolean }>('/team/can'),
+    queryFn: () => api<{ create: boolean; update: boolean; delete: boolean; impersonate?: boolean }>('/team/can'),
     staleTime: 60_000,
   });
 }
@@ -1228,6 +1235,13 @@ export function useConnectGoogle() {
       // Called both ways: Settings passes a service name, the first-run
       // prompt passes where it wants Google to come back to.
       const { service = 'all', next = 'settings' } = typeof v === 'string' ? { service: v } : v;
+      // Signed in as a teammate, Google would attach whichever Google account
+      // THIS browser is signed into — the admin's — to the teammate's login,
+      // and all of the wrong mail would be read as theirs. Only they can
+      // connect their own mailbox.
+      if (readImpersonation()) {
+        throw new Error('You are signed in as someone else. They must connect their own Google — ask them to sign in and do it.');
+      }
       const { url } = await api<{ url: string }>(`/auth/google/url?service=${service}&next=${next}`);
       window.location.href = url;
     },
@@ -1395,6 +1409,95 @@ export function useSetMediaModel() {
   );
 }
 
+// ── Renderings and boards (Gemini) ──────────────────────────
+
+export interface GeminiConfig extends AiSettingsView {
+  models: { id: string; label: string; usdPerImage: number; note: string; kind: 'raster' | 'vector' }[];
+  /** Who makes the picture on a board: `gemini`, or a Claude model id. */
+  engine: string;
+  engines: { id: string; label: string; note: string }[];
+}
+
+// ── Cloudflare Workers AI (free photos) ─────────────────────
+
+export interface CloudflareConfig {
+  configured: boolean;
+  source: 'studio' | 'environment' | 'none';
+  keyHint: string | null;
+  accountId: string | null;
+  model: string;
+  steps: number;
+  models: { id: string; label: string; note: string; maxSteps: number }[];
+}
+
+export function useCloudflareConfig() {
+  return useQuery({ queryKey: ['cloudflare-config'], queryFn: () => api<CloudflareConfig>('/settings/cloudflare') });
+}
+
+function useCloudflareMutation<V>(fn: (v: V) => Promise<CloudflareConfig>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: (data) => {
+      qc.setQueryData(['cloudflare-config'], data);
+      qc.invalidateQueries({ queryKey: ['imagine-options'] });
+    },
+  });
+}
+
+export function useSetCloudflareKey() {
+  return useCloudflareMutation((v: { accountId: string; apiToken: string }) =>
+    api<CloudflareConfig>('/settings/cloudflare/key', { method: 'PUT', body: JSON.stringify(v) }),
+  );
+}
+
+export function useClearCloudflareKey() {
+  return useCloudflareMutation(() => api<CloudflareConfig>('/settings/cloudflare/key', { method: 'DELETE' }));
+}
+
+export function useSetCloudflareModel() {
+  return useCloudflareMutation((v: { model: string; steps?: number }) =>
+    api<CloudflareConfig>('/settings/cloudflare/model', { method: 'PUT', body: JSON.stringify(v) }),
+  );
+}
+
+export function useSetPictureEngine() {
+  return useGeminiMutation((engine: string) =>
+    api<GeminiConfig>('/settings/images/engine', { method: 'PUT', body: JSON.stringify({ engine }) }),
+  );
+}
+
+export function useGeminiConfig() {
+  return useQuery({ queryKey: ['gemini-config'], queryFn: () => api<GeminiConfig>('/settings/images') });
+}
+
+function useGeminiMutation<V>(fn: (v: V) => Promise<GeminiConfig>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: (data) => {
+      qc.setQueryData(['gemini-config'], data);
+      qc.invalidateQueries({ queryKey: ['imagine-options'] });
+    },
+  });
+}
+
+export function useSetGeminiKey() {
+  return useGeminiMutation((apiKey: string) =>
+    api<GeminiConfig>('/settings/images/key', { method: 'PUT', body: JSON.stringify({ apiKey }) }),
+  );
+}
+
+export function useClearGeminiKey() {
+  return useGeminiMutation(() => api<GeminiConfig>('/settings/images/key', { method: 'DELETE' }));
+}
+
+export function useSetGeminiModel() {
+  return useGeminiMutation((model: string) =>
+    api<GeminiConfig>('/settings/images/model', { method: 'PUT', body: JSON.stringify({ model }) }),
+  );
+}
+
 /**
  * The chasing ladder — how long the studio waits before it says something.
  *
@@ -1463,7 +1566,7 @@ export interface UsageLink {
 
 /** What the Create buttons can offer right now, and what a clip would cost. */
 export interface ImagineOptions {
-  image: { ready: boolean; provider: 'grok' | 'gemini' | null };
+  image: { ready: boolean; provider: 'grok' | 'gemini' | 'cloudflare' | 'claude' | null };
   video: {
     ready: boolean;
     model: string;

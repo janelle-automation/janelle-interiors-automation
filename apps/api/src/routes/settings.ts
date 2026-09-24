@@ -17,7 +17,21 @@ import {
   saveXaiModel,
   xaiSettingsView,
 } from '../lib/aiSettings.js';
-import { GROK_IMAGE_MODELS, VIDEO_MODELS } from '@janelle/shared';
+import {
+  clearImageApiKey,
+  imageSettingsView,
+  looksLikeGeminiKey,
+  saveImageApiKey,
+  saveImageModel,
+  resolvePictureEngine,
+  savePictureEngine,
+  cloudflareSettingsView,
+  clearCloudflareCredentials,
+  looksLikeCloudflareAccount,
+  saveCloudflareCredentials,
+  saveCloudflareModel,
+} from '../lib/aiSettings.js';
+import { CLOUDFLARE_IMAGE_MODELS, GROK_IMAGE_MODELS, IMAGE_MODELS, PICTURE_ENGINES, VIDEO_MODELS } from '@janelle/shared';
 import { readIngestSettings, saveIngestSettings } from '../lib/ingestSettings.js';
 
 /**
@@ -149,6 +163,225 @@ settingsRouter.put(
     });
 
     res.json({ data: { ...(await xaiSettingsView(orgId)), imageModels: GROK_IMAGE_MODELS, videoModels: VIDEO_MODELS } });
+  }),
+);
+
+/**
+ * The Gemini account — renderings and presentation boards.
+ *
+ * Stored and resolved since the boards were built, but only ever settable
+ * from the environment, so changing the key or the model meant a deploy.
+ * Same terms as the other two keys: encrypted at rest, never sent back.
+ */
+async function geminiView(orgId: string) {
+  return {
+    ...(await imageSettingsView(orgId)),
+    models: IMAGE_MODELS,
+    engine: await resolvePictureEngine(orgId),
+    engines: PICTURE_ENGINES,
+  };
+}
+
+settingsRouter.get(
+  '/images',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await geminiView(orgId) });
+  }),
+);
+
+settingsRouter.put(
+  '/images/key',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const apiKey = String(req.body?.apiKey ?? '').trim();
+    if (!looksLikeGeminiKey(apiKey)) {
+      return res.status(400).json({
+        error: 'That does not look like a Gemini API key',
+        detail: 'Keys begin with AIza and come from aistudio.google.com.',
+      });
+    }
+
+    await saveImageApiKey(orgId, apiKey);
+
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.image_key_set',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: { hint: apiKey.slice(-4) },
+    });
+
+    res.json({ data: await geminiView(orgId) });
+  }),
+);
+
+settingsRouter.delete(
+  '/images/key',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    await clearImageApiKey(orgId);
+
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.image_key_cleared',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: {},
+    });
+
+    res.json({ data: await geminiView(orgId) });
+  }),
+);
+
+settingsRouter.put(
+  '/images/model',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const model = String(req.body?.model ?? '');
+    try {
+      await saveImageModel(orgId, model);
+    } catch {
+      return res.status(400).json({ error: 'Unknown model' });
+    }
+
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.image_model_set',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: { model },
+    });
+
+    res.json({ data: await geminiView(orgId) });
+  }),
+);
+
+/**
+ * Cloudflare Workers AI — free photoreal renderings.
+ *
+ * An Account ID and a token, like the other keys encrypted at rest and
+ * never sent back; the environment's CLOUDFLARE_ACCOUNT_ID and
+ * CLOUDFLARE_API_TOKEN stand in until the studio sets its own.
+ */
+async function cloudflareView(orgId: string) {
+  return { ...(await cloudflareSettingsView(orgId)), models: CLOUDFLARE_IMAGE_MODELS };
+}
+
+settingsRouter.get(
+  '/cloudflare',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await cloudflareView(orgId) });
+  }),
+);
+
+settingsRouter.put(
+  '/cloudflare/key',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const accountId = String(req.body?.accountId ?? '').trim();
+    const apiToken = String(req.body?.apiToken ?? '').trim();
+    if (!looksLikeCloudflareAccount(accountId)) {
+      return res.status(400).json({ error: 'That does not look like a Cloudflare Account ID — it is 32 letters and digits, shown under Workers & Pages.' });
+    }
+    if (apiToken.length < 20) return res.status(400).json({ error: 'Paste the API token as well.' });
+
+    await saveCloudflareCredentials(orgId, accountId, apiToken);
+
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.cloudflare_key_set',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: { hint: apiToken.slice(-4) },
+    });
+
+    res.json({ data: await cloudflareView(orgId) });
+  }),
+);
+
+settingsRouter.delete(
+  '/cloudflare/key',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    await clearCloudflareCredentials(orgId);
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.cloudflare_key_cleared',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: {},
+    });
+    res.json({ data: await cloudflareView(orgId) });
+  }),
+);
+
+settingsRouter.put(
+  '/cloudflare/model',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    const model = String(req.body?.model ?? '');
+    const steps = req.body?.steps === undefined ? undefined : Number(req.body.steps);
+    try {
+      await saveCloudflareModel(orgId, model, steps);
+    } catch {
+      return res.status(400).json({ error: 'Unknown model' });
+    }
+    res.json({ data: await cloudflareView(orgId) });
+  }),
+);
+
+/** Who makes the picture on a board: Gemini, or a Claude model drawing it. */
+settingsRouter.put(
+  '/images/engine',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const engine = String(req.body?.engine ?? '');
+    try {
+      await savePictureEngine(orgId, engine);
+    } catch {
+      return res.status(400).json({ error: 'Unknown engine' });
+    }
+
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.picture_engine_set',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: { engine },
+    });
+
+    res.json({ data: await geminiView(orgId) });
   }),
 );
 

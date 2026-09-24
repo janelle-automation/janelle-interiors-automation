@@ -9,6 +9,7 @@ import { runReport } from '../services/report.js';
 import { runDigest } from '../services/digest.js';
 import { advanceActiveTasks, backfillTasks, mergeDuplicateTasks } from '../services/tasks.js';
 import { sweepJobs } from '../services/mediaJobs.js';
+import { keepGoogleAlive } from '../services/googleKeepalive.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 
 export const opsRouter = Router();
@@ -102,6 +103,10 @@ cronRouter.all('/digest', asyncHandler(async (_req, res) => res.json({ data: awa
 // temporary — without this, a person who asked and then closed the tab
 // would have paid for something that was never fetched.
 cronRouter.all('/media', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => sweepJobs(id)) })));
+
+// Every connected Google account refreshed, so none lapses from disuse and
+// a revoked one shows up on the Team screen. Not per-org: one pass covers all.
+cronRouter.all('/google-keepalive', asyncHandler(async (_req, res) => res.json({ data: await keepGoogleAlive() })));
 
 opsRouter.use('/cron', cronRouter);
 

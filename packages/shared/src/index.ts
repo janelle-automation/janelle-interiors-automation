@@ -771,6 +771,13 @@ export const IMAGE_MODELS: ImageModel[] = [
     note: 'Photoreal, a third of the price and quicker. Needs image billing.',
   },
   {
+    id: 'gemini-2.5-flash-image',
+    label: 'Gemini 2.5 Flash Image',
+    usdPerImage: 0.039,
+    kind: 'raster',
+    note: 'Photoreal and the cheapest raster model. Needs image billing.',
+  },
+  {
     id: 'gemini-flash-lite-latest',
     label: 'Gemini Flash Lite (drawn)',
     usdPerImage: 0,
@@ -778,6 +785,83 @@ export const IMAGE_MODELS: ImageModel[] = [
     note: 'Draws the board as SVG on the free tier: exact type, illustrated rather than photographed.',
   },
 ];
+
+/**
+ * Who makes the picture on a rendering board.
+ *
+ * `gemini` uses the Gemini model chosen beside it (Claude stepping in only
+ * if it fails). A Claude id makes Claude draw every picture itself, as an
+ * illustrated SVG — never a photograph, whichever Claude it is. The slower
+ * models draw a smaller picture so they finish inside one request.
+ */
+export interface PictureEngine {
+  id: string;
+  label: string;
+  note: string;
+}
+
+export const PICTURE_ENGINES: PictureEngine[] = [
+  {
+    id: 'cloudflare',
+    label: 'Cloudflare FLUX — free photos',
+    note: 'Photoreal in seconds on Cloudflare’s free daily allowance — FLUX.1 from words (~100–170 a day), FLUX.2 [klein] to transform an attached photo (~80 a day). Blocked, never billed, when used up; Claude sketches until it resets.',
+  },
+  {
+    id: 'gemini',
+    label: 'Gemini (model below)',
+    note: 'Photographs with a billed photo model; draws with Flash Lite. Cloudflare, then Claude, step in if it fails.',
+  },
+  {
+    id: 'claude-haiku-4-5',
+    label: 'Claude Haiku 4.5 — sketch',
+    note: 'Fastest Claude drawing (~20s). Simple shapes; never a photograph.',
+  },
+  {
+    id: 'claude-sonnet-5',
+    label: 'Claude Sonnet 5 — sketch',
+    note: 'Better-judged drawing, slower (~35–50s). Can time out on a long brief.',
+  },
+  {
+    id: 'claude-opus-5',
+    label: 'Claude Opus 5 — sketch',
+    note: 'Most careful drawing and the slowest; the likeliest to time out.',
+  },
+];
+
+export const DEFAULT_PICTURE_ENGINE = 'gemini';
+
+/**
+ * Cloudflare Workers AI image models. Priced in "neurons" against a free
+ * daily allowance of 10,000 rather than in dollars; `neuronsPerImage` is at
+ * the default 1024×1024, for the settings screen to say how far it goes.
+ */
+export interface CloudflareImageModel {
+  id: string;
+  label: string;
+  note: string;
+  /** Diffusion steps the model accepts; the setting is clamped to this. */
+  maxSteps: number;
+}
+
+export const CLOUDFLARE_IMAGE_MODELS: CloudflareImageModel[] = [
+  {
+    id: '@cf/black-forest-labs/flux-1-schnell',
+    label: 'FLUX.1 [schnell]',
+    note: 'Photoreal and fast. ~58 neurons an image at 4 steps, ~96 at 8 — roughly 100–170 free images a day.',
+    maxSteps: 8,
+  },
+  {
+    id: '@cf/stabilityai/stable-diffusion-xl-base-1.0',
+    label: 'Stable Diffusion XL',
+    note: 'The older model. Softer detail; worth trying only if FLUX is unavailable.',
+    maxSteps: 20,
+  },
+];
+
+export const DEFAULT_CLOUDFLARE_MODEL = '@cf/black-forest-labs/flux-1-schnell';
+
+/** 1024×1024 at 4 or 8 steps for FLUX: speed against detail. */
+export const DEFAULT_CLOUDFLARE_STEPS = 8;
 
 /** Whether this model photographs the page or draws it. Unknown ids are assumed raster. */
 export function imageModelKind(id: string): 'raster' | 'vector' {

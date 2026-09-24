@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useState, type React
 import type { Session } from '@supabase/supabase-js';
 import { supabase, supabaseConfigured } from '../lib/supabase';
 import { api } from '../lib/api';
+import { clearImpersonation } from '../lib/impersonate';
 import type { Action, Resource, Seat, UserRole } from '@janelle/shared';
 
 /** What this person may do, per module, with the studio's overrides applied. */
@@ -97,7 +98,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // awaited before the app renders. Reading it here means the first-run
       // prompt can decide on the first paint; asking again from the prompt
       // put a second request — and a visible delay — in front of it.
-      setGoogleConnected(me.google?.status === 'connected');
+      //
+      // Only a definite answer moves it. `unknown` (the server could not read
+      // the connection) or a missing field keeps what was already known, so
+      // a hiccup never raises the connect prompt over a working grant.
+      const status = me.google?.status;
+      if (status === 'connected') setGoogleConnected(true);
+      else if (status === 'disconnected') setGoogleConnected(false);
       if (me.profile?.org_id) {
         setProfile(me.profile);
         setAccess(me.access ?? null);
@@ -141,6 +148,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [loadProfile]);
 
   const signOut = async () => {
+    // Signing out while viewing as a teammate ends that too — the admin's
+    // set-aside session must not survive a sign-out on a shared machine.
+    clearImpersonation();
     if (supabase) await supabase.auth.signOut();
     setSession(null);
     setProfile(null);
