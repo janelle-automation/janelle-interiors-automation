@@ -6,6 +6,8 @@ import { supabaseAdmin } from '../lib/supabase.js';
 import { hasSeatColumn, profileColumns } from '../lib/columns.js';
 import { env } from '../env.js';
 import { orgSourceUserId } from '../lib/tokens.js';
+import { servicesGranted } from '../lib/google.js';
+import { latestGoogleHealth } from '../services/googleKeepalive.js';
 import { gmailFor, sendMessage } from '../services/gmail.js';
 import { inviteEmail } from '../services/emailTemplate.js';
 import crypto from 'node:crypto';
@@ -156,10 +158,48 @@ teamRouter.get(
     // The select is built at runtime (seat only exists after 0008), so the
     // client cannot infer a row type for it.
     const rows = (data ?? []) as unknown as Record<string, unknown>[];
+
+    // Whose Google is connected. A person's mail is only read once they
+    // connect, so an unconnected teammate is a board with nothing on it —
+    // worth seeing at a glance. Read as the server: row-level security lets
+    // each person see only their own integration row. Status and scopes
+    // only; the tokens never leave this query.
+    const ids = rows.map((p) => p.id as string);
+    const google = new Map<string, { status: string; scopes: string | null; connected_at: string | null }>();
+    if (supabaseAdmin && ids.length) {
+      const { data: integrations } = await supabaseAdmin
+        .from('integrations')
+        .select('user_id, status, scopes, connected_at')
+        .eq('provider', 'google')
+        .in('user_id', ids);
+      for (const row of (integrations ?? []) as { user_id: string; status: string; scopes: string | null; connected_at: string | null }[]) {
+        google.set(row.user_id, row);
+      }
+    }
+
+    // What the keep-alive last found: a grant Google refused since they
+    // connected needs them to reconnect, and nobody else can do it for them.
+    const health = await latestGoogleHealth(ids);
+
     res.json({
       data: rows.map((p) => {
         const id = p.id as string;
-        return { ...p, live_tasks: load.get(id) ?? 0, is_you: id === req.auth!.userId };
+        const g = google.get(id);
+        const connected = g?.status === 'connected';
+        const services = connected ? servicesGranted(g?.scopes) : { gmail: false, drive: false };
+        const h = health.get(id);
+        const refused = connected && h && !h.ok && (!g?.connected_at || h.at > g.connected_at) ? h : null;
+        return {
+          ...p,
+          live_tasks: load.get(id) ?? 0,
+          is_you: id === req.auth!.userId,
+          google: {
+            connected: connected && (services.gmail || services.drive),
+            ...services,
+            connected_at: connected ? g?.connected_at ?? null : null,
+            needs_reconnect: refused ? refused.reason ?? 'Google refused the stored access' : null,
+          },
+        };
       }),
     });
   }),
@@ -174,9 +214,73 @@ teamRouter.get('/can', (req, res) => {
       create: canWith(permissions, role, 'team', 'create'),
       update: canWith(permissions, role, 'team', 'update'),
       delete: canWith(permissions, role, 'team', 'delete'),
+      impersonate: mayImpersonate(req.auth!),
     },
   });
 });
+
+/**
+ * Who may sign in as somebody else: the studio's admin mailbox and nobody
+ * else, and only while it holds the principal role. Named by address rather
+ * than by role on purpose — every principal can already change roles, and
+ * "act as anyone" must not come with them. IMPERSONATOR_EMAILS overrides.
+ */
+const IMPERSONATORS = (process.env.IMPERSONATOR_EMAILS || 'systems@janelleinteriors.com')
+  .split(',')
+  .map((e) => e.trim().toLowerCase())
+  .filter(Boolean);
+
+function mayImpersonate(auth: { email: string | null; role: UserRole | null }): boolean {
+  return auth.role === 'principal' && Boolean(auth.email) && IMPERSONATORS.includes(auth.email!.toLowerCase());
+}
+
+/**
+ * Sign in as a teammate, without their password — to see exactly what they
+ * see when they report a problem.
+ *
+ * Returns a one-time sign-in token for that person's account; the browser
+ * exchanges it for a session and keeps the admin's own session aside to
+ * return to. Nothing is emailed to them. Every use is written to the audit
+ * log, because it is the most powerful thing this API can do.
+ */
+teamRouter.post(
+  '/:id/impersonate',
+  asyncHandler(async (req, res) => {
+    const auth = req.auth!;
+    if (!mayImpersonate(auth)) {
+      return res.status(403).json({ error: 'Only the studio admin account can sign in as someone else.' });
+    }
+    if (!supabaseAdmin || !auth.orgId) return res.status(503).json({ error: 'Backend not configured' });
+
+    const id = String(req.params.id);
+    if (id === auth.userId) return res.status(400).json({ error: 'That is your own account.' });
+
+    const { data: target } = await supabaseAdmin
+      .from('profiles')
+      .select('id, full_name, email, org_id')
+      .eq('id', id)
+      .maybeSingle();
+    const person = target as { id: string; full_name: string | null; email: string | null; org_id: string } | null;
+    if (!person || person.org_id !== auth.orgId) return res.status(404).json({ error: 'Person not found in this studio' });
+    if (!person.email) return res.status(400).json({ error: 'They have no sign-in email.' });
+
+    // A magic-link token, generated rather than sent: no email goes out.
+    const { data, error } = await supabaseAdmin.auth.admin.generateLink({ type: 'magiclink', email: person.email });
+    const tokenHash = data?.properties?.hashed_token;
+    if (error || !tokenHash) throw new Error(error?.message ?? 'Could not issue a sign-in token');
+
+    await supabaseAdmin.from('activity_log').insert({
+      org_id: auth.orgId,
+      actor: auth.userId,
+      action: 'auth.impersonate',
+      entity: 'profiles',
+      entity_id: person.id,
+      meta: { as: person.email },
+    });
+
+    res.json({ data: { token_hash: tokenHash, email: person.email, name: person.full_name ?? person.email } });
+  }),
+);
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 

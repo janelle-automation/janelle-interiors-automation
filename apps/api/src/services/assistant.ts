@@ -2599,15 +2599,43 @@ async function runTool(
         },
       });
 
+      // A floor plan's rooms, each its own picture after the plan.
+      const roomRefs = picture.rooms.map((r) =>
+        refs.add('F', {
+          kind: 'file',
+          title: r.roomSize ? `${r.room} — ${r.roomSize}` : r.room,
+          preview: 'image',
+          file: {
+            name: r.name,
+            mimeType: r.mimeType,
+            size: r.size,
+            source: 'upload',
+            token: r.token,
+            downloadable: true,
+            webUrl: null,
+          },
+        }),
+      );
+      const allRefs = [ref, ...roomRefs];
+
       return {
         ref,
-        made_by: picture.mode === 'edit' ? 'transforming the attached picture' : 'drawing from the brief alone',
+        ...(roomRefs.length ? { room_refs: roomRefs, rooms_rendered: picture.rooms.map((r) => r.room) } : {}),
+        made_by: picture.plan
+          ? `rendering the attached floor plan furnished, top-down — the walls, room names and dimensions are the original drawing laid over the rendering; furniture and finishes are illustrative.${
+              roomRefs.length
+                ? ` Then ${roomRefs.length} key room(s) in perspective (${picture.rooms.map((r) => r.room).join(', ')}), drawn from each room's use and size on the plan, not its exact walls and windows.`
+                : ''
+            } Say exactly that; do not name a style the person did not ask for.`
+          : picture.mode === 'edit'
+            ? 'transforming the attached picture'
+            : 'drawing from the brief alone',
         drawn_with: picture.model,
         ...(picture.ignored.length
           ? { not_used: picture.ignored, why: 'Only one picture can be transformed at a time.' }
           : {}),
         note: picture.note,
-        instruction: `Put { "ref": "${ref}" } in the answer's items so the picture is shown. Keep the lead to one sentence, and say plainly that it is a generated image, not a photograph.`,
+        instruction: `Put ${allRefs.map((r) => `{ "ref": "${r}" }`).join(', ')} in the answer's items, in that order, so ${allRefs.length > 1 ? 'every picture is' : 'the picture is'} shown. Keep the lead to one or two sentences, and say plainly that they are generated images, not photographs.`,
       };
     }
 

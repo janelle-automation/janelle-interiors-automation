@@ -98,6 +98,14 @@ export const env = {
     videoModel: optional('XAI_VIDEO_MODEL', 'grok-imagine-video-1.5'),
   },
 
+  // Free photoreal renderings: Cloudflare Workers AI (FLUX.1 schnell). The
+  // free plan's daily allowance is blocked when used up, never billed.
+  // Settings → AI & media overrides these per studio.
+  cloudflare: {
+    accountId: optional('CLOUDFLARE_ACCOUNT_ID'),
+    apiToken: optional('CLOUDFLARE_API_TOKEN'),
+  },
+
   tokenEncryptionKey: optional('TOKEN_ENCRYPTION_KEY'),
 } as const;
 

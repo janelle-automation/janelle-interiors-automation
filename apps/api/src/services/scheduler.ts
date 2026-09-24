@@ -7,6 +7,7 @@ import { runIngest } from './ingest.js';
 import { runDigest } from './digest.js';
 import { readIngestSettings } from '../lib/ingestSettings.js';
 import { sweepJobs } from './mediaJobs.js';
+import { keepGoogleAlive } from './googleKeepalive.js';
 
 async function forEachOrg(fn: (orgId: string) => Promise<unknown>, label: string) {
   if (!supabaseAdmin) return;
@@ -118,7 +119,16 @@ export function startScheduler(): void {
     void forEachOrg((id) => runReport(id), 'report');
   });
 
+  // Every Google connection refreshed, so none sits idle until Google
+  // expires it — and a revoked one is found by this, not by a failed read.
+  const keepalive = () =>
+    void keepGoogleAlive()
+      .then((r) => console.log(`[google] keep-alive: ${r.healthy}/${r.checked} healthy, ${r.needReconnect} need reconnect, ${r.transient} retry later`))
+      .catch((err) => console.error('[google] keep-alive failed:', (err as Error).message));
+  cron.schedule('15 */6 * * *', keepalive);
+  keepalive();
+
   console.log(
-    '  ▸ Scheduler started (email: per-studio interval · follow-ups 02:00 · digest 07:05 · report Mon 07:00 · media every 2 min)',
+    '  ▸ Scheduler started (email: per-studio interval · follow-ups 02:00 · digest 07:05 · report Mon 07:00 · media every 2 min · Google keep-alive every 6h)',
   );
 }

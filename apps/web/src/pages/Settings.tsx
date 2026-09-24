@@ -1,7 +1,20 @@
-import { useState, type FormEvent } from 'react';
-import { Link } from 'react-router-dom';
+import { useState, type FormEvent, type ReactNode } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { ASSISTANT_NAME } from '@janelle/shared';
 import { Page, PageHeading, Card, Pill, PasswordInput, Switch } from '../components/ui';
+import {
+  IconActivity,
+  IconAssistant,
+  IconBell,
+  IconBoard,
+  IconInbox,
+  IconKey,
+  IconMailScan,
+  IconPerson,
+  IconPrompt,
+  IconSun,
+  IconTeam,
+} from '../components/icons';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
@@ -15,6 +28,15 @@ import {
   useSetMediaKey,
   useClearMediaKey,
   useSetMediaModel,
+  useGeminiConfig,
+  useSetGeminiKey,
+  useClearGeminiKey,
+  useSetGeminiModel,
+  useSetPictureEngine,
+  useCloudflareConfig,
+  useSetCloudflareKey,
+  useClearCloudflareKey,
+  useSetCloudflareModel,
   useClearAiKey,
   useDisconnectGoogleService,
   useSetAiKey,
@@ -71,39 +93,45 @@ function ChasingCard() {
   const dirty = Object.keys(draft).length > 0;
 
   return (
-    <Card className="p-6 lg:col-span-2">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-[16px] font-semibold text-ink">When the studio chases</h2>
-          <p className="mt-1 max-w-2xl text-[13.5px] text-ink-soft">
-            When a nudge is drafted for review. Nothing is ever sent automatically.
-          </p>
-        </div>
-        {dirty && (
-          <div className="flex items-center gap-2">
+    <SettingsCard
+      className="lg:col-span-2"
+      icon={<IconBell width={18} height={18} />}
+      title="When the studio chases"
+      description="When a nudge is drafted for review. Nothing is ever sent automatically."
+      status={
+        dirty && (
+          <div className="flex items-center gap-1.5">
             <button
               onClick={() => save.mutate(draft, { onSuccess: () => setDraft({}) })}
               disabled={save.isPending}
               className="btn-primary btn-sm"
             >
-              {save.isPending ? 'Saving…' : 'Save'}
+              {save.isPending ? 'Saving…' : 'Save changes'}
             </button>
             <button onClick={() => setDraft({})} disabled={save.isPending} className="btn-ghost btn-sm">
               Cancel
             </button>
           </div>
-        )}
-      </div>
-
-      {isLoading && <p className="mt-5 text-[13px] text-ink-faint">Loading…</p>}
-      {save.isError && <p className="mt-3 text-[12.5px] text-crit">{(save.error as Error).message}</p>}
-
-      {!isLoading && (
-        <div className="mt-5 grid gap-4 md:grid-cols-2">
+        )
+      }
+    >
+      {isLoading ? (
+        <p className="text-[13px] text-ink-faint">Loading…</p>
+      ) : (
+        <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
           {SLA_DIALS.map((d) => (
-            <label key={d.key} className="flex flex-col gap-1">
-              <span className="text-[13px] font-medium text-ink">{d.label}</span>
-              <span className="flex items-center gap-2">
+            <label
+              key={d.key}
+              title={d.hint}
+              className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5 transition-colors ${
+                draft[d.key] !== undefined ? 'border-brass/50 bg-brass/5' : 'border-line bg-sunk/30'
+              }`}
+            >
+              <span className="min-w-0">
+                <span className="block text-[12.5px] font-medium leading-snug text-ink">{d.label}</span>
+                <span className="block truncate text-[11px] text-ink-faint">{d.hint}</span>
+              </span>
+              <span className="flex shrink-0 items-center gap-1.5">
                 <input
                   type="number"
                   min={d.min}
@@ -114,16 +142,16 @@ function ChasingCard() {
                     const next = e.target.value;
                     setDraft((f) => ({ ...f, [d.key]: next === '' ? d.min : Number(next) }));
                   }}
-                  className="input w-24 tabular-nums"
+                  className="input h-8 w-16 px-2 text-center tabular-nums"
                 />
-                <span className="text-[12.5px] text-ink-soft">{d.unit}</span>
+                <span className="w-8 text-[11.5px] text-ink-soft">{d.unit}</span>
               </span>
-              <span className="text-[11.5px] text-ink-faint">{d.hint}</span>
             </label>
           ))}
         </div>
       )}
-    </Card>
+      <ErrorLine error={save.error as Error | null} />
+    </SettingsCard>
   );
 }
 
@@ -182,13 +210,12 @@ function PasswordCard() {
   };
 
   return (
-    <Card className="p-6">
-      <h2 className="text-[16px] font-semibold text-ink">Password</h2>
-      <p className="mt-1 text-[13.5px] text-ink-soft">
-        {user?.email ? `Signed in as ${user.email}.` : 'Change the password you sign in with.'}
-      </p>
-
-      <form onSubmit={submit} className="mt-4 max-w-sm space-y-3">
+    <SettingsCard
+      icon={<IconKey width={18} height={18} />}
+      title="Password"
+      description={user?.email ? `Signed in as ${user.email}.` : 'Change the password you sign in with.'}
+    >
+      <form onSubmit={submit} className="space-y-2.5">
         <PasswordInput
           required
           placeholder="Current password"
@@ -196,22 +223,24 @@ function PasswordCard() {
           onChange={(e) => setCurrent(e.target.value)}
           autoComplete="current-password"
         />
-        <PasswordInput
-          required
-          minLength={MIN_PASSWORD}
-          placeholder="New password"
-          value={next}
-          onChange={(e) => setNext(e.target.value)}
-          autoComplete="new-password"
-        />
-        <PasswordInput
-          required
-          minLength={MIN_PASSWORD}
-          placeholder="Repeat the new password"
-          value={confirm}
-          onChange={(e) => setConfirm(e.target.value)}
-          autoComplete="new-password"
-        />
+        <div className="grid gap-2.5 sm:grid-cols-2">
+          <PasswordInput
+            required
+            minLength={MIN_PASSWORD}
+            placeholder="New password"
+            value={next}
+            onChange={(e) => setNext(e.target.value)}
+            autoComplete="new-password"
+          />
+          <PasswordInput
+            required
+            minLength={MIN_PASSWORD}
+            placeholder="Repeat it"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            autoComplete="new-password"
+          />
+        </div>
 
         {msg && (
           <p className={`rounded-lg px-3 py-2 text-[12.5px] ${msg.tone === 'crit' ? 'bg-crit/10 text-crit' : 'bg-good/10 text-good'}`}>
@@ -223,7 +252,7 @@ function PasswordCard() {
           {busy ? 'Changing…' : 'Change password'}
         </button>
       </form>
-    </Card>
+    </SettingsCard>
   );
 }
 
@@ -280,21 +309,21 @@ function ServiceCard({
   const disconnect = useDisconnectGoogleService();
   const pending = connect.isPending && connect.variables === service;
   return (
-    <div className="flex flex-col rounded-xl border border-line bg-surface p-4">
+    <div className="flex flex-col rounded-lg border border-line bg-sunk/30 p-3.5">
       <div className="flex items-start gap-3">
-        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg border border-line bg-sunk/60">
+        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-line bg-surface">
           <Mark />
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
-            <h3 className="text-[15px] font-semibold text-ink">{title}</h3>
+            <h3 className="text-[14px] font-semibold text-ink">{title}</h3>
             <Pill tone={connected ? 'good' : 'neutral'}>{connected ? 'Connected' : 'Not connected'}</Pill>
           </div>
-          <p className="mt-0.5 text-[13px] text-ink-soft">{blurb}</p>
+          <p className="mt-0.5 text-[12px] leading-snug text-ink-soft">{blurb}</p>
         </div>
       </div>
 
-      <ul className="mt-3 space-y-1 text-[12px] text-ink-soft">
+      <ul className="mt-2.5 space-y-0.5 text-[11.5px] text-ink-soft">
         {scopes.map((s) => (
           <li key={s.name} className="flex items-baseline gap-2">
             <span className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${connected ? 'bg-good' : 'bg-ink-faint'}`} aria-hidden="true" />
@@ -304,7 +333,7 @@ function ServiceCard({
         ))}
       </ul>
 
-      <div className="mt-4 flex items-center gap-2">
+      <div className="mt-3 flex items-center gap-2">
         {connected ? (
           <button
             onClick={() => disconnect.mutate(service)}
@@ -331,375 +360,478 @@ function ServiceCard({
     </div>
   );
 }
-
 /**
-
- * The studio's Claude credentials. Kept here rather than in a deploy so
-
- * the key can be rotated by the person who owns the Anthropic account,
-
- * not by whoever has access to the server.
-
+ * The one card shape every setting uses: an icon, a title, one line of
+ * explanation and, where there is one, a status — then the controls.
  *
-
- * The key never comes back from the API — only whether one is set and its
-
- * last four characters, which is enough to tell which key is in use.
-
+ * The page used to be ten cards each opening with a heading and a paragraph,
+ * which made it long to scroll and hard to scan. The explanation still
+ * matters, so it stays, but as a single line under the title.
  */
-
-function AiSetupCard() {
-
-  const config = useAiConfig();
-
-  const setKey = useSetAiKey();
-
-  const clearKey = useClearAiKey();
-
-  const setModel = useSetAiModel();
-
-  const [draft, setDraft] = useState('');
-
-
-
-  // A 403 means "not a principal" — say nothing rather than showing an
-
-  // error for a card this person was never meant to use.
-
-  if (config.isError) return null;
-
-
-
-  const data = config.data;
-
-  const saving = setKey.isPending || clearKey.isPending;
-
-  const error = (setKey.error ?? clearKey.error ?? setModel.error) as Error | undefined;
-
-
-
+function SettingsCard({
+  icon,
+  title,
+  description,
+  status,
+  className = '',
+  children,
+}: {
+  icon: ReactNode;
+  title: string;
+  description?: ReactNode;
+  status?: ReactNode;
+  className?: string;
+  children?: ReactNode;
+}) {
   return (
-
-    <Card className="p-6 lg:col-span-2">
-
-      <div className="flex flex-wrap items-start justify-between gap-3">
-
-        <div>
-
-          <h2 className="text-[16px] font-semibold text-ink">{ASSISTANT_NAME}’s brain</h2>
-
-          <p className="mt-1 max-w-2xl text-[13.5px] text-ink-soft">
-
-            {`The Claude account everything runs on — reading email, raising tasks,
-            drafting follow-ups and answering ${ASSISTANT_NAME}’s questions. Get a key from`}{' '}
-            <a
-
-              href="https://console.anthropic.com/settings/keys"
-
-              target="_blank"
-
-              rel="noreferrer"
-
-              className="font-medium text-brass hover:underline"
-
-            >
-
-              console.anthropic.com
-
-            </a>
-
-            .
-
-          </p>
-
+    <Card className={`p-5 ${className}`}>
+      <div className="flex items-start gap-3">
+        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-line bg-sunk/60 text-brass">
+          {icon}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-[15px] font-semibold leading-tight text-ink">{title}</h2>
+            {status}
+          </div>
+          {description && <p className="mt-0.5 text-[12.5px] leading-snug text-ink-soft">{description}</p>}
         </div>
-
-        {data && (
-
-          <Pill tone={data.configured ? 'good' : 'crit'}>
-
-            {data.configured ? 'Connected' : 'No key'}
-
-          </Pill>
-
-        )}
-
       </div>
-
-
-
-      {config.isLoading && <p className="mt-4 text-[13px] text-ink-faint">Loading…</p>}
-
-
-
-      {data && (
-
-        <>
-
-          <div className="mt-5">
-
-            <label className="text-[12.5px] font-medium text-ink-soft" htmlFor="ai-key">
-
-              API key
-
-            </label>
-
-            {data.configured && (
-
-              <p className="mt-1 text-[12.5px] text-ink-faint">
-
-                {data.source === 'environment'
-
-                  ? 'Currently using the key from the server environment. Setting one here replaces it.'
-
-                  : `A key ending ${data.keyHint} is in use. Pasting a new one replaces it.`}
-
-              </p>
-
-            )}
-
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-
-              <PasswordInput
-
-                id="ai-key"
-
-                label="key"
-                wrapperClassName="min-w-0 flex-1"
-
-                autoComplete="off"
-
-                spellCheck={false}
-
-                value={draft}
-
-                onChange={(e) => setDraft(e.target.value)}
-
-                placeholder={data.configured ? 'Paste a new key to replace it' : 'sk-ant-…'}
-
-                className="w-full"
-
-              />
-
-              <button
-
-                className="btn-primary btn-sm"
-
-                disabled={saving || draft.trim().length === 0}
-
-                onClick={() => setKey.mutate(draft.trim(), { onSuccess: () => setDraft('') })}
-
-              >
-
-                {setKey.isPending ? 'Saving…' : 'Save key'}
-
-              </button>
-
-              {data.source === 'studio' && (
-
-                <button
-
-                  className="btn-secondary btn-sm"
-
-                  disabled={saving}
-
-                  onClick={() => clearKey.mutate(undefined)}
-
-                >
-
-                  {clearKey.isPending ? 'Removing…' : 'Remove'}
-
-                </button>
-
-              )}
-
-            </div>
-
-            <p className="mt-2 text-[11.5px] text-ink-faint">
-
-              Stored encrypted, and never shown again after saving. Removing it falls back to the
-
-              server’s own key, if it has one.
-
-            </p>
-
-          </div>
-
-
-
-          <div className="mt-6">
-            <label className="block text-[12.5px] font-medium text-ink-soft" htmlFor="ai-model">
-              Model
-            </label>
-            <select
-              id="ai-model"
-              className="input mt-2 w-full md:max-w-sm"
-              value={data.model}
-              disabled={setModel.isPending}
-              onChange={(e) => setModel.mutate(e.target.value)}
-            >
-              {data.models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-            <p className="mt-2 text-[11.5px] text-ink-faint">
-              {setModel.isPending ? 'Saving…' : 'Used by every AI feature.'}
-            </p>
-          </div>
-
-          {error && <p className="mt-3 text-[12.5px] text-crit">{error.message}</p>}
-        </>
-      )}
+      {children && <div className="mt-4">{children}</div>}
     </Card>
   );
 }
 
+/** A small label above a control, so every field on the page reads alike. */
+function FieldLabel({ htmlFor, children }: { htmlFor?: string; children: ReactNode }) {
+  return (
+    <label htmlFor={htmlFor} className="mb-1.5 block text-[11.5px] font-semibold uppercase tracking-wide text-ink-faint">
+      {children}
+    </label>
+  );
+}
+
+/** The quiet line under a control. */
+function Hint({ children }: { children: ReactNode }) {
+  return <p className="mt-1.5 text-[11.5px] leading-snug text-ink-faint">{children}</p>;
+}
+
+function Connected({ on }: { on: boolean }) {
+  return <Pill tone={on ? 'good' : 'crit'}>{on ? 'Connected' : 'No key'}</Pill>;
+}
+
 /**
- * Pictures and video.
+ * An API key: paste, save, remove.
  *
- * A third provider with a third key. It sits beside the Claude card rather
- * than in a deploy for the same reason that one does: the person paying
- * for it should be able to switch it on without anyone touching a server.
+ * Three providers used to carry three copies of this. The key is never
+ * shown again after saving — only where it came from and its last four.
+ */
+function KeyField({
+  id,
+  placeholder,
+  view,
+  onSave,
+  onClear,
+  saving,
+  clearing,
+}: {
+  id: string;
+  placeholder: string;
+  view: { configured: boolean; source: 'studio' | 'environment' | 'none'; keyHint: string | null };
+  onSave: (key: string, done: () => void) => void;
+  onClear: () => void;
+  saving: boolean;
+  clearing: boolean;
+}) {
+  const [draft, setDraft] = useState('');
+  return (
+    <div>
+      <FieldLabel htmlFor={id}>API key</FieldLabel>
+      <div className="flex flex-wrap items-center gap-2">
+        <PasswordInput
+          id={id}
+          label="key"
+          wrapperClassName="min-w-0 flex-1"
+          autoComplete="off"
+          spellCheck={false}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder={view.configured ? `•••• ${view.keyHint ?? ''} — paste a new key to replace it` : placeholder}
+          className="w-full"
+        />
+        <button
+          className="btn-primary btn-sm"
+          disabled={saving || clearing || draft.trim().length === 0}
+          onClick={() => onSave(draft.trim(), () => setDraft(''))}
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {view.source === 'studio' && (
+          <button className="btn-ghost btn-sm" disabled={saving || clearing} onClick={onClear}>
+            {clearing ? 'Removing…' : 'Remove'}
+          </button>
+        )}
+      </div>
+      <Hint>
+        {view.source === 'environment'
+          ? 'Using the server’s key. A key saved here replaces it.'
+          : 'Stored encrypted and never shown again.'}
+      </Hint>
+    </div>
+  );
+}
+
+/** A labelled select, with the chosen option's note beneath it. */
+function ModelSelect({
+  id,
+  label,
+  value,
+  options,
+  note,
+  pending,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  options: { id: string; label: string }[];
+  note?: string;
+  pending: boolean;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div>
+      <FieldLabel htmlFor={id}>{label}</FieldLabel>
+      <select id={id} className="input w-full" value={value} disabled={pending} onChange={(e) => onChange(e.target.value)}>
+        {options.map((o) => (
+          <option key={o.id} value={o.id}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      {(pending || note) && <Hint>{pending ? 'Saving…' : note}</Hint>}
+    </div>
+  );
+}
+
+function ErrorLine({ error }: { error?: Error | null }) {
+  return error ? <p className="mt-3 text-[12.5px] text-crit">{error.message}</p> : null;
+}
+
+/**
+ * The studio's Claude credentials. Kept here rather than in a deploy so the
+ * key can be rotated by the person who owns the Anthropic account, not by
+ * whoever has access to the server.
+ */
+function AiSetupCard() {
+  const config = useAiConfig();
+  const setKey = useSetAiKey();
+  const clearKey = useClearAiKey();
+  const setModel = useSetAiModel();
+
+  // A 403 means "not a principal" — say nothing rather than showing an
+  // error for a card this person was never meant to use.
+  if (config.isError) return null;
+  const data = config.data;
+  const model = data?.models.find((m) => m.id === data.model);
+
+  return (
+    <SettingsCard
+      className="lg:col-span-2"
+      icon={<IconAssistant width={18} height={18} />}
+      title={`${ASSISTANT_NAME}’s brain — Claude`}
+      description={
+        <>
+          Reads email, raises tasks, drafts follow-ups and answers questions. Keys from{' '}
+          <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="font-medium text-brass hover:underline">
+            console.anthropic.com
+          </a>
+          .
+        </>
+      }
+      status={data && <Connected on={data.configured} />}
+    >
+      {!data ? (
+        <p className="text-[13px] text-ink-faint">Loading…</p>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
+          <KeyField
+            id="ai-key"
+            placeholder="sk-ant-…"
+            view={data}
+            saving={setKey.isPending}
+            clearing={clearKey.isPending}
+            onSave={(key, done) => setKey.mutate(key, { onSuccess: done })}
+            onClear={() => clearKey.mutate(undefined)}
+          />
+          <ModelSelect
+            id="ai-model"
+            label="Model"
+            value={data.model}
+            options={data.models}
+            note={model?.note ?? 'Used by every AI feature.'}
+            pending={setModel.isPending}
+            onChange={(m) => setModel.mutate(m)}
+          />
+        </div>
+      )}
+      <ErrorLine error={(setKey.error ?? clearKey.error ?? setModel.error) as Error | null} />
+    </SettingsCard>
+  );
+}
+
+/**
+ * Renderings and boards: who draws them, and the Gemini account.
  *
- * Without a key here the Create buttons do not appear and Jenny says so
- * plainly when asked for a rendering — which is the honest behaviour, but
- * it is also a dead end until somebody can paste a key in.
+ * The key and model were only settable in the server environment, so a
+ * studio stuck on a model that cannot photograph had no way out without a
+ * deploy. When Gemini fails or has no key, Claude draws a sketch instead.
+ */
+function GeminiSetupCard() {
+  const config = useGeminiConfig();
+  const setKey = useSetGeminiKey();
+  const clearKey = useClearGeminiKey();
+  const setModel = useSetGeminiModel();
+  const setEngine = useSetPictureEngine();
+
+  if (config.isError) return null;
+  const data = config.data;
+
+  return (
+    <SettingsCard
+      icon={<IconPrompt width={18} height={18} />}
+      title="Renderings & boards"
+      description={
+        <>
+          Who draws the picture on a board, and the Gemini key. Keys from{' '}
+          <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="font-medium text-brass hover:underline">
+            aistudio.google.com
+          </a>
+          .
+        </>
+      }
+      status={data && <Pill tone={data.configured ? 'good' : 'warn'}>{data.configured ? 'Gemini connected' : 'No Gemini key'}</Pill>}
+    >
+      {!data ? (
+        <p className="text-[13px] text-ink-faint">Loading…</p>
+      ) : (
+        <div className="space-y-4">
+          <ModelSelect
+            id="picture-engine"
+            label="Drawn by"
+            value={data.engine}
+            options={data.engines}
+            note={data.engines.find((e) => e.id === data.engine)?.note}
+            pending={setEngine.isPending}
+            onChange={(e) => setEngine.mutate(e)}
+          />
+          <KeyField
+            id="gemini-key"
+            placeholder="AIza…"
+            view={data}
+            saving={setKey.isPending}
+            clearing={clearKey.isPending}
+            onSave={(key, done) => setKey.mutate(key, { onSuccess: done })}
+            onClear={() => clearKey.mutate(undefined)}
+          />
+          <ModelSelect
+            id="gemini-model"
+            label="Gemini model"
+            value={data.model}
+            options={data.models.map((m) => ({
+              id: m.id,
+              label: `${m.label} — ${m.usdPerImage ? `${usdEach(m.usdPerImage)} each` : 'free tier'}`,
+            }))}
+            note={data.models.find((m) => m.id === data.model)?.note}
+            pending={setModel.isPending}
+            onChange={(m) => setModel.mutate(m)}
+          />
+        </div>
+      )}
+      <ErrorLine error={(setKey.error ?? clearKey.error ?? setModel.error ?? setEngine.error) as Error | null} />
+    </SettingsCard>
+  );
+}
+
+/**
+ * Cloudflare Workers AI — free photoreal renderings.
+ *
+ * Two values rather than one: the account the models run in (not secret —
+ * it is in every dashboard URL) and a token allowed to run them. The free
+ * plan's daily allowance is refused, never billed, once it is used up.
+ */
+function CloudflareSetupCard() {
+  const config = useCloudflareConfig();
+  const setKey = useSetCloudflareKey();
+  const clearKey = useClearCloudflareKey();
+  const setModel = useSetCloudflareModel();
+  const [account, setAccount] = useState('');
+  const [token, setToken] = useState('');
+
+  if (config.isError) return null;
+  const data = config.data;
+  const model = data?.models.find((m) => m.id === data.model);
+  const maxSteps = model?.maxSteps ?? 8;
+  const stepChoices = maxSteps <= 8 ? [4, 8] : [10, 20];
+
+  return (
+    <SettingsCard
+      icon={<IconBoard width={18} height={18} />}
+      title="Free photos — Cloudflare"
+      description={
+        <>
+          Photoreal renderings on Cloudflare’s free daily allowance — no card, never billed. Account ID and token from{' '}
+          <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noreferrer" className="font-medium text-brass hover:underline">
+            dash.cloudflare.com
+          </a>
+          .
+        </>
+      }
+      status={data && <Connected on={data.configured} />}
+    >
+      {!data ? (
+        <p className="text-[13px] text-ink-faint">Loading…</p>
+      ) : (
+        <div className="space-y-4">
+          <div>
+            <FieldLabel htmlFor="cf-account">Account ID &amp; API token</FieldLabel>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <input
+                id="cf-account"
+                className="input w-full font-mono text-[12.5px]"
+                autoComplete="off"
+                spellCheck={false}
+                value={account}
+                onChange={(e) => setAccount(e.target.value)}
+                placeholder={data.accountId ? `${data.accountId.slice(0, 6)}… (in use)` : '32-character Account ID'}
+              />
+              <PasswordInput
+                label="token"
+                wrapperClassName="min-w-0"
+                autoComplete="off"
+                spellCheck={false}
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder={data.configured ? `•••• ${data.keyHint ?? ''} — paste to replace` : 'API token'}
+                className="w-full"
+              />
+            </div>
+            <div className="mt-2 flex items-center gap-2">
+              <button
+                className="btn-primary btn-sm"
+                disabled={setKey.isPending || !account.trim() || !token.trim()}
+                onClick={() =>
+                  setKey.mutate(
+                    { accountId: account.trim(), apiToken: token.trim() },
+                    { onSuccess: () => { setAccount(''); setToken(''); } },
+                  )
+                }
+              >
+                {setKey.isPending ? 'Saving…' : 'Save'}
+              </button>
+              {data.source === 'studio' && (
+                <button className="btn-ghost btn-sm" disabled={clearKey.isPending} onClick={() => clearKey.mutate(undefined)}>
+                  {clearKey.isPending ? 'Removing…' : 'Remove'}
+                </button>
+              )}
+            </div>
+            <Hint>
+              {data.source === 'environment'
+                ? 'Using CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN from the server. Values saved here replace them.'
+                : 'The token is stored encrypted and never shown again.'}
+            </Hint>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
+            <ModelSelect
+              id="cf-model"
+              label="Model"
+              value={data.model}
+              options={data.models}
+              note={model?.note}
+              pending={setModel.isPending}
+              onChange={(m) => setModel.mutate({ model: m })}
+            />
+            <ModelSelect
+              id="cf-steps"
+              label="Quality"
+              value={String(data.steps)}
+              options={stepChoices.map((n, i) => ({ id: String(n), label: i === 0 ? `Fast — ${n} steps` : `Best — ${n} steps` }))}
+              note="More steps: finer detail, fewer free images a day."
+              pending={setModel.isPending}
+              onChange={(n) => setModel.mutate({ model: data.model, steps: Number(n) })}
+            />
+          </div>
+        </div>
+      )}
+      <ErrorLine error={(setKey.error ?? clearKey.error ?? setModel.error) as Error | null} />
+    </SettingsCard>
+  );
+}
+
+/**
+ * Pictures and video through Grok (xAI). Without a key the video button
+ * does not appear and Jenny says so plainly when asked for a clip.
  */
 function MediaSetupCard() {
   const config = useMediaConfig();
   const setKey = useSetMediaKey();
   const clearKey = useClearMediaKey();
   const setModel = useSetMediaModel();
-  const [draft, setDraft] = useState('');
 
   if (config.isError) return null;
   const data = config.data;
-  const saving = setKey.isPending || clearKey.isPending;
-  const error = (setKey.error ?? clearKey.error ?? setModel.error) as Error | undefined;
 
   return (
-    <Card className="p-6 lg:col-span-2">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-[16px] font-semibold text-ink">Pictures and video</h2>
-          <p className="mt-1 max-w-2xl text-[13.5px] text-ink-soft">
-            Renderings, concept images and short clips — a sketch made photoreal, an empty room
-            furnished, a walk-through. Get a key from{' '}
-            <a
-              href="https://console.x.ai"
-              target="_blank"
-              rel="noreferrer"
-              className="font-medium text-brass hover:underline"
-            >
-              console.x.ai
-            </a>
-            . Without one, only the studio boards can be drawn.
-          </p>
-        </div>
-        {data && (
-          <Pill tone={data.configured ? 'good' : 'crit'}>
-            {data.configured ? 'Connected' : 'No key'}
-          </Pill>
-        )}
-      </div>
-
-      {config.isLoading && <p className="mt-4 text-[13px] text-ink-faint">Loading…</p>}
-
-      {data && (
+    <SettingsCard
+      icon={<IconBoard width={18} height={18} />}
+      title="Photos & video — Grok"
+      description={
         <>
-          <div className="mt-5">
-            <label className="text-[12.5px] font-medium text-ink-soft" htmlFor="media-key">
-              API key
-            </label>
-            {data.configured && (
-              <p className="mt-1 text-[12.5px] text-ink-faint">
-                {data.source === 'environment'
-                  ? 'Currently using the key from the server environment. Setting one here replaces it.'
-                  : `A key ending ${data.keyHint} is in use. Pasting a new one replaces it.`}
-              </p>
-            )}
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              <PasswordInput
-                id="media-key"
-                label="key"
-                wrapperClassName="min-w-0 flex-1"
-                autoComplete="off"
-                spellCheck={false}
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder={data.configured ? 'Paste a new key to replace it' : 'xai-…'}
-                className="w-full"
-              />
-              <button
-                className="btn-primary btn-sm"
-                disabled={saving || draft.trim().length === 0}
-                onClick={() => setKey.mutate(draft.trim(), { onSuccess: () => setDraft('') })}
-              >
-                {setKey.isPending ? 'Saving…' : 'Save key'}
-              </button>
-              {data.source === 'studio' && (
-                <button className="btn-secondary btn-sm" disabled={saving} onClick={() => clearKey.mutate(undefined)}>
-                  {clearKey.isPending ? 'Removing…' : 'Remove'}
-                </button>
-              )}
-            </div>
-            <p className="mt-2 text-[11.5px] text-ink-faint">
-              Stored encrypted, and never shown again after saving.
-            </p>
-          </div>
-
-          <div className="mt-6 grid gap-5 md:grid-cols-2">
-            <div>
-              <label className="block text-[12.5px] font-medium text-ink-soft" htmlFor="media-image-model">
-                Image model
-              </label>
-              <select
-                id="media-image-model"
-                className="input mt-2 w-full"
-                value={data.imageModel}
-                disabled={setModel.isPending}
-                onChange={(e) => setModel.mutate({ kind: 'image', model: e.target.value })}
-              >
-                {data.imageModels.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label} — {usdEach(m.usdPerImage)} each
-                  </option>
-                ))}
-              </select>
-              <p className="mt-2 text-[11.5px] text-ink-faint">
-                {data.imageModels.find((m) => m.id === data.imageModel)?.note ?? ''}
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-[12.5px] font-medium text-ink-soft" htmlFor="media-video-model">
-                Video model
-              </label>
-              <select
-                id="media-video-model"
-                className="input mt-2 w-full"
-                value={data.videoModel}
-                disabled={setModel.isPending}
-                onChange={(e) => setModel.mutate({ kind: 'video', model: e.target.value })}
-              >
-                {data.videoModels.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label} — {usdEach(m.usdPerSecond)} a second
-                  </option>
-                ))}
-              </select>
-              <p className="mt-2 text-[11.5px] text-ink-faint">
-                A clip is capped per day and per length; both are set on the server.
-              </p>
-            </div>
-          </div>
-
-          {error && <p className="mt-3 text-[12.5px] text-crit">{error.message}</p>}
+          Photoreal renderings and short clips. Keys from{' '}
+          <a href="https://console.x.ai" target="_blank" rel="noreferrer" className="font-medium text-brass hover:underline">
+            console.x.ai
+          </a>
+          .
         </>
+      }
+      status={data && <Connected on={data.configured} />}
+    >
+      {!data ? (
+        <p className="text-[13px] text-ink-faint">Loading…</p>
+      ) : (
+        <div className="space-y-4">
+          <KeyField
+            id="media-key"
+            placeholder="xai-…"
+            view={data}
+            saving={setKey.isPending}
+            clearing={clearKey.isPending}
+            onSave={(key, done) => setKey.mutate(key, { onSuccess: done })}
+            onClear={() => clearKey.mutate(undefined)}
+          />
+          <ModelSelect
+            id="media-image-model"
+            label="Image model"
+            value={data.imageModel}
+            options={data.imageModels.map((m) => ({ id: m.id, label: `${m.label} — ${usdEach(m.usdPerImage)} each` }))}
+            note={data.imageModels.find((m) => m.id === data.imageModel)?.note}
+            pending={setModel.isPending}
+            onChange={(m) => setModel.mutate({ kind: 'image', model: m })}
+          />
+          <ModelSelect
+            id="media-video-model"
+            label="Video model"
+            value={data.videoModel}
+            options={data.videoModels.map((m) => ({ id: m.id, label: `${m.label} — ${usdEach(m.usdPerSecond)} a second` }))}
+            note="Clips are capped per day and per length on the server."
+            pending={setModel.isPending}
+            onChange={(m) => setModel.mutate({ kind: 'video', model: m })}
+          />
+        </div>
       )}
-    </Card>
+      <ErrorLine error={(setKey.error ?? clearKey.error ?? setModel.error) as Error | null} />
+    </SettingsCard>
   );
 }
 
@@ -709,13 +841,8 @@ function usdEach(n: number): string {
 }
 
 /**
- * How often the studio looks for new mail.
- *
- * Every new email costs a Claude call to classify, another to decide
- * whether it raises a task, and sometimes a third to draft a reply. How
- * often we look, and whether we think about what we find, are the two
- * dials that actually move the bill — so they belong in front of the
- * person paying it, not in a deploy.
+ * How often the studio looks for new mail, and whether Claude reads it —
+ * the two dials that actually move the bill, in front of the person paying.
  */
 function EmailReadingCard() {
   const settings = useIngestSettings();
@@ -725,23 +852,21 @@ function EmailReadingCard() {
   const data = settings.data;
 
   return (
-    <Card className="p-6 lg:col-span-2">
-      <h2 className="text-[16px] font-semibold text-ink">Reading email</h2>
-      <p className="mt-1 max-w-2xl text-[13.5px] text-ink-soft">
-        How often the studio checks Gmail and Drive for anything new.
-      </p>
-
-      {settings.isLoading && <p className="mt-4 text-[13px] text-ink-faint">Loading…</p>}
-
-      {data && (
-        <>
-          <div className="mt-5">
-            <label className="block text-[12.5px] font-medium text-ink-soft" htmlFor="ingest-every">
-              Check for new email
-            </label>
+    <SettingsCard
+      className="lg:col-span-2"
+      icon={<IconMailScan width={18} height={18} />}
+      title="Reading email"
+      description="How often Gmail and Drive are checked, and whether Claude reads what arrives."
+    >
+      {!data ? (
+        <p className="text-[13px] text-ink-faint">Loading…</p>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2">
+          <div>
+            <FieldLabel htmlFor="ingest-every">Check for new email</FieldLabel>
             <select
               id="ingest-every"
-              className="input mt-2 w-full md:max-w-sm"
+              className="input w-full"
               value={data.intervalMinutes}
               disabled={save.isPending}
               onChange={(e) => save.mutate({ intervalMinutes: Number(e.target.value) })}
@@ -752,14 +877,14 @@ function EmailReadingCard() {
                 </option>
               ))}
             </select>
-            <p className="mt-2 text-[11.5px] text-ink-faint">
+            <Hint>
               {data.intervalMinutes === 0
                 ? 'Nothing is read on a schedule — use “Read Gmail & Drive” on the dashboard.'
-                : 'Checking more often costs more, because each new email is read by Claude.'}
-            </p>
+                : 'Checking more often costs more: each new email is read by Claude.'}
+            </Hint>
           </div>
 
-          <div className="mt-6 flex items-start gap-3 rounded-xl border border-line bg-surface p-4">
+          <div className="flex items-start gap-3 rounded-lg border border-line bg-sunk/40 p-3">
             <Switch
               checked={data.useAi}
               disabled={save.isPending}
@@ -767,25 +892,21 @@ function EmailReadingCard() {
               onChange={(next) => save.mutate({ useAi: next })}
             />
             <div className="min-w-0">
-              <div className="text-[13.5px] font-medium text-ink">
-                Let {ASSISTANT_NAME} read what arrives
-              </div>
-              <p className="mt-0.5 text-[12.5px] text-ink-soft">
+              <div className="text-[13px] font-medium text-ink">Let {ASSISTANT_NAME} read what arrives</div>
+              <p className="mt-0.5 text-[12px] leading-snug text-ink-soft">
                 {data.useAi
-                  ? 'Email is classified, linked to a project, and turned into tasks and reply drafts. This is where most of the cost is.'
-                  : 'Email is fetched and filed only. Nothing is classified, no tasks are raised, no drafts are written — and nothing is spent.'}
+                  ? 'Classified, linked to a project, turned into tasks and drafts. Most of the cost is here.'
+                  : 'Fetched and filed only — no tasks, no drafts, nothing spent.'}
               </p>
             </div>
           </div>
-
-          {save.isError && (
-            <p className="mt-3 text-[12.5px] text-crit">{(save.error as Error).message}</p>
-          )}
-        </>
+        </div>
       )}
-    </Card>
+      <ErrorLine error={save.error as Error | null} />
+    </SettingsCard>
   );
 }
+
 /**
  * The AI usage page has no menu entry and no sign-in: the link is the
  * credential. That is what makes it shareable with someone who has no
@@ -798,27 +919,20 @@ function AiUsageLinkCard() {
   const revoke = useRevokeUsageLink();
   const [copied, setCopied] = useState(false);
 
-  // A 403 here just means "not a principal" — say nothing rather than
-  // showing an error for a card this person was never meant to use.
   if (link.isError) return null;
-
   const url = link.data?.path ? `${window.location.origin}${link.data.path}` : null;
 
   return (
-    <Card className="p-6 lg:col-span-2">
-      <h2 className="text-[16px] font-semibold text-ink">AI usage link</h2>
-      <p className="mt-1 text-[13.5px] text-ink-soft">
-        A read-only page showing what the assistant costs to run — tokens, spend, and which
-        job spent it. Anyone with the link can open it without signing in, so share it
-        deliberately. Nothing else in the studio is reachable from it.
-      </p>
-
+    <SettingsCard
+      icon={<IconActivity width={18} height={18} />}
+      title="AI usage link"
+      description="A read-only spend page anyone with the link can open without signing in. Share it deliberately."
+      status={<Pill tone={url ? 'good' : 'neutral'}>{url ? 'Live' : 'Off'}</Pill>}
+    >
       {url ? (
         <>
-          <div className="mt-4 flex flex-wrap items-center gap-2">
-            <code className="min-w-0 flex-1 truncate rounded-lg bg-sunk px-3 py-2 text-[12px] text-ink-soft">
-              {url}
-            </code>
+          <div className="flex items-center gap-2">
+            <code className="min-w-0 flex-1 truncate rounded-lg bg-sunk px-3 py-2 text-[12px] text-ink-soft">{url}</code>
             <button
               className="btn-secondary btn-sm"
               onClick={() => {
@@ -835,61 +949,186 @@ function AiUsageLinkCard() {
             </button>
             <a href={url} target="_blank" rel="noreferrer" className="btn-secondary btn-sm">Open</a>
           </div>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <button
-              className="btn-secondary btn-sm"
-              disabled={rotate.isPending}
-              onClick={() => rotate.mutate()}
-            >
+          <div className="mt-2 flex flex-wrap items-center gap-1">
+            <button className="btn-ghost btn-sm" disabled={rotate.isPending} onClick={() => rotate.mutate()}>
               {rotate.isPending ? 'Replacing…' : 'Replace link'}
             </button>
-            <button
-              className="btn-secondary btn-sm"
-              disabled={revoke.isPending}
-              onClick={() => revoke.mutate()}
-            >
+            <button className="btn-ghost btn-sm text-crit hover:text-crit" disabled={revoke.isPending} onClick={() => revoke.mutate()}>
               {revoke.isPending ? 'Turning off…' : 'Turn off'}
             </button>
-            <span className="text-[11.5px] text-ink-faint">
-              Replacing or turning off stops the old link working immediately.
-            </span>
+            <span className="text-[11.5px] text-ink-faint">The old link stops working immediately.</span>
           </div>
         </>
       ) : (
-        <div className="mt-4 flex flex-wrap items-center gap-3">
-          <button
-            className="btn-primary btn-sm"
-            disabled={rotate.isPending || link.isLoading}
-            onClick={() => rotate.mutate()}
-          >
-            {rotate.isPending ? 'Creating…' : 'Create a link'}
-          </button>
-          <span className="text-[12.5px] text-ink-faint">No link exists yet.</span>
-        </div>
+        <button className="btn-primary btn-sm" disabled={rotate.isPending || link.isLoading} onClick={() => rotate.mutate()}>
+          {rotate.isPending ? 'Creating…' : 'Create a link'}
+        </button>
       )}
-
-      {(rotate.isError || revoke.isError) && (
-        <p className="mt-3 text-[12.5px] text-crit">
-          {((rotate.error ?? revoke.error) as Error).message}
-        </p>
-      )}
-    </Card>
+      <ErrorLine error={(rotate.error ?? revoke.error) as Error | null} />
+    </SettingsCard>
   );
 }
 
-export default function Settings() {
-  const { theme, setTheme } = useTheme();
+function GoogleMark() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="#4285F4" d="M21.6 12.2c0-.6-.1-1.3-.2-1.9H12v3.6h5.4a4.6 4.6 0 0 1-2 3v2.5h3.2c1.9-1.7 3-4.3 3-7.2Z" />
+      <path fill="#34A853" d="M12 22c2.7 0 5-.9 6.6-2.4l-3.2-2.5c-.9.6-2 1-3.4 1-2.6 0-4.8-1.8-5.6-4.1H3.1v2.6A10 10 0 0 0 12 22Z" />
+      <path fill="#FBBC05" d="M6.4 14c-.2-.6-.3-1.3-.3-2s.1-1.4.3-2V7.4H3.1a10 10 0 0 0 0 9.2L6.4 14Z" />
+      <path fill="#EA4335" d="M12 5.9c1.5 0 2.8.5 3.8 1.5l2.8-2.8A10 10 0 0 0 3.1 7.4L6.4 10c.8-2.3 3-4.1 5.6-4.1Z" />
+    </svg>
+  );
+}
+
+function GoogleCard() {
   const me = useMe();
   const connectAll = useConnectGoogle();
   const disconnect = useDisconnectGoogle();
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
-  const flash = googleFlash();
 
   const google = me.data?.google;
   const gmail = google?.services?.gmail ?? false;
   const drive = google?.services?.drive ?? false;
   const anyConnected = gmail || drive;
-  const overall = gmail && drive ? 'Fully connected' : anyConnected ? 'Partially connected' : 'Not connected';
+
+  return (
+    <SettingsCard
+      className="lg:col-span-2"
+      icon={<GoogleMark />}
+      title="Google Workspace"
+      description="Gmail and Drive, together or separately. Read-only, plus drafts in Gmail. Revocable any time."
+      status={
+        <Pill tone={gmail && drive ? 'good' : anyConnected ? 'warn' : 'neutral'}>
+          {gmail && drive ? 'Fully connected' : anyConnected ? 'Partially connected' : 'Not connected'}
+        </Pill>
+      }
+    >
+      <div className="grid gap-3 md:grid-cols-2">
+        <ServiceCard
+          service="gmail"
+          title="Gmail"
+          blurb="Reads project mail, classifies it, writes reply drafts."
+          connected={gmail}
+          everConnected={anyConnected}
+          Mark={GmailMark}
+          scopes={[
+            { name: 'gmail.readonly', note: 'read messages' },
+            { name: 'gmail.compose', note: 'drafts only — never sends' },
+          ]}
+        />
+        <ServiceCard
+          service="drive"
+          title="Google Drive"
+          blurb="Finds PDF quotes and order confirmations."
+          connected={drive}
+          everConnected={anyConnected}
+          Mark={DriveMark}
+          scopes={[{ name: 'drive.readonly', note: 'list and download files' }]}
+        />
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-line-soft pt-3">
+        <span className="text-[12px] text-ink-faint">
+          {google?.connected_at
+            ? `Last connected ${new Date(google.connected_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`
+            : 'Nothing connected yet.'}
+        </span>
+        <div className="flex items-center gap-1.5">
+          {!(gmail && drive) && (
+            <button onClick={() => connectAll.mutate('all')} disabled={connectAll.isPending} className="btn-secondary btn-sm">
+              {connectAll.isPending && connectAll.variables === 'all' ? 'Redirecting…' : 'Connect both'}
+            </button>
+          )}
+          {anyConnected && !confirmDisconnect && (
+            <button onClick={() => setConfirmDisconnect(true)} className="btn-ghost btn-sm text-crit hover:text-crit">
+              Disconnect Google
+            </button>
+          )}
+          {anyConnected && confirmDisconnect && (
+            <div className="flex items-center gap-2 rounded-lg border border-crit/30 bg-crit/10 px-2.5 py-1">
+              <span className="text-[12px] text-crit">Revoke Gmail and Drive?</span>
+              <button
+                onClick={() => disconnect.mutate(undefined, { onSettled: () => setConfirmDisconnect(false) })}
+                disabled={disconnect.isPending}
+                className="btn btn-sm bg-crit text-white hover:opacity-90"
+              >
+                {disconnect.isPending ? 'Revoking…' : 'Disconnect'}
+              </button>
+              <button onClick={() => setConfirmDisconnect(false)} className="btn-ghost btn-sm">
+                Cancel
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+      <ErrorLine error={disconnect.error as Error | null} />
+    </SettingsCard>
+  );
+}
+
+function AppearanceCard() {
+  const { theme, setTheme } = useTheme();
+  return (
+    <SettingsCard icon={<IconSun width={18} height={18} />} title="Appearance" description="A theme, or follow your system.">
+      <div className="flex rounded-lg bg-sunk p-1">
+        {(['system', 'light', 'dark'] as const).map((t) => (
+          <button
+            key={t}
+            onClick={() => setTheme(t)}
+            className={`focusable flex-1 rounded-md px-3 py-1.5 text-[13px] font-medium capitalize transition-colors ${
+              theme === t ? 'bg-surface text-ink shadow-card' : 'text-ink-soft hover:text-ink'
+            }`}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+    </SettingsCard>
+  );
+}
+
+function TeamCard() {
+  return (
+    <SettingsCard
+      icon={<IconTeam width={18} height={18} />}
+      title="Team & roles"
+      description="People, their roles and what each may do — enforced in the API and again in the database."
+    >
+      <Link to="/team" className="btn-secondary btn-sm inline-flex">Open Team &amp; Roles →</Link>
+    </SettingsCard>
+  );
+}
+
+type SettingsTab = 'connections' | 'ai' | 'studio' | 'account';
+
+const TABS: { id: SettingsTab; label: string; Icon: (p: { width?: number; height?: number }) => JSX.Element; principal: boolean }[] = [
+  { id: 'connections', label: 'Connections', Icon: IconInbox, principal: false },
+  { id: 'ai', label: 'AI & media', Icon: IconAssistant, principal: true },
+  { id: 'studio', label: 'Studio', Icon: IconBell, principal: true },
+  { id: 'account', label: 'Account', Icon: IconPerson, principal: false },
+];
+
+export default function Settings() {
+  const { may } = useAuth();
+  const [params, setParams] = useSearchParams();
+  const flash = googleFlash();
+
+  // Principal-only sections are hidden rather than shown empty: their cards
+  // answer 403 to anybody else.
+  const principal = may('settings', 'update');
+  const tabs = TABS.filter((t) => principal || !t.principal);
+  const asked = params.get('tab') as SettingsTab | null;
+  // Coming back from Google always lands on Connections, where the result is.
+  const tab: SettingsTab =
+    params.get('google') ? 'connections' : tabs.some((t) => t.id === asked) ? (asked as SettingsTab) : 'connections';
+
+  const choose = (next: SettingsTab) => {
+    const p = new URLSearchParams(params);
+    p.set('tab', next);
+    p.delete('google');
+    p.delete('service');
+    setParams(p, { replace: true });
+  };
 
   return (
     <Page>
@@ -897,7 +1136,7 @@ export default function Settings() {
 
       {flash && (
         <div
-          className={`rounded-lg border px-4 py-2.5 text-[13.5px] ${
+          className={`rounded-lg border px-4 py-2.5 text-[13px] ${
             flash.tone === 'good' ? 'border-good/30 bg-good/10 text-good' : 'border-crit/30 bg-crit/10 text-crit'
           }`}
         >
@@ -905,140 +1144,54 @@ export default function Settings() {
         </div>
       )}
 
-      <div className="grid gap-5 lg:grid-cols-2">
-        <Card className="p-6 lg:col-span-2">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h2 className="text-[16px] font-semibold text-ink">Google Workspace</h2>
-              <p className="mt-1 text-[13.5px] text-ink-soft">
-                Connect Gmail and Drive separately, or both at once. Read-only, plus draft creation in Gmail. Revocable any time.
-              </p>
-            </div>
-            <Pill tone={gmail && drive ? 'good' : anyConnected ? 'warn' : 'neutral'}>{overall}</Pill>
-          </div>
+      <div role="tablist" aria-label="Settings sections" className="flex gap-1 overflow-x-auto rounded-xl border border-line bg-surface p-1">
+        {tabs.map(({ id, label, Icon }) => (
+          <button
+            key={id}
+            role="tab"
+            aria-selected={tab === id}
+            onClick={() => choose(id)}
+            className={`focusable flex shrink-0 items-center gap-2 rounded-lg px-3.5 py-2 text-[13px] font-medium transition-colors ${
+              tab === id ? 'bg-brass/15 text-ink shadow-card' : 'text-ink-soft hover:bg-sunk hover:text-ink'
+            }`}
+          >
+            <Icon width={16} height={16} />
+            {label}
+          </button>
+        ))}
+      </div>
 
-          <div className="mt-5 grid gap-4 md:grid-cols-2">
-            <ServiceCard
-              service="gmail"
-              title="Gmail"
-              blurb="Reads project mail, classifies it, and writes reply drafts."
-              connected={gmail}
-              everConnected={anyConnected}
-              Mark={GmailMark}
-              scopes={[
-                { name: 'gmail.readonly', note: 'read messages and attachments' },
-                { name: 'gmail.compose', note: 'create drafts only — never sends' },
-              ]}
-            />
-            <ServiceCard
-              service="drive"
-              title="Google Drive"
-              blurb="Finds PDF quotes and order confirmations and parses them."
-              connected={drive}
-              everConnected={anyConnected}
-              Mark={DriveMark}
-              scopes={[{ name: 'drive.readonly', note: 'list and download files' }]}
-            />
-          </div>
+      <div className="grid gap-4 lg:grid-cols-2">
+        {tab === 'connections' && (
+          <>
+            <GoogleCard />
+            <EmailReadingCard />
+          </>
+        )}
 
-          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-line-soft pt-4">
-            <div className="text-[12.5px] text-ink-faint">
-              {google?.connected_at
-                ? `Last connected ${new Date(google.connected_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`
-                : 'Nothing connected yet.'}
-            </div>
-            <div className="flex items-center gap-2">
-              {!(gmail && drive) && (
-                <button
-                  onClick={() => connectAll.mutate('all')}
-                  disabled={connectAll.isPending}
-                  className="btn-secondary btn-sm"
-                >
-                  {connectAll.isPending && connectAll.variables === 'all' ? 'Redirecting…' : 'Connect both at once'}
-                </button>
-              )}
-              {anyConnected && !confirmDisconnect && (
-                <button onClick={() => setConfirmDisconnect(true)} className="btn-ghost btn-sm text-crit hover:text-crit">
-                  Disconnect Google
-                </button>
-              )}
-              {anyConnected && confirmDisconnect && (
-                <div className="flex items-center gap-2 rounded-lg border border-crit/30 bg-crit/10 px-3 py-1.5">
-                  <span className="text-[12.5px] text-crit">Revoke Gmail and Drive access?</span>
-                  <button
-                    onClick={() => disconnect.mutate(undefined, { onSettled: () => setConfirmDisconnect(false) })}
-                    disabled={disconnect.isPending}
-                    className="btn btn-sm bg-crit text-white hover:opacity-90"
-                  >
-                    {disconnect.isPending ? 'Revoking…' : 'Yes, disconnect'}
-                  </button>
-                  <button onClick={() => setConfirmDisconnect(false)} className="btn-ghost btn-sm">
-                    Cancel
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-          {disconnect.isError && <p className="mt-2 text-[12.5px] text-crit">{(disconnect.error as Error).message}</p>}
-        </Card>
+        {tab === 'ai' && (
+          <>
+            <AiSetupCard />
+            <GeminiSetupCard />
+            <CloudflareSetupCard />
+            <MediaSetupCard />
+          </>
+        )}
 
-        <Card className="p-6">
-          <h2 className="text-[16px] font-semibold text-ink">Appearance</h2>
-          <p className="mt-1 text-[13.5px] text-ink-soft">Choose a theme, or follow your system.</p>
-          <div className="mt-4 flex rounded-lg bg-sunk p-1">
-            {(['system', 'light', 'dark'] as const).map((t) => (
-              <button
-                key={t}
-                onClick={() => setTheme(t)}
-                className={`focusable flex-1 rounded-md px-3 py-1.5 text-[13px] font-medium capitalize transition-colors ${
-                  theme === t ? 'bg-surface text-ink shadow-card' : 'text-ink-soft hover:text-ink'
-                }`}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-        </Card>
+        {tab === 'studio' && (
+          <>
+            <ChasingCard />
+            <AiUsageLinkCard />
+            <TeamCard />
+          </>
+        )}
 
-        <Card className="p-6">
-          <h2 className="text-[16px] font-semibold text-ink">Studio rules</h2>
-          <p className="mt-1 text-[13.5px] text-ink-soft">Thresholds the follow-up engine uses.</p>
-          <dl className="mt-4 divide-y divide-line-soft text-[14px]">
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="text-ink-soft">Vendor silence before a nudge</dt>
-              <dd className="tabular-nums text-ink">3 days</dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="text-ink-soft">Client approval overdue</dt>
-              <dd className="tabular-nums text-ink">5 days</dd>
-            </div>
-            <div className="flex items-center justify-between py-2.5">
-              <dt className="text-ink-soft">Weekly report</dt>
-              <dd className="text-ink">Monday</dd>
-            </div>
-          </dl>
-          <p className="mt-3 text-[11px] text-ink-faint">Editable controls arrive with the settings API.</p>
-        </Card>
-
-        <AiSetupCard />
-        <MediaSetupCard />
-
-        <EmailReadingCard />
-
-        <AiUsageLinkCard />
-
-        <PasswordCard />
-
-        <ChasingCard />
-
-        <Card className="p-6 lg:col-span-2">
-          <h2 className="text-[16px] font-semibold text-ink">Team &amp; roles</h2>
-          <p className="mt-1 text-[13.5px] text-ink-soft">
-            People, their roles, and exactly what each role may do — enforced in the API and again by
-            row-level security in the database.
-          </p>
-          <Link to="/team" className="btn-secondary btn-sm mt-4 inline-flex">Open Team &amp; Roles →</Link>
-        </Card>
+        {tab === 'account' && (
+          <>
+            <AppearanceCard />
+            <PasswordCard />
+          </>
+        )}
       </div>
     </Page>
   );

@@ -2,7 +2,7 @@ import { DEFAULT_IMAGE_MODEL, IMAGE_MODELS, imageCostUsd, imageModelKind } from 
 import { env } from '../env.js';
 import { resolveOrgId } from '../lib/org.js';
 import { supabaseAdmin } from '../lib/supabase.js';
-import { AI_USAGE_ACTION, type CallContext } from './anthropic.js';
+import { AI_USAGE_ACTION, createMessage, isAiReady, type CallContext } from './anthropic.js';
 import { resolveImageAi } from '../lib/aiSettings.js';
 
 /**
@@ -72,6 +72,8 @@ export interface RenderResult {
   model: string;
   /** Anything the model said alongside the picture — usually what it could not do. */
   note: string | null;
+  /** A rendered floor plan: SVG, but a finished picture rather than a sketch. */
+  plan?: boolean;
 }
 
 export class ImagesNotConfigured extends Error {
@@ -130,7 +132,13 @@ function svgOf(text: string | null): string | null {
   const start = text.indexOf('<svg');
   const end = text.lastIndexOf('</svg>');
   if (start === -1 || end === -1 || end < start) return null;
-  const svg = text.slice(start, end + 6);
+  let svg = text.slice(start, end + 6);
+
+  // Models leave the namespace off as often as not, and without it a browser
+  // reads the file as bare XML: the picture shows blank in an <img> and
+  // inside a board.
+  const open = svg.slice(0, svg.indexOf('>') + 1);
+  if (!/\sxmlns\s*=/.test(open)) svg = svg.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
 
   // Model-written, but it is still markup that will be served back to a
   // browser: script and event handlers come out before it is stored.
@@ -187,7 +195,15 @@ export async function renderImage(
    * minutes; a picture asked for in conversation has to come back before
    * the assistant's own budget runs out, or the answer is lost with it.
    */
-  options?: { timeoutMs?: number },
+  options?: {
+    timeoutMs?: number;
+    /**
+     * What a draw-only model draws: the specification board (the default,
+     * for the Prompts page), or just the room — for a rendering that is
+     * going into a board laid out elsewhere.
+     */
+    vectorStyle?: 'board' | 'scene';
+  },
 ): Promise<RenderResult> {
   const ai = await resolveImageAi(ctx.orgId);
   if (!ai.apiKey) throw new ImagesNotConfigured();
@@ -207,7 +223,8 @@ export async function renderImage(
   // An image model gets the prompt as written; a text model is told to draw
   // instead of describe, or it answers with an outline of the board.
   const drawsRaster = imageModelKind(ai.model || DEFAULT_IMAGE_MODEL) === 'raster';
-  const parts: unknown[] = [{ text: prompt + manifest + (drawsRaster ? '' : `\n${AS_VECTOR}`) }];
+  const asVector = options?.vectorStyle === 'scene' ? CLAUDE_SKETCH : AS_VECTOR;
+  const parts: unknown[] = [{ text: prompt + manifest + (drawsRaster ? '' : `\n\n${asVector}`) }];
   for (const r of usable) {
     parts.push({ inline_data: { mime_type: r.mimeType, data: r.bytes.toString('base64') } });
   }
@@ -309,6 +326,122 @@ export async function renderImage(
     }
     throw err;
   }
+}
+
+/**
+ * What Claude is told when it has to draw.
+ *
+ * Claude cannot return a raster picture, but it writes SVG well — and a
+ * shaded perspective sketch of the room is a far better answer to "that
+ * didn't work" than an error. Kept compact on purpose: the whole thing has
+ * to be written inside one request's time budget.
+ */
+const CLAUDE_SKETCH = `You are an interior-design illustrator. Draw what the brief describes as ONE self-contained SVG illustration.
+
+Return ONLY the <svg> element — no prose, no explanation, no code fence.
+
+- viewBox matching the requested aspect ratio (e.g. 0 0 1600 900 for 16:9, 0 0 1200 1200 for 1:1). No width/height attributes.
+- Build it as a ONE-POINT PERSPECTIVE interior, eye level at about 45% of the height, vanishing point near the centre:
+  1. Back wall: a centred rectangle about 55% of the width. Side walls, ceiling and floor are the four trapezoids joining its corners to the canvas corners.
+  2. Floor boards or tiles: a few lines radiating from the vanishing point, plus horizontal joints that get closer together towards the back.
+  3. Cabinets and appliances sit against the walls: fronts on the back wall are flat rectangles, runs on the side walls are trapezoids that shrink toward the vanishing point. Show door panels with an inset outline.
+  4. Freestanding pieces (an island, a sofa, a table) in the foreground: a top face as a trapezoid and a front face as a rectangle, drawn after the walls so they overlap them.
+  5. Pendants hang on thin lines from the ceiling; windows are pale sky-coloured panes with mullions.
+- Use <linearGradient>/<radialGradient> for light falloff across walls and floor, a soft darker ellipse as the shadow under furniture, and a light glow from any windows.
+- Colour every material from the brief (timber, stone, metal, fabric) in realistic tones; suggest texture with a few subtle strokes rather than detail.
+- Furniture and fixtures as clean simple shapes in correct proportion and position.
+- If a picture is attached, keep its layout, viewpoint and architecture and change only what the brief asks.
+- No text, labels, dimensions or watermarks. No <script>, no external references, no <image> elements.
+${sizeLimit(110, 10)}`;
+
+/**
+ * How much a drawing may say. Fast models can afford more elements inside
+ * one request; the slower, more careful ones get a smaller canvas so they
+ * still finish before the function is killed at 60s.
+ */
+function sizeLimit(elements: number, kb: number): string {
+  return `- STRICT SIZE LIMIT: at most ${elements} elements and about ${kb} KB in total. Whole-number coordinates, no comments, no indentation, reuse gradients by id. Big simple shapes over fine detail — it must be finished well inside the limit, and a cut-off drawing is worthless.`;
+}
+
+/** The slower Claude models draw a smaller picture; see sizeLimit. */
+function sketchBudget(model: string | undefined): { system: string; maxTokens: number } {
+  if (!model || /haiku/i.test(model)) return { system: CLAUDE_SKETCH, maxTokens: 4500 };
+  const system = CLAUDE_SKETCH.replace(sizeLimit(110, 10), sizeLimit(60, 5));
+  return { system, maxTokens: /opus/i.test(model) ? 2600 : 3000 };
+}
+
+/** The image types Claude can look at, and its per-image ceiling. */
+const CLAUDE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const CLAUDE_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/** Whether Claude can stand in when there is no image model, or it fails. */
+export function isSketchReady(orgId?: string | null): Promise<boolean> {
+  return isAiReady(orgId);
+}
+
+/**
+ * Draw the brief as an SVG sketch with Claude.
+ *
+ * The fallback beneath every image provider: used when Gemini (or Grok)
+ * is missing, out of quota, refuses, or errors. Recorded on the spend report
+ * by `createMessage` like every other Claude call.
+ */
+export async function sketchWithClaude(
+  prompt: string,
+  references: ImageReference[],
+  ctx: CallContext,
+  options?: {
+    timeoutMs?: number;
+    /** Which Claude draws; the studio's own model when left out. */
+    model?: string;
+  },
+): Promise<RenderResult> {
+  const content: unknown[] = [];
+  for (const r of references) {
+    if (!CLAUDE_IMAGE_TYPES.has(r.mimeType) || r.bytes.length > CLAUDE_MAX_IMAGE_BYTES) continue;
+    if (content.length >= 4) break;
+    content.push({
+      type: 'image',
+      source: { type: 'base64', media_type: r.mimeType, data: r.bytes.toString('base64') },
+    });
+  }
+  content.push({ type: 'text', text: prompt });
+
+  const budget = sketchBudget(options?.model);
+  const message = await createMessage(
+    ctx,
+    {
+      ...(options?.model ? { model: options.model } : {}),
+      // Sonnet 5 and Opus 5 think by default, and a drawing's whole token
+      // budget went on thinking before a single shape was written. Drawing
+      // needs no deliberation; Haiku does not think unless asked.
+      ...(options?.model && !/haiku/i.test(options.model) ? { thinking: { type: 'disabled' as const } } : {}),
+      max_tokens: budget.maxTokens,
+      system: budget.system,
+      messages: [{ role: 'user', content: content as never }],
+    },
+    options?.timeoutMs ? { timeoutMs: options.timeoutMs } : undefined,
+  );
+
+  const said = message.content
+    .filter((b): b is Extract<typeof b, { type: 'text' }> => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n');
+  const svg = svgOf(said);
+  if (!svg) {
+    throw new Error(
+      message.stop_reason === 'max_tokens'
+        ? 'The sketch ran out of room before it was finished. Try a shorter brief.'
+        : 'Claude did not return a drawing.',
+    );
+  }
+
+  return {
+    bytes: Buffer.from(svg, 'utf8'),
+    mimeType: 'image/svg+xml',
+    model: message.model,
+    note: 'An illustrated sketch drawn by Claude — not a photoreal render.',
+  };
 }
 
 /**

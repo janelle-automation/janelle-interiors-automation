@@ -373,8 +373,20 @@ assistantRouter.post(
     if (!drawn.ok) return res.status(400).json({ error: drawn.reason, timedOut: drawn.timedOut === true });
     const picture = drawn.value;
 
-    const lead =
-      picture.mode === 'edit'
+    const roomList = picture.rooms.map((r) => r.room).join(', ');
+    const lead = picture.plan
+      ? `Here is your floor plan, furnished — the walls, room names and dimensions are your original drawing.${
+          picture.rooms.length
+            ? ` Below it, ${picture.rooms.length} room${picture.rooms.length === 1 ? '' : 's'} in perspective: ${roomList}. They follow each room's use and size from the plan, not its exact walls and windows.`
+            : ' Ask for any room on its own to see it in perspective.'
+        } Furniture and finishes are illustrative.`
+      : picture.board
+      ? picture.sketch
+        ? `Here is the board. The picture on it is an illustrated sketch — enable billing on the Gemini key (or add an xAI key) for a photoreal rendering.`
+        : 'Here is the board. The rendering is generated, not a photograph — check every specification before it goes to a client.'
+      : picture.sketch
+        ? `Here is a sketch of it. ${picture.note ?? ''}`.trim()
+        : picture.mode === 'edit'
         ? 'Here it is, worked up from the picture you attached. It is a generated image, not a photograph.'
         : 'Here it is. It is a generated image, not a photograph.';
 
@@ -397,6 +409,22 @@ assistantRouter.post(
                 webUrl: null,
               },
             },
+            // A floor plan's rooms, one picture each, in the order Claude
+            // ranked them — the kitchen and living room first.
+            ...picture.rooms.map((r) => ({
+              kind: 'file' as const,
+              title: r.roomSize ? `${r.room} — ${r.roomSize}` : r.room,
+              preview: 'image' as const,
+              file: {
+                name: r.name,
+                mimeType: r.mimeType,
+                size: r.size,
+                source: 'upload' as const,
+                token: r.token,
+                downloadable: true,
+                webUrl: null,
+              },
+            })),
           ],
           more: 0,
           speech: 'Here it is.',

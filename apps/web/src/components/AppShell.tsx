@@ -7,6 +7,7 @@ import { useAssistant } from '../context/AssistantContext';
 import { AssistantLauncher, AssistantPanel } from './AssistantPanel';
 import { TaskReminder } from './TaskReminder';
 import { ConnectGooglePrompt } from './ConnectGooglePrompt';
+import { endImpersonation, readImpersonation } from '../lib/impersonate';
 import { ASSISTANT_NAME, ROLE_LABELS, canSupervise, type Resource } from '@janelle/shared';
 import {
   IconDashboard, IconProjects, IconVendors, IconInbox, IconDoc,
@@ -458,6 +459,43 @@ function MenuIcon() {
   );
 }
 
+/**
+ * Always on screen while the admin is signed in as a teammate. Everything
+ * done here is done AS that person, so it must never be possible to forget.
+ */
+function ImpersonationBanner() {
+  const [viewing] = useState(readImpersonation);
+  const [leaving, setLeaving] = useState(false);
+  if (!viewing) return null;
+  return (
+    <div className="flex min-w-0 flex-1 justify-center">
+      <div
+        role="status"
+        title={`You are signed in as ${viewing.asName} (${viewing.asEmail}). Anything you do is done as them.`}
+        className="flex min-w-0 items-center gap-2 rounded-full border border-warn/40 bg-warn/15 py-1 pl-3 pr-1 text-[12.5px] text-ink"
+      >
+        <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-warn" aria-hidden="true" />
+        <span className="min-w-0 truncate">
+          <span className="hidden text-ink-soft md:inline">Viewing as </span>
+          <strong className="font-semibold">{viewing.asName}</strong>
+          <span className="hidden text-ink-faint xl:inline"> · {viewing.asEmail}</span>
+        </span>
+        <button
+          type="button"
+          disabled={leaving}
+          onClick={() => {
+            setLeaving(true);
+            void endImpersonation();
+          }}
+          className="shrink-0 rounded-full bg-warn px-2.5 py-1 text-[12px] font-semibold text-white hover:opacity-90 disabled:opacity-60"
+        >
+          {leaving ? 'Returning…' : <><span className="hidden sm:inline">Back to </span>{viewing.adminName}</>}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   const [drawer, setDrawer] = useState(false);
   const [collapsed, setCollapsed] = useState<boolean>(readCollapsed);
@@ -544,7 +582,11 @@ export function AppShell({ children }: { children: ReactNode }) {
 
           <h1 className="hidden shrink-0 text-[15px] font-semibold text-ink sm:block">{pageTitle}</h1>
 
-          <div className="ml-auto flex items-center gap-1">
+          {/* In the bar itself while signed in as a teammate — always on
+              screen, never covering the page. */}
+          <ImpersonationBanner />
+
+          <div className="ml-auto flex shrink-0 items-center gap-1">
             <span className="mr-1.5">
               <AssistantLauncher />
             </span>

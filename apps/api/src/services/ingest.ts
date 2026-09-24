@@ -53,6 +53,48 @@ export interface IngestOptions {
    * making them wait on the whole studio being read first.
    */
   onlyUserId?: string;
+  /**
+   * Internal: the studio's Drive project folders, read once for the whole
+   * pass by `runIngest` rather than again inside every mailbox's slice.
+   */
+  prefetched?: {
+    driveProjects: Awaited<ReturnType<typeof loadDriveProjects>>;
+    folderProjects: Map<string, string>;
+  };
+}
+
+/** Which mailbox goes first next pass — see the rotation in runIngest. */
+let rotation = 0;
+
+/**
+ * The studio's project folders, read once per pass.
+ *
+ * They are the studio's, not any one mailbox's, but they used to be read
+ * inside every mailbox's slice of the pass. At ~4s a read plus the sync
+ * behind it, that consumed the whole slice of a four-mailbox pass before a
+ * single email was looked at: a newly connected mailbox waited forever
+ * with its messages listed as "remaining". Read here, once, through the
+ * first connected account that can see Drive.
+ */
+async function prefetchDriveProjects(orgId: string, userIds: string[]): Promise<IngestOptions['prefetched']> {
+  for (const userId of userIds) {
+    try {
+      const drive = await driveFor(userId);
+      if (!drive) continue;
+      const driveProjects = await loadDriveProjects(orgId, drive);
+      if (!driveProjects) continue;
+      const folderProjects = (await syncProjectsFromDrive(orgId, driveProjects)).map;
+      try {
+        await syncProjectStatusDoc(orgId, drive, driveProjects, folderProjects);
+      } catch (err) {
+        console.error('[ingest] project status document unread:', (err as Error).message);
+      }
+      return { driveProjects, folderProjects };
+    } catch (err) {
+      console.error('[ingest] project folders unreadable:', isGoogleAuthFailure(err) ? 'Google needs reconnecting' : (err as Error).message);
+    }
+  }
+  return { driveProjects: null, folderProjects: new Map() };
 }
 
 /**
@@ -355,16 +397,32 @@ export async function runIngest(
   try {
     // The budget is the whole pass, shared out, so adding a fifth mailbox
     // makes each pass shallower rather than making the request time out.
-    const budgetEach = Math.max(4_000, Math.floor((opts.budgetMs ?? DEFAULT_BUDGET_MS) / mailboxes.length));
+    const deadline = Date.now() + (opts.budgetMs ?? DEFAULT_BUDGET_MS);
     const totals: IngestResult = {
       ok: true, emails: 0, documents: 0, replies: 0, tasks: 0, skipped: 0, done: true, remaining: 0,
     };
     let anyRan = false;
 
-    for (const userId of mailboxes) {
+    // Take turns at going first. Always walking the list in the same order
+    // meant the last mailbox only ever got what the others left over — for
+    // a newly connected one with a backlog, that was nothing.
+    if (mailboxes.length > 1) {
+      const start = rotation++ % mailboxes.length;
+      mailboxes.push(...mailboxes.splice(0, start));
+    }
+
+    // The studio's project folders, once for the whole pass — not once per
+    // mailbox, which used up each mailbox's slice before its first email.
+    const prefetched =
+      useAi && !opts.folderId ? await prefetchDriveProjects(orgId, mailboxes) : undefined;
+
+    for (const [index, userId] of mailboxes.entries()) {
+      // What is left, shared among the mailboxes still to go: time one
+      // mailbox did not need rolls on to the next instead of being lost.
+      const budgetEach = Math.max(4_000, Math.floor((deadline - Date.now()) / (mailboxes.length - index)));
       let result: IngestResult;
       try {
-        result = await ingestInternal(orgId, userId, { ...opts, budgetMs: budgetEach }, useAi);
+        result = await ingestInternal(orgId, userId, { ...opts, budgetMs: budgetEach, prefetched }, useAi);
       } catch (err) {
         // One member's expired grant must not stop the studio's own mail
         // being read, nor anybody else's.
@@ -519,7 +577,11 @@ async function ingestInternal(
   let drive: Awaited<ReturnType<typeof driveFor>> = null;
   let driveProjects: Awaited<ReturnType<typeof loadDriveProjects>> = null;
   let folderProjects = new Map<string, string>();
-  if (useAi && !opts.folderId) {
+  if (opts.prefetched) {
+    // Read once for the whole pass — see prefetchDriveProjects.
+    driveProjects = opts.prefetched.driveProjects;
+    folderProjects = opts.prefetched.folderProjects;
+  } else if (useAi && !opts.folderId) {
     try {
       drive = await driveFor(userId);
       driveProjects = drive ? await loadDriveProjects(orgId, drive) : null;

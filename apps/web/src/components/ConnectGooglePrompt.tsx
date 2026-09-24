@@ -1,5 +1,6 @@
 import { useAuth } from '../context/AuthContext';
 import { useConnectGoogle } from '../lib/queries';
+import { readImpersonation } from '../lib/impersonate';
 
 function IconGoogle() {
   return (
@@ -39,7 +40,11 @@ export function ConnectGooglePrompt() {
   // could spend that day in a system reading none of their mail, wondering
   // why their board was empty. Connecting IS the setup step, so it stands
   // until it is done — no backdrop click, no Escape, no "not now".
-  const showing = Boolean(user) && googleConnected === false;
+  //
+  // Never while the admin is signed in as a teammate: connecting from here
+  // would attach the admin's Google to the teammate's login, and the blocking
+  // sheet would stop the admin seeing the very screen they came to check.
+  const showing = Boolean(user) && googleConnected === false && !readImpersonation();
 
   if (!showing) return null;
 

@@ -1,5 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
+  DEFAULT_IMAGE_MODEL,
+  imageModelKind,
   canWith,
   videoCostUsd,
   type PermissionOverrides,
@@ -8,8 +10,12 @@ import {
 import { UPLOAD_GRANT_TTL_MS, sealFileGrant } from '../lib/fileTokens.js';
 import { storeUpload, type UploadType } from '../lib/uploads.js';
 import { RenderTimeout, clampSeconds, generateImage, grokModels, isGrokReady, startVideo } from './grok.js';
-import { isImageReady, renderImage, type ImageReference } from './images.js';
+import { isImageReady, isSketchReady, renderImage, sketchWithClaude, type ImageReference } from './images.js';
 import { createJob, jobsTableReady } from './mediaJobs.js';
+import { boardSpecs, composeBoard, studioName } from './board.js';
+import { resolveImageAi, resolvePictureEngine } from '../lib/aiSettings.js';
+import { editWithCloudflare, isCloudflareReady, renderWithCloudflare } from './cloudflare.js';
+import { isFloorPlan, readPlanRooms, renderFloorPlan, renderPlanRooms, type RoomRender } from './floorPlan.js';
 
 /**
  * Making a picture or a clip, in one place.
@@ -84,7 +90,7 @@ export async function videoSpentToday(db: SupabaseClient): Promise<number> {
 
 /** What each mode can do right now, for the composer and for a quote. */
 export interface ImagineOptions {
-  image: { ready: boolean; provider: 'grok' | 'gemini' | null };
+  image: { ready: boolean; provider: 'grok' | 'gemini' | 'cloudflare' | 'claude' | null };
   video: {
     ready: boolean;
     model: string;
@@ -97,9 +103,11 @@ export interface ImagineOptions {
 }
 
 export async function imagineOptions(actor: ImagineActor): Promise<ImagineOptions> {
-  const [grok, gemini, models, spent, jobsReady] = await Promise.all([
+  const [grok, gemini, claude, cloudflare, models, spent, jobsReady] = await Promise.all([
     isGrokReady(actor.orgId),
     isImageReady(actor.orgId),
+    isSketchReady(actor.orgId),
+    isCloudflareReady(actor.orgId),
     grokModels(actor.orgId),
     videoSpentToday(actor.db),
     jobsTableReady(),
@@ -107,7 +115,10 @@ export async function imagineOptions(actor: ImagineActor): Promise<ImagineOption
 
   const seconds = clampSeconds(undefined, models.video);
   return {
-    image: { ready: grok || gemini, provider: grok ? 'grok' : gemini ? 'gemini' : null },
+    image: {
+      ready: grok || gemini || cloudflare || claude,
+      provider: grok ? 'grok' : gemini ? 'gemini' : cloudflare ? 'cloudflare' : claude ? 'claude' : null,
+    },
     video: {
       // Video is Grok only, and needs somewhere to write the job down.
       ready: grok && jobsReady,
@@ -132,6 +143,14 @@ export interface MadePicture {
   note: string | null;
   /** Attachments that could not be used, named rather than dropped quietly. */
   ignored: string[];
+  /** Laid out as a presentation board rather than handed over bare. */
+  board: boolean;
+  /** The picture is an illustrated sketch, not a photoreal render. */
+  sketch: boolean;
+  /** A floor plan rendered furnished, the drawing's own labels on top. */
+  plan: boolean;
+  /** With a floor plan: its key rooms in perspective, each its own file. */
+  rooms: { name: string; mimeType: string; size: number; token: string; room: string; roomSize: string | null }[];
 }
 
 /**
@@ -142,7 +161,10 @@ export interface MadePicture {
  * a building on its site. Only the one thing a render always wants is
  * added, because models scribble invented text into pictures.
  */
-const NO_TEXT = 'Do not draw any text, labels, watermarks or dimension figures into the image.';
+/** Less than this left in the request and a Claude sketch cannot finish. */
+const SKETCH_MIN_MS = 12_000;
+
+const NO_TEXT ='Do not draw any text, labels, watermarks or dimension figures into the image.';
 
 /**
  * What an edit must hold on to.
@@ -168,6 +190,11 @@ export async function makePicture(input: {
   projectId?: string | null;
   /** How long the render may take; see ImageRequest.timeoutMs. */
   timeoutMs?: number;
+  /**
+   * Lay a picture drawn from words out as a presentation board. Default on;
+   * a transformed attachment always comes back as the picture itself.
+   */
+  board?: boolean;
 }): Promise<Made<MadePicture>> {
   const { actor } = input;
   if (!mayImagine(actor)) return { ok: false, reason: 'Drawing is not something this role may do.' };
@@ -175,89 +202,196 @@ export async function makePicture(input: {
   const brief = input.brief.trim();
   if (!brief) return { ok: false, reason: 'Say what you would like to see.' };
 
-  // Grok is preferred — its edit endpoint holds a supplied picture rather
-  // than being loosely guided by it — but the studio's Gemini key draws
-  // and edits perfectly well, and refusing while a working image key sits
-  // in the environment is the wrong answer.
-  const viaGrok = await isGrokReady(actor.orgId);
-  const viaGemini = viaGrok ? false : await isImageReady(actor.orgId);
-  if (!viaGrok && !viaGemini) {
-    return {
-      ok: false,
-      reason:
-        'Picture-making needs an image key — either xAI or Gemini — which the principal adds in Settings.',
-    };
-  }
+  // Who draws, in order, each tried in turn until one produces a picture.
+  //
+  // Settings → "Drawn by" decides who goes first. After that the order is
+  // always the same: a real photograph from whoever can make one, and the
+  // Claude sketch last — it cannot photograph, but it beats an error.
+  const started = Date.now();
+  const [grok, gemini, claude, cloudflare, engine, geminiAi] = await Promise.all([
+    isGrokReady(actor.orgId),
+    isImageReady(actor.orgId),
+    isSketchReady(actor.orgId),
+    isCloudflareReady(actor.orgId),
+    resolvePictureEngine(actor.orgId),
+    resolveImageAi(actor.orgId),
+  ]);
 
   const aspect = (input.aspectRatio ?? '16:9').trim() || '16:9';
   const resolution = input.resolution === '1K' ? '1K' : '2K';
   const ignored: string[] = [];
 
-  let picture: { bytes: Buffer; mimeType: string; model: string; note: string | null };
+  let picture: { bytes: Buffer; mimeType: string; model: string; note: string | null; plan?: boolean } | null = null;
+  /** A floor plan's rooms in perspective, made alongside the plan itself. */
+  let roomRenders: RoomRender[] = [];
   let mode: 'edit' | 'generate' = input.sources.length ? 'edit' : 'generate';
 
   // The brief first, then how to treat the attachment, then the one rule
-  // every render wants. Built once so both providers are told the same.
+  // every render wants. Built once so every provider is told the same.
   const editing = input.sources.length > 0;
   const instructions = [brief, editing ? HOLD_THE_FRAME : '', NO_TEXT].filter(Boolean).join('\n\n');
 
-  try {
-    if (viaGrok) {
+  const budgetMs = input.timeoutMs ?? 30_000;
+  const ctx = { feature: 'image.render' as const, orgId: actor.orgId, actor: actor.userId, entity: 'media_jobs', entityId: null };
+
+  type Attempt = { name: string; minMs: number; run: (left: number) => Promise<NonNullable<typeof picture>> };
+
+  const viaGrok: Attempt = {
+    name: 'Grok',
+    minMs: 5_000,
+    run: async (left) => {
       // The edit endpoint takes exactly one picture, so the first wins and
       // the rest are named in the reply rather than dropped quietly.
-      ignored.push(...input.sources.slice(1).map((r) => r.label ?? 'an attachment'));
       const drawn = await generateImage(
-        {
-          prompt: instructions,
-          source: input.sources[0] ?? null,
-          aspectRatio: input.sources.length ? undefined : aspect,
-          resolution,
-          timeoutMs: input.timeoutMs,
-        },
-        { feature: 'image.render', orgId: actor.orgId, actor: actor.userId, entity: 'media_jobs', entityId: null },
+        { prompt: instructions, source: input.sources[0] ?? null, aspectRatio: editing ? undefined : aspect, resolution, timeoutMs: left },
+        ctx,
       );
-      picture = drawn;
+      ignored.push(...input.sources.slice(1).map((r) => r.label ?? 'an attachment'));
       mode = drawn.mode;
-    } else {
-      // Gemini takes up to fourteen references, so every attachment goes
-      // in; aspect ratio has to be said in words, having no field of its own.
-      picture = await renderImage(
-        `${instructions}
+      return drawn;
+    },
+  };
+  // Gemini takes up to fourteen references, so every attachment goes in;
+  // aspect ratio has to be said in words, having no field of its own.
+  const viaGemini: Attempt = {
+    name: 'Gemini',
+    minMs: 5_000,
+    run: (left) => renderImage(`${instructions}\n\nAspect ratio ${aspect}.`, input.sources, ctx, { timeoutMs: left, vectorStyle: 'scene' }),
+  };
+  // From words, FLUX.1. From a photograph, FLUX.2 [klein], which keeps the
+  // room — its walls, window, floor and camera — and changes only what the
+  // brief asks. It works from one photo; any others are named in the reply.
+  const viaCloudflare: Attempt = {
+    name: 'Cloudflare',
+    minMs: 3_000,
+    run: async (left) => {
+      if (!editing) return renderWithCloudflare(`${brief}\n\n${NO_TEXT}`, ctx, { timeoutMs: left });
+      // A floor plan is not a room to redecorate: it is rendered as a
+      // furnished plan, with the drawing's own labels laid back on top.
+      if (await isFloorPlan(brief, input.sources[0], ctx)) {
+        const source = input.sources[0];
+        const deadline = started + budgetMs;
+        // The key rooms in perspective, alongside the furnished plan: Claude
+        // reads the drawing while the plan renders, then every room is drawn
+        // at once. Whatever finishes in time comes back with the plan.
+        const rooms = (async () => {
+          const reading = await readPlanRooms(brief, source, ctx, Math.min(20_000, Math.max(3_000, deadline - Date.now())));
+          const left = deadline - Date.now();
+          return reading && left > 4_000 ? renderPlanRooms(reading, ctx, left) : [];
+        })().catch((err) => {
+          console.warn('[imagine] room renders unavailable:', (err as Error).message);
+          return [] as RoomRender[];
+        });
+        const [plan, renders] = await Promise.all([
+          renderFloorPlan(brief, source, ctx, { timeoutMs: Math.max(3_000, deadline - Date.now()) }),
+          rooms,
+        ]);
+        roomRenders = renders;
+        ignored.push(...input.sources.slice(1).map((r) => r.label ?? 'an attachment'));
+        mode = 'edit';
+        return plan;
+      }
+      const drawn = await editWithCloudflare(instructions, input.sources[0], ctx, { timeoutMs: left });
+      ignored.push(...input.sources.slice(1).map((r) => r.label ?? 'an attachment'));
+      mode = 'edit';
+      return drawn;
+    },
+  };
+  const viaClaude = (model?: string): Attempt => ({
+    name: 'Claude',
+    minMs: SKETCH_MIN_MS,
+    run: (left) => sketchWithClaude(`${instructions}\n\nAspect ratio ${aspect}.`, input.sources, ctx, { timeoutMs: left, model }),
+  });
 
-Aspect ratio ${aspect}.`,
-        input.sources,
-        { feature: 'image.render', orgId: actor.orgId, actor: actor.userId, entity: 'media_jobs', entityId: null },
-        // Bounded well inside a request: the board default is three
-        // minutes, which outlives the function it runs in.
-        { timeoutMs: input.timeoutMs ?? 30_000 },
-      );
-    }
-  } catch (err) {
-    return {
-      ok: false,
-      reason: (err as Error).message,
-      timedOut: err instanceof RenderTimeout || (err as Error)?.name === 'AbortError',
-    };
+  const geminiPhotographs = gemini && imageModelKind(geminiAi.model || DEFAULT_IMAGE_MODEL) === 'raster';
+  const chain: Attempt[] = [];
+  if (engine.startsWith('claude') && claude) {
+    chain.push(viaClaude(engine));
+  } else {
+    // Cloudflare first when chosen, or whenever Gemini cannot photograph —
+    // it edits an attached photo as well as drawing from words.
+    const cloudflareFirst = cloudflare && (engine === 'cloudflare' || !geminiPhotographs);
+    if (cloudflareFirst) chain.push(viaCloudflare);
+    if (grok) chain.push(viaGrok);
+    if (geminiPhotographs) chain.push(viaGemini);
+    if (cloudflare && !cloudflareFirst) chain.push(viaCloudflare);
+    // Flash Lite draws rather than photographs: after every photo source.
+    if (gemini && !geminiPhotographs) chain.push(viaGemini);
+    if (claude) chain.push(viaClaude());
   }
 
-  /**
-   * A rendering is a photograph or it is nothing.
-   *
-   * `renderImage` falls back to SVG when the model writes vector markup
-   * instead of drawing, which is right for a specification board — the
-   * typography is exact and the studio gets a usable page. It is the wrong
-   * answer here. Asked to show a room furnished, that fallback returns a
-   * flat cartoon with the furniture labelled in text, and handing it over
-   * as though it were the render is worse than admitting the studio has no
-   * model that can photograph: it looks like the feature works.
-   */
-  if (picture.mimeType.includes('svg')) {
+  if (!chain.length) {
     return {
       ok: false,
       reason:
-        `The image model in use ("${picture.model}") cannot produce a photograph — it drew a flat diagram instead. ` +
-        'For a photoreal rendering the studio needs billing enabled on its Google image key, or an xAI key in Settings.',
+        'Picture-making needs an image source — Cloudflare (free), Gemini or xAI — or a Claude key for sketches, which the principal adds in Settings.',
     };
+  }
+
+  // The board's words, pulled from the brief while the picture renders —
+  // in parallel, so the board costs no extra wall-clock. A failure here
+  // only means the picture comes back bare.
+  const wantBoard = input.board !== false && !editing && claude;
+  const specsPending = wantBoard
+    ? Promise.all([boardSpecs(brief, ctx, Math.min(20_000, budgetMs)), studioName(actor.orgId)]).catch((err) => {
+        console.warn('[imagine] board specs unavailable:', (err as Error).message);
+        return null;
+      })
+    : Promise.resolve(null);
+
+  const failures: string[] = [];
+  let timedOut = false;
+  for (const attempt of chain) {
+    const left = budgetMs - (Date.now() - started);
+    if (left < attempt.minMs) {
+      timedOut = true;
+      continue;
+    }
+    try {
+      picture = await attempt.run(left);
+      break;
+    } catch (err) {
+      failures.push(`${attempt.name}: ${(err as Error).message}`);
+      if (err instanceof RenderTimeout || (err as Error)?.name === 'AbortError' || /time limit|timed? ?out/i.test((err as Error).message)) {
+        timedOut = true;
+      }
+      console.warn(`[imagine] ${attempt.name} could not draw it:`, (err as Error).message);
+    }
+  }
+
+  if (!picture) {
+    return {
+      ok: false,
+      reason: failures.length ? failures.join(' · ') : 'There was not enough time left to draw it.',
+      timedOut,
+    };
+  }
+  // A photo source failed before this one worked: worth a word, not a fuss.
+  if (failures.length && picture.mimeType.includes('svg')) {
+    picture.note = `${picture.note ?? ''} (${failures.map((f) => f.slice(0, 120)).join(' · ')})`.trim();
+  }
+
+  // A vector-only Gemini model (Flash Lite) answers with SVG rather than a
+  // photograph. That is a sketch, not a render — delivered as one, and said
+  // plainly, rather than refused.
+  // A rendered floor plan is SVG only because it layers the drawing over the
+  // rendering; it is a finished picture, not a sketch.
+  const sketch = picture.mimeType.includes('svg') && !picture.plan;
+  if (sketch && !picture.note?.includes('sketch')) {
+    picture.note = 'An illustrated sketch, not a photoreal render — choose a raster Gemini model with billing, or add an xAI key, for photographs.';
+  }
+
+  // Into the studio's board format: the picture large, the specifications
+  // beside it, the materials beneath, the studio at the foot.
+  const specs = await specsPending;
+  let board = false;
+  if (specs?.[0]) {
+    picture = {
+      ...picture,
+      bytes: composeBoard({ photo: picture, specs: specs[0], studio: specs[1] }),
+      mimeType: 'image/svg+xml',
+    };
+    board = true;
   }
 
   const extension = picture.mimeType.includes('svg')
@@ -266,6 +400,8 @@ Aspect ratio ${aspect}.`,
       ? 'jpg'
       : 'png';
   const stem =
+    (picture.plan ? 'Furnished Floor Plan' : '') ||
+    (board && specs?.[0]?.title ? `${specs[0].title} Board` : '') ||
     brief.replace(/[^\w\s-]+/g, ' ').replace(/\s+/g, ' ').trim().split(' ').slice(0, 6).join(' ') ||
     'Rendering';
   const name = `${stem} — ${new Date().toISOString().slice(0, 10)}.${extension}`;
@@ -297,6 +433,49 @@ Aspect ratio ${aspect}.`,
     bytes: picture.bytes.length,
   }).catch(() => null);
 
+  // The plan's rooms, each stored and filed like any other picture, so each
+  // can be opened, downloaded and found again on its own.
+  const day = new Date().toISOString().slice(0, 10);
+  const rooms: MadePicture['rooms'] = [];
+  for (const render of roomRenders) {
+    try {
+      const ext = render.mimeType.includes('png') ? 'png' : 'jpg';
+      const roomName = `${render.room.name}${render.room.size ? ` ${render.room.size.replace(/"/g, '')}` : ''} — ${day}.${ext}`;
+      const stored = await storeUpload({
+        orgId: actor.orgId,
+        userId: actor.userId,
+        name: roomName,
+        mimeType: render.mimeType as UploadType,
+        bytes: render.bytes,
+      });
+      rooms.push({
+        name: roomName,
+        mimeType: render.mimeType,
+        size: render.bytes.length,
+        token: sealFileGrant(
+          { source: 'upload', orgId: actor.orgId, path: stored.path, mimeType: render.mimeType, name: roomName, size: render.bytes.length },
+          UPLOAD_GRANT_TTL_MS,
+        ),
+        room: render.room.name,
+        roomSize: render.room.size,
+      });
+      await createJob({
+        orgId: actor.orgId,
+        userId: actor.userId,
+        kind: 'image',
+        model: render.model,
+        prompt: `${render.room.name} — from the floor plan: ${brief}`.slice(0, 2000),
+        projectId: input.projectId ?? null,
+        status: 'done',
+        storagePath: stored.path,
+        mimeType: render.mimeType,
+        bytes: render.bytes.length,
+      }).catch(() => null);
+    } catch (err) {
+      console.warn('[imagine] could not store a room render:', (err as Error).message);
+    }
+  }
+
   return {
     ok: true,
     value: {
@@ -308,6 +487,10 @@ Aspect ratio ${aspect}.`,
       mode,
       note: picture.note,
       ignored,
+      board,
+      sketch,
+      plan: Boolean(picture.plan),
+      rooms,
     },
   };
 }
