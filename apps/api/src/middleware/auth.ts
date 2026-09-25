@@ -57,6 +57,16 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     return res.status(401).json({ error: 'Invalid or expired session' });
   }
 
+  // Disabled from Team & roles. The ban stops new sign-ins and token
+  // refreshes, but an access token already issued stays valid for up to an
+  // hour — refused here, so disabling someone takes effect on their next
+  // click rather than whenever their token happens to run out. 401, so the
+  // app drops the session and shows the sign-in screen.
+  const bannedUntil = data.user.banned_until ? Date.parse(data.user.banned_until) : NaN;
+  if (!Number.isNaN(bannedUntil) && bannedUntil > Date.now()) {
+    return res.status(401).json({ error: 'This account has been disabled' });
+  }
+
   // Profile carries org + role. Read via admin to avoid a policy
   // chicken-and-egg on first login.
   // `seat` only when migration 0008 has been applied — see lib/seats.ts.

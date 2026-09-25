@@ -31,25 +31,75 @@ export class NetworkError extends Error {
 }
 
 /**
+ * The API turned the session away (401) and it could not be renewed.
+ *
+ * supabase-js hands back whatever session it has stored, and a stored
+ * session can be dead on the server — signed out elsewhere, the refresh
+ * token revoked, the account removed. Left alone the app showed "the API
+ * isn't responding" over a perfectly healthy API. Instead the stale session
+ * is dropped here, which fires SIGNED_OUT and puts the login screen up.
+ */
+export class SessionExpiredError extends Error {
+  constructor() {
+    super('Your session has expired — please sign in again.');
+    this.name = 'SessionExpiredError';
+  }
+}
+
+/** Why the app signed someone out, for the sign-in screen to show once. */
+export const SIGNED_OUT_REASON = 'janelle.signedOutReason';
+
+async function authHeader(headers: Headers): Promise<void> {
+  if (!supabase) return;
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+}
+
+/**
+ * After a 401: try once to renew the session (the token may only look
+ * unexpired to a slow clock). True when renewed and the request can be sent
+ * again; otherwise the session is cleared locally and false comes back.
+ */
+async function renewAfter401(): Promise<boolean> {
+  if (!supabase) return false;
+  const { data, error } = await supabase.auth.refreshSession();
+  if (!error && data.session) return true;
+  // Disabled from Team & roles: say so on the sign-in screen, rather than
+  // leaving them to wonder why they were thrown out.
+  if (error && /banned/i.test(error.message)) {
+    try {
+      sessionStorage.setItem(SIGNED_OUT_REASON, 'This account has been disabled. Ask the studio admin to turn it back on.');
+    } catch {
+      /* storage blocked — they still reach the sign-in screen */
+    }
+  }
+  await supabase.auth.signOut({ scope: 'local' });
+  return false;
+}
+
+/**
  * Thin fetch wrapper that attaches the current Supabase access token
  * so the API can enforce row-level security. Throws on non-2xx, and
  * throws NetworkError when there was no response at all.
  */
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function api<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set('Content-Type', 'application/json');
-
-  if (supabase) {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (token) headers.set('Authorization', `Bearer ${token}`);
-  }
+  await authHeader(headers);
 
   let res: Response;
   try {
     res = await fetch(`${BASE}/api${path}`, { ...init, headers });
   } catch (err) {
     throw new NetworkError(err);
+  }
+
+  // A 401 never ran the request, so sending it again once is safe.
+  if (res.status === 401 && headers.has('Authorization')) {
+    if (!retried && (await renewAfter401())) return api<T>(path, init, true);
+    if (retried && supabase) await supabase.auth.signOut({ scope: 'local' });
+    throw new SessionExpiredError();
   }
 
   const body = await res.json().catch(() => ({}));
@@ -75,11 +125,7 @@ export async function apiStream(
   signal?: AbortSignal,
 ): Promise<void> {
   const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'application/x-ndjson' });
-  if (supabase) {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (token) headers.set('Authorization', `Bearer ${token}`);
-  }
+  await authHeader(headers);
 
   let res: Response;
   try {
@@ -89,6 +135,10 @@ export async function apiStream(
     throw new NetworkError(err);
   }
 
+  if (res.status === 401 && headers.has('Authorization')) {
+    await renewAfter401();
+    throw new SessionExpiredError();
+  }
   if (!res.ok) {
     const failure = await res.json().catch(() => ({}));
     throw new Error((failure as { error?: string }).error ?? `Request failed (${res.status})`);
@@ -151,12 +201,12 @@ export async function publicApi<T>(path: string): Promise<T> {
  */
 export async function apiBlob(path: string): Promise<Blob> {
   const headers = new Headers();
-  if (supabase) {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (token) headers.set('Authorization', `Bearer ${token}`);
-  }
+  await authHeader(headers);
   const res = await fetch(`${BASE}/api${path}`, { headers });
+  if (res.status === 401 && headers.has('Authorization')) {
+    await renewAfter401();
+    throw new SessionExpiredError();
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error((body as { error?: string }).error ?? `Request failed (${res.status})`);
@@ -172,17 +222,17 @@ export async function apiBlob(path: string): Promise<Blob> {
  */
 export async function apiUpload<T>(path: string, file: Blob, signal?: AbortSignal): Promise<T> {
   const headers = new Headers({ 'Content-Type': file.type || 'application/octet-stream' });
-  if (supabase) {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (token) headers.set('Authorization', `Bearer ${token}`);
-  }
+  await authHeader(headers);
   let res: Response;
   try {
     res = await fetch(`${BASE}/api${path}`, { method: 'POST', headers, body: file, signal });
   } catch (err) {
     if ((err as Error).name === 'AbortError') throw err;
     throw new NetworkError(err);
+  }
+  if (res.status === 401 && headers.has('Authorization')) {
+    await renewAfter401();
+    throw new SessionExpiredError();
   }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {

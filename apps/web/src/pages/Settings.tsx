@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from 'react';
+import { useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { ASSISTANT_NAME } from '@janelle/shared';
 import { Page, PageHeading, Card, Pill, PasswordInput, Switch } from '../components/ui';
@@ -15,6 +15,7 @@ import {
   IconSun,
   IconTeam,
 } from '../components/icons';
+import { DateRangePicker } from '../components/DateRangePicker';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
@@ -48,6 +49,9 @@ import {
   useUsageLink,
   useSla,
   useSaveSla,
+  useMailSync,
+  type MailSyncProgress,
+  type MailSyncResult,
   type GoogleService,
   type Sla,
 } from '../lib/queries';
@@ -969,6 +973,225 @@ function AiUsageLinkCard() {
   );
 }
 
+type SyncPreset = 'today' | 'yesterday' | 'week' | 'month' | 'custom';
+
+const SYNC_PRESETS: { id: SyncPreset; label: string }[] = [
+  { id: 'today', label: 'Today' },
+  { id: 'yesterday', label: 'Yesterday' },
+  { id: 'week', label: 'Last 7 days' },
+  { id: 'month', label: 'Last month' },
+  { id: 'custom', label: 'Custom range' },
+];
+
+/** Matches the server's limit on one sync. */
+const MAX_SYNC_DAYS = 92;
+
+const midnight = (d: Date, plusDays = 0) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + plusDays);
+
+/** `yyyy-mm-dd` in local time, as a date input reads and writes it. */
+function dateValue(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** A date input's value as local midnight — `new Date('yyyy-mm-dd')` is UTC. */
+function parseDateValue(v: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+type SyncWindow = { since: Date; until: Date };
+
+/** The window a choice stands for, or why it cannot be synced. */
+function syncWindow(preset: SyncPreset, from: string, to: string): SyncWindow | { error: string } {
+  const now = new Date();
+  const today = midnight(now);
+  switch (preset) {
+    case 'today':
+      return { since: today, until: now };
+    case 'yesterday':
+      return { since: midnight(now, -1), until: today };
+    case 'week':
+      return { since: midnight(now, -6), until: now };
+    case 'month':
+      return { since: midnight(now, -29), until: now };
+    case 'custom': {
+      const start = parseDateValue(from);
+      const end = parseDateValue(to);
+      if (!start || !end) return { error: 'Choose a start and an end date.' };
+      if (start > end) return { error: 'The start date must be on or before the end date.' };
+      if (start > today) return { error: 'The start date cannot be in the future.' };
+      // Inclusive of the end day, and never past this moment.
+      const until = midnight(end, 1) > now ? now : midnight(end, 1);
+      if (until.getTime() - start.getTime() > MAX_SYNC_DAYS * 86_400_000) {
+        return { error: `Choose ${MAX_SYNC_DAYS} days or fewer.` };
+      }
+      return { since: start, until };
+    }
+  }
+}
+
+function describeWindow(w: SyncWindow): string {
+  const fmt = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const lastDay = new Date(w.until.getTime() - 1);
+  return fmt(w.since) === fmt(lastDay) ? fmt(w.since) : `${fmt(w.since)} – ${fmt(lastDay)}`;
+}
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+function syncSummary(r: MailSyncResult): string {
+  const parts = [plural(r.emails, 'new email')];
+  if (r.tasks) parts.push(plural(r.tasks, 'task'));
+  if (r.replies) parts.push(plural(r.replies, 'draft'));
+  if (r.documents) parts.push(plural(r.documents, 'document'));
+  const read = parts.join(', ');
+  if (r.stopped) return `Stopped. ${read} so far — sync again to carry on; nothing is read twice.`;
+  if (!r.complete) {
+    return `${read}. ${plural(r.unfinishedDays, 'day')} had more mail than one sync reads — run it again to finish.`;
+  }
+  if (!r.emails) return 'Up to date — nothing new in that period.';
+  return `Done — ${read}.`;
+}
+
+/**
+ * Pull in one's own mail for a chosen period.
+ *
+ * For everybody, not only a principal: it reads the caller's own Gmail
+ * alone. Useful after connecting, after time away, or when a message is
+ * known to have arrived and is not in the Inbox yet. Mail already stored is
+ * skipped without being read again, so repeating a range is harmless.
+ */
+function MailSyncCard() {
+  const me = useMe();
+  const sync = useMailSync();
+  const [preset, setPreset] = useState<SyncPreset>('today');
+  const today = dateValue(new Date());
+  const [from, setFrom] = useState(() => dateValue(midnight(new Date(), -6)));
+  const [to, setTo] = useState(today);
+  const [progress, setProgress] = useState<MailSyncProgress | null>(null);
+  const stopRef = useRef(false);
+  const [stopping, setStopping] = useState(false);
+
+  const gmail = me.data?.google?.services?.gmail ?? false;
+  const chosen = syncWindow(preset, from, to);
+  const invalid = 'error' in chosen ? chosen.error : null;
+  const running = sync.isPending;
+
+  const start = () => {
+    if ('error' in chosen) return;
+    stopRef.current = false;
+    setStopping(false);
+    setProgress(null);
+    sync.mutate(
+      { ...chosen, onProgress: setProgress, shouldStop: () => stopRef.current },
+      {
+        onSettled: () => {
+          setProgress(null);
+          setStopping(false);
+        },
+      },
+    );
+  };
+
+  return (
+    <SettingsCard
+      className="lg:col-span-2"
+      icon={<IconInbox width={18} height={18} />}
+      title="Sync my email"
+      description="Bring your own Gmail into the studio for a chosen period. Mail already here is skipped, so syncing a period twice is harmless."
+      status={<Pill tone={gmail ? 'good' : 'neutral'}>{gmail ? 'Gmail connected' : 'Gmail not connected'}</Pill>}
+    >
+      {!me.data ? (
+        <p className="text-[13px] text-ink-faint">Loading…</p>
+      ) : !gmail ? (
+        <p className="text-[13px] text-ink-soft">Connect Gmail above, then choose a period to sync.</p>
+      ) : (
+        <>
+          <div role="radiogroup" aria-label="Period to sync" className="flex flex-wrap gap-1.5">
+            {SYNC_PRESETS.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                role="radio"
+                aria-checked={preset === p.id}
+                disabled={running}
+                onClick={() => setPreset(p.id)}
+                className={`focusable rounded-lg border px-3 py-1.5 text-[13px] font-medium transition-colors disabled:opacity-60 ${
+                  preset === p.id
+                    ? 'border-brass/50 bg-brass/15 text-ink'
+                    : 'border-line text-ink-soft hover:bg-sunk hover:text-ink'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+
+          {preset === 'custom' && (
+            <div className="mt-3">
+              <FieldLabel htmlFor="sync-range">Dates</FieldLabel>
+              <DateRangePicker
+                id="sync-range"
+                value={{ from: parseDateValue(from), to: parseDateValue(to) }}
+                max={new Date()}
+                maxDays={MAX_SYNC_DAYS}
+                disabled={running}
+                defaultOpen
+                onChange={(r) => {
+                  setFrom(dateValue(r.from));
+                  setTo(dateValue(r.to));
+                }}
+              />
+            </div>
+          )}
+
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {running ? (
+              <button
+                type="button"
+                className="btn-secondary btn-sm"
+                disabled={stopping}
+                onClick={() => {
+                  stopRef.current = true;
+                  setStopping(true);
+                }}
+              >
+                {stopping ? 'Stopping…' : 'Stop'}
+              </button>
+            ) : (
+              <button type="button" className="btn-primary btn-sm" disabled={Boolean(invalid)} onClick={start}>
+                Sync email
+              </button>
+            )}
+            <span className={`text-[12px] ${invalid ? 'text-crit' : 'text-ink-faint'}`}>
+              {invalid ?? describeWindow(chosen as SyncWindow)}
+            </span>
+          </div>
+
+          {running && (
+            <p className="mt-2 text-[12.5px] text-ink-soft" aria-live="polite">
+              {progress
+                ? `Reading ${progress.current.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}` +
+                  (progress.days > 1 ? ` (day ${progress.day} of ${progress.days})` : '') +
+                  ` · ${progress.emails} new so far`
+                : 'Starting…'}
+            </p>
+          )}
+          {!running && sync.data && (
+            <p className="mt-2 text-[12.5px] text-ink-soft" aria-live="polite">
+              {syncSummary(sync.data)}
+            </p>
+          )}
+          <Hint>Only your own mailbox is read. Longer periods take a few minutes — keep this page open until it finishes.</Hint>
+        </>
+      )}
+      {!running && <ErrorLine error={sync.error as Error | null} />}
+    </SettingsCard>
+  );
+}
+
 function GoogleMark() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
@@ -1165,6 +1388,7 @@ export default function Settings() {
         {tab === 'connections' && (
           <>
             <GoogleCard />
+            <MailSyncCard />
             <EmailReadingCard />
           </>
         )}

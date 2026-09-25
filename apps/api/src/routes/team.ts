@@ -89,8 +89,13 @@ async function issueCredentials(
   userId: string,
   email: string,
   fullName: string,
+  /**
+   * A password the admin chose, rather than a generated one; and whether
+   * to email it at all — a password reset may be handed over in person.
+   */
+  opts: { password?: string; send?: boolean } = {},
 ): Promise<{ emailed: boolean; mailError: string | null; password: string }> {
-  const password = newPassword();
+  const password = opts.password ?? newPassword();
   const { error } = await supabaseAdmin!.auth.admin.updateUserById(userId, {
     password,
     email_confirm: true,
@@ -99,6 +104,7 @@ async function issueCredentials(
 
   let emailed = false;
   let mailError: string | null = null;
+  if (opts.send === false) return { emailed, mailError, password };
   try {
     const sender = await orgSourceUserId(orgId);
     const gmail = sender ? await gmailFor(sender) : null;
@@ -122,6 +128,39 @@ async function issueCredentials(
 
   return { emailed, mailError, password };
 }
+
+/** Long enough to mean "until someone turns it back on" — about a century. */
+const DISABLED_FOR = '876000h';
+
+function isBanned(bannedUntil: string | null | undefined): boolean {
+  const at = bannedUntil ? Date.parse(bannedUntil) : NaN;
+  return !Number.isNaN(at) && at > Date.now();
+}
+
+/** Of these people, the ones whose sign-in account is currently disabled. */
+async function disabledUserIds(ids: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (!supabaseAdmin || !ids.length) return out;
+  const wanted = new Set(ids);
+  try {
+    // A studio is a handful of people; one page covers everybody, and the
+    // loop is only there so a large directory cannot silently cut it short.
+    for (let page = 1; page <= 20; page++) {
+      const { data, error } = await supabaseAdmin.auth.admin.listUsers({ page, perPage: 1000 });
+      if (error) throw new Error(error.message);
+      for (const u of data.users) if (wanted.has(u.id) && isBanned(u.banned_until)) out.add(u.id);
+      if (data.users.length < 1000) break;
+    }
+  } catch (err) {
+    // The roster is still worth showing without the flag.
+    console.error('[team] sign-in accounts unreadable:', (err as Error).message);
+  }
+  return out;
+}
+
+/** Bounds Supabase accepts for a password; the minimum matches the reset screen. */
+const MIN_PASSWORD = 8;
+const MAX_PASSWORD = 72;
 
 export const teamRouter = Router();
 teamRouter.use(requireAuth);
@@ -181,6 +220,10 @@ teamRouter.get(
     // connected needs them to reconnect, and nobody else can do it for them.
     const health = await latestGoogleHealth(ids);
 
+    // Who has been disabled. The ban lives on the sign-in account, not the
+    // profile, so it is read from there.
+    const disabled = await disabledUserIds(ids);
+
     res.json({
       data: rows.map((p) => {
         const id = p.id as string;
@@ -193,6 +236,7 @@ teamRouter.get(
           ...p,
           live_tasks: load.get(id) ?? 0,
           is_you: id === req.auth!.userId,
+          disabled: disabled.has(id),
           google: {
             connected: connected && (services.gmail || services.drive),
             ...services,
@@ -263,6 +307,9 @@ teamRouter.post(
     const person = target as { id: string; full_name: string | null; email: string | null; org_id: string } | null;
     if (!person || person.org_id !== auth.orgId) return res.status(404).json({ error: 'Person not found in this studio' });
     if (!person.email) return res.status(400).json({ error: 'They have no sign-in email.' });
+    if ((await disabledUserIds([person.id])).has(person.id)) {
+      return res.status(400).json({ error: 'Their account is disabled — enable it first.' });
+    }
 
     // A magic-link token, generated rather than sent: no email goes out.
     const { data, error } = await supabaseAdmin.auth.admin.generateLink({ type: 'magiclink', email: person.email });
@@ -679,5 +726,125 @@ teamRouter.post(
     });
 
     res.json({ data: { id: target.id, email: target.email, emailed, mailError, password } });
+  }),
+);
+
+/** A person in the caller's studio, or null. The admin client skips row security, so the org is checked here. */
+async function memberOf(orgId: string | null, id: string) {
+  if (!supabaseAdmin || !orgId) return null;
+  const { data } = await supabaseAdmin
+    .from('profiles')
+    .select('id, full_name, email, role, org_id')
+    .eq('id', id)
+    .maybeSingle();
+  const person = data as { id: string; full_name: string | null; email: string | null; role: UserRole; org_id: string } | null;
+  return person && person.org_id === orgId ? person : null;
+}
+
+/**
+ * Reset a teammate's password.
+ *
+ * The admin either types the new one or has one generated, and chooses
+ * whether it is emailed. Unlike "Invite", which always generates and always
+ * sends, this is for handing a password over in person or on a call.
+ * Whatever they were using stops working at once.
+ */
+teamRouter.post(
+  '/:id/password',
+  requirePermission('team', 'update'),
+  asyncHandler(async (req, res) => {
+    if (!supabaseAdmin) return res.status(503).json({ error: 'Backend not configured' });
+    const orgId = req.auth!.orgId;
+    const person = await memberOf(orgId, String(req.params.id));
+    if (!person) return res.status(404).json({ error: 'Person not found in this studio' });
+
+    const typed = typeof req.body?.password === 'string' ? req.body.password : '';
+    if (typed && (typed.length < MIN_PASSWORD || typed.length > MAX_PASSWORD)) {
+      return res.status(400).json({ error: `Use between ${MIN_PASSWORD} and ${MAX_PASSWORD} characters.` });
+    }
+    if (typed && typed.trim() !== typed) {
+      return res.status(400).json({ error: 'The password cannot start or end with a space.' });
+    }
+    const send = req.body?.notify === true;
+    if (send && !person.email) return res.status(400).json({ error: 'They have no email address to send it to.' });
+
+    const { emailed, mailError, password } = await issueCredentials(
+      orgId!,
+      person.id,
+      person.email ?? '',
+      person.full_name ?? '',
+      { password: typed || undefined, send },
+    );
+
+    await supabaseAdmin.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'team.password_reset',
+      entity: 'profiles',
+      entity_id: person.id,
+      // Never the password.
+      meta: { name: person.full_name, email: person.email, chosen: Boolean(typed), emailed },
+    });
+
+    // A generated password comes back once so it can be handed over; one the
+    // admin typed is not echoed — they already have it.
+    res.json({
+      data: { id: person.id, email: person.email, emailed, mailError, password: typed ? null : password },
+    });
+  }),
+);
+
+/**
+ * Disable or re-enable a teammate's account.
+ *
+ * Disabled means they cannot sign in, and the session they have is refused
+ * on their next request (see requireAuth). Nothing else changes: their
+ * tasks, their mail and their history stay where they are, so turning them
+ * back on is exactly as it was. Removing them is the permanent version.
+ */
+teamRouter.post(
+  '/:id/status',
+  requirePermission('team', 'update'),
+  asyncHandler(async (req, res) => {
+    if (!supabaseAdmin) return res.status(503).json({ error: 'Backend not configured' });
+    const orgId = req.auth!.orgId;
+    const id = String(req.params.id);
+    if (typeof req.body?.disabled !== 'boolean') return res.status(400).json({ error: 'Say whether to disable or enable' });
+    const disable = req.body.disabled as boolean;
+
+    if (disable && id === req.auth!.userId) {
+      return res.status(400).json({ error: 'You cannot disable your own account' });
+    }
+    const person = await memberOf(orgId, id);
+    if (!person) return res.status(404).json({ error: 'Person not found in this studio' });
+
+    // A studio whose every principal is disabled has nobody who can turn
+    // anyone back on — the same trap as demoting the last principal.
+    if (disable && person.role === 'principal') {
+      const { data: principals } = await supabaseAdmin
+        .from('profiles')
+        .select('id')
+        .eq('org_id', orgId)
+        .eq('role', 'principal');
+      const others = ((principals ?? []) as { id: string }[]).map((p) => p.id).filter((p) => p !== id);
+      const off = await disabledUserIds(others);
+      if (others.every((p) => off.has(p))) {
+        return res.status(400).json({ error: 'That is the studio’s only active principal — make someone else principal first' });
+      }
+    }
+
+    const { error } = await supabaseAdmin.auth.admin.updateUserById(id, { ban_duration: disable ? DISABLED_FOR : 'none' });
+    if (error) throw new Error(error.message);
+
+    await supabaseAdmin.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: disable ? 'team.disable' : 'team.enable',
+      entity: 'profiles',
+      entity_id: id,
+      meta: { name: person.full_name, email: person.email },
+    });
+
+    res.json({ data: { id, disabled: disable } });
   }),
 );

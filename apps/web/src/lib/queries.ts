@@ -363,6 +363,8 @@ export interface TeamMember {
   /** The named seat from the roles document, where one is assigned. */
   seat?: Seat | null;
   created_at?: string; live_tasks?: number; is_you?: boolean;
+  /** Their account is switched off: they cannot sign in until re-enabled. */
+  disabled?: boolean;
   /** Whether their Google is connected — until it is, none of their mail is read. */
   google?: {
     connected: boolean; gmail: boolean; drive: boolean; connected_at: string | null;
@@ -472,6 +474,39 @@ export function useSendInvite() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api<AddedMember>(`/team/${id}/invite`, { method: 'POST', body: '{}' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['team'] }),
+  });
+}
+
+export interface PasswordReset {
+  id: string;
+  email: string | null;
+  emailed: boolean;
+  mailError: string | null;
+  /** The generated password, shown once; null when the admin typed it. */
+  password: string | null;
+}
+
+/** Set a teammate's password — typed, or generated when `password` is left out. */
+export function useResetMemberPassword() {
+  return useMutation({
+    mutationFn: (v: { id: string; password?: string; notify: boolean }) =>
+      api<PasswordReset>(`/team/${v.id}/password`, {
+        method: 'POST',
+        body: JSON.stringify({ password: v.password || undefined, notify: v.notify }),
+      }),
+  });
+}
+
+/** Disable or re-enable a teammate's account. */
+export function useSetMemberDisabled() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { id: string; disabled: boolean }) =>
+      api<{ id: string; disabled: boolean }>(`/team/${v.id}/status`, {
+        method: 'POST',
+        body: JSON.stringify({ disabled: v.disabled }),
+      }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['team'] }),
   });
 }
@@ -885,6 +920,159 @@ export function useOps() {
     onSuccess: invalidate,
   });
   return { ingest, followUps, report };
+}
+
+// ── Syncing one's own mailbox for a period ──────────────────
+
+/** One /settings/mail-sync response: a single time-budgeted pass. */
+interface MailSyncPass extends IngestPass {
+  skipped?: number;
+  /** Everything in the window before this moment is dealt with. */
+  resumeFrom?: string;
+}
+
+export interface MailSyncProgress {
+  /** 1-based: which day of the range is being read. */
+  day: number;
+  days: number;
+  /** The day being read, as a local date. */
+  current: Date;
+  emails: number;
+  documents: number;
+  tasks: number;
+  replies: number;
+  skipped: number;
+}
+
+export interface MailSyncResult extends Omit<MailSyncProgress, 'day' | 'current'> {
+  /** False when stopped by the person, or a day could not be finished. */
+  complete: boolean;
+  stopped: boolean;
+  /** Days whose mail could not all be read this time. */
+  unfinishedDays: number;
+}
+
+/** Why a pass did not run, in words somebody can act on. */
+const SYNC_REASONS: Record<string, string> = {
+  anthropic_not_configured:
+    'Claude is not set up yet, so email cannot be read. Ask a principal to add the key under Settings → AI & media.',
+  google_auth_failed: 'Google needs reconnecting — use Connect above, then sync again.',
+  mailbox_failed: 'Your mailbox could not be read just now. Try again in a minute.',
+  no_source_user: 'Connect Gmail above before syncing your email.',
+  supabase_not_configured: 'The server is not configured to store email.',
+};
+
+/**
+ * Local midnights between two moments: the range cut into calendar days.
+ *
+ * One day per run of passes keeps each Gmail listing small — a listing is
+ * capped at 500 messages, and a month of a busy mailbox is well past that —
+ * and gives the progress line something a person understands.
+ */
+export function syncDays(since: Date, until: Date): { since: Date; until: Date }[] {
+  const days: { since: Date; until: Date }[] = [];
+  let start = new Date(since);
+  while (start < until) {
+    const next = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
+    const end = next < until ? next : until;
+    days.push({ since: start, until: end });
+    start = end;
+  }
+  return days;
+}
+
+/** Most passes one day may take before it is reported as unfinished. */
+const SYNC_MAX_ROUNDS_PER_DAY = 40;
+/** How often to ask again while another reading pass holds the lock. */
+const SYNC_BUSY_RETRIES = 8;
+
+async function mailSyncPass(since: Date, until: Date): Promise<MailSyncPass> {
+  const body = JSON.stringify({ since: since.toISOString(), until: until.toISOString() });
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await api<MailSyncPass>('/settings/mail-sync', { method: 'POST', body });
+    } catch (err) {
+      // No answer came back: asking again is safe, stored mail is skipped.
+      if (!(err instanceof NetworkError) || attempt >= INGEST_RETRIES) throw err;
+      await wait(1000 * (attempt + 1));
+    }
+  }
+}
+
+/**
+ * Read the signed-in person's own Gmail for a period, day by day, newest
+ * day first, until each day is done. `shouldStop` is checked between passes
+ * so Stop never cuts a pass off half way.
+ */
+export function useMailSync() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (vars: {
+      since: Date;
+      until: Date;
+      onProgress?: (p: MailSyncProgress) => void;
+      shouldStop?: () => boolean;
+    }): Promise<MailSyncResult> => {
+      const days = syncDays(vars.since, vars.until).reverse();
+      const total = { emails: 0, documents: 0, tasks: 0, replies: 0, skipped: 0 };
+      let unfinishedDays = 0;
+
+      for (const [index, day] of days.entries()) {
+        let from = day.since;
+        let finished = false;
+        let busy = 0;
+
+        for (let round = 0; round < SYNC_MAX_ROUNDS_PER_DAY; round++) {
+          if (vars.shouldStop?.()) {
+            return { ...total, days: days.length, complete: false, stopped: true, unfinishedDays };
+          }
+          vars.onProgress?.({ ...total, day: index + 1, days: days.length, current: day.since });
+
+          const r = await mailSyncPass(from, day.until);
+          if (r.ok === false) {
+            if (r.reason === 'busy' && busy < SYNC_BUSY_RETRIES) {
+              // The scheduled reading is running; it finishes in seconds.
+              busy++;
+              round--;
+              await wait(4000);
+              continue;
+            }
+            throw new Error(
+              r.reason === 'busy'
+                ? 'Email is already being read — try again in a minute.'
+                : SYNC_REASONS[r.reason ?? ''] ?? `Sync stopped (${r.reason ?? 'unknown reason'}).`,
+            );
+          }
+
+          total.emails += r.emails ?? 0;
+          total.documents += r.documents ?? 0;
+          total.tasks += r.tasks ?? 0;
+          total.replies += r.replies ?? 0;
+          total.skipped += r.skipped ?? 0;
+
+          if (r.done !== false) {
+            finished = true;
+            break;
+          }
+          // Start the next pass where this one got to, less a second: Gmail
+          // counts in whole seconds and re-reading one is free.
+          if (r.resumeFrom) {
+            const at = new Date(Date.parse(r.resumeFrom) - 1000);
+            if (at > from && at < day.until) from = at;
+          }
+          qc.invalidateQueries({ queryKey: ['emails'] });
+        }
+        if (!finished) unfinishedDays++;
+      }
+
+      return { ...total, days: days.length, complete: unfinishedDays === 0, stopped: false, unfinishedDays };
+    },
+    onSettled: () => {
+      for (const key of ['emails', 'dashboard', 'tasks', 'drafts', 'documents', 'projects', 'activity']) {
+        qc.invalidateQueries({ queryKey: [key] });
+      }
+    },
+  });
 }
 
 export function useFollowUpStatus() {

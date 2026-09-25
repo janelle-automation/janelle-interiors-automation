@@ -85,6 +85,10 @@ function OpsBar() {
         if (d.reason === 'anthropic_not_configured') {
           return err(new Error('Claude is not set up — add an API key in Settings.'));
         }
+        // Any other reason nothing ran — never reported as "read 0 emails".
+        if (d.ok === false) {
+          return err(new Error('The mailbox could not be read just now — try again in a minute.'));
+        }
         const read = `Read ${d.emails} new email${d.emails === 1 ? '' : 's'}, ${d.documents} document${d.documents === 1 ? '' : 's'}, ${d.replies} reply draft${d.replies === 1 ? '' : 's'}.`;
         // Everything read so far is saved either way — the run just stopped
         // early, on its time budget or on a dropped request.
@@ -612,33 +616,6 @@ function RoleCard({ cardKey, value }: { cardKey: DashboardCardKey; value: number
   );
 }
 
-/**
- * A seat nobody holds silently swallows work: routing falls back to the
- * role, and if that is empty too the task lands unassigned. The studio is
- * still waiting on its own roster, so this stays visible until it is filled.
- */
-function VacantSeats({ seats }: { seats: { seat: string; label: string; role: string }[] }) {
-  if (seats.length === 0) return null;
-  return (
-    <Card className="border-warn/40 p-5">
-      <div className="text-[13px] font-semibold text-ink">
-        {seats.length} seat{seats.length === 1 ? '' : 's'} with nobody in {seats.length === 1 ? 'it' : 'them'}
-      </div>
-      <p className="mt-1 text-[12.5px] text-ink-soft">
-        Work routed here falls back to the role, then lands unassigned.
-      </p>
-      <div className="mt-3 flex flex-wrap gap-2">
-        {seats.map((s) => (
-          <Pill key={s.seat} tone="warn">{s.label}</Pill>
-        ))}
-      </div>
-      <Link to="/team" className="mt-3 inline-block text-[12.5px] font-medium text-brass hover:underline">
-        Add someone to a seat →
-      </Link>
-    </Card>
-  );
-}
-
 function CardHeader({ title, to, linkText }: { title: string; to?: string; linkText?: string }) {
   return (
     <div className="flex items-center justify-between border-b border-line-soft px-5 py-3.5">
@@ -694,7 +671,6 @@ export default function Dashboard() {
         </div>
       </section>
 
-      <VacantSeats seats={summary.vacantSeats} />
 
       <section>
         <SectionTitle>

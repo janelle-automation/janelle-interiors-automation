@@ -4,7 +4,7 @@ import {
   gmailFor, getEmail, listMessageIds, listAllMessageIds, downloadAttachment, addressOf, addressesOf, type PdfAttachment,
   getProfileEmail, ignoredSenderQuery, noiseQuery, isIgnoredSender, isBulkMail, linksIn, studioOnlyQuery,
 } from './gmail.js';
-import { advanceIngestCursor, gmailAfter, readIngestWindow } from '../lib/ingestCursor.js';
+import { advanceIngestCursor, gmailAfter, gmailBefore, readIngestWindow } from '../lib/ingestCursor.js';
 import { driveFor, listPdfs, downloadFile, type DriveFile } from './drive.js';
 import { listProjectPdfs, loadDriveProjects, syncProjectStatusDoc, syncProjectsFromDrive, type ProjectFolder } from './driveProjects.js';
 import {
@@ -37,6 +37,12 @@ export interface IngestResult {
   done: boolean;
   /** Best-effort count of what was left untouched when the budget ran out. */
   remaining: number;
+  /**
+   * Date-range sync only: everything in the range delivered before this
+   * moment has been dealt with, so the next pass may start here. Absent when
+   * that cannot be said — see `range` in IngestOptions.
+   */
+  resumeFrom?: string;
 }
 
 export interface IngestOptions {
@@ -53,6 +59,13 @@ export interface IngestOptions {
    * making them wait on the whole studio being read first.
    */
   onlyUserId?: string;
+  /**
+   * Read the mail delivered in this window instead of everything since the
+   * watermark — a person asking to sync a particular day, week or month.
+   * Like a caller-supplied query it never moves the watermark, and it reads
+   * mail only: the Drive pass belongs to the scheduled reading.
+   */
+  range?: { since: Date; until: Date };
   /**
    * Internal: the studio's Drive project folders, read once for the whole
    * pass by `runIngest` rather than again inside every mailbox's slice.
@@ -402,6 +415,8 @@ export async function runIngest(
       ok: true, emails: 0, documents: 0, replies: 0, tasks: 0, skipped: 0, done: true, remaining: 0,
     };
     let anyRan = false;
+    /** Why the last mailbox did not run — reported when it was the only one. */
+    let lastReason: string | undefined;
 
     // Take turns at going first. Always walking the list in the same order
     // meant the last mailbox only ever got what the others left over — for
@@ -414,7 +429,7 @@ export async function runIngest(
     // The studio's project folders, once for the whole pass — not once per
     // mailbox, which used up each mailbox's slice before its first email.
     const prefetched =
-      useAi && !opts.folderId ? await prefetchDriveProjects(orgId, mailboxes) : undefined;
+      useAi && !opts.folderId && !opts.range ? await prefetchDriveProjects(orgId, mailboxes) : undefined;
 
     for (const [index, userId] of mailboxes.entries()) {
       // What is left, shared among the mailboxes still to go: time one
@@ -427,12 +442,14 @@ export async function runIngest(
         // One member's expired grant must not stop the studio's own mail
         // being read, nor anybody else's.
         console.error(`[ingest] mailbox ${userId} failed:`, (err as Error).message);
+        lastReason = 'mailbox_failed';
         continue;
       }
       if (!result.ok) {
         // A member who has not finished connecting is not an error for the
         // pass — only every mailbox failing is.
         console.warn(`[ingest] mailbox ${userId} skipped: ${result.reason}`);
+        lastReason = result.reason;
         continue;
       }
       anyRan = true;
@@ -443,9 +460,15 @@ export async function runIngest(
       totals.skipped += result.skipped;
       totals.remaining += result.remaining;
       if (result.done === false) totals.done = false;
+      // Only meaningful for one mailbox, which is the only way a range runs.
+      if (mailboxes.length === 1 && result.resumeFrom) totals.resumeFrom = result.resumeFrom;
     }
 
-    return anyRan ? totals : nothing('no_source_user');
+    // With one mailbox, why it did not run IS why the pass did not — "no
+    // source user" over an expired Google grant sent people looking in the
+    // wrong place.
+    if (anyRan) return totals;
+    return nothing(mailboxes.length === 1 && lastReason ? lastReason : 'no_source_user');
   } finally {
     ingestStartedAt = 0;
   }
@@ -559,6 +582,8 @@ async function ingestInternal(
 
   let done = true;
   let remaining = 0;
+  // Range sync: the receivedAt of the last message dealt with, in order.
+  let resumeFrom: string | undefined;
 
   // Set once the mailbox's own address is known — see the Gmail block below.
   let ownerId: string | null = null;
@@ -581,7 +606,7 @@ async function ingestInternal(
     // Read once for the whole pass — see prefetchDriveProjects.
     driveProjects = opts.prefetched.driveProjects;
     folderProjects = opts.prefetched.folderProjects;
-  } else if (useAi && !opts.folderId) {
+  } else if (useAi && !opts.folderId && !opts.range) {
     try {
       drive = await driveFor(userId);
       driveProjects = drive ? await loadDriveProjects(orgId, drive) : null;
@@ -639,9 +664,13 @@ async function ingestInternal(
     // specific search — and never moves the watermark, which belongs to the
     // automatic reading alone.
     const manual = Boolean(opts.emailQuery);
-    const window = manual ? null : await readIngestWindow(orgId, userId);
+    // A date range reads a fixed window, so it neither reads the watermark
+    // nor — below — moves it.
+    const range = manual ? undefined : opts.range;
+    const window = manual || range ? null : await readIngestWindow(orgId, userId);
     const scope = shared ? '' : await studioScopeFor(orgId);
-    const query = opts.emailQuery ?? `${gmailAfter(window!.since)} -in:sent ${noiseQuery()} ${scope}`.trim();
+    const period = range ? `${gmailAfter(range.since)} ${gmailBefore(range.until)}` : window ? gmailAfter(window.since) : '';
+    const query = opts.emailQuery ?? `${period} -in:sent ${noiseQuery()} ${scope}`.trim();
 
     let listed: { ids: string[]; capped: boolean };
     try {
@@ -660,6 +689,12 @@ async function ingestInternal(
     // watermark: the pass walks forward through the mail in the order it
     // arrived, so wherever it stops, everything behind it is finished.
     const ids = await unstoredIds(orgId, listed.ids);
+    // Where a range pass may resume. Mail that is skipped rather than stored
+    // (adverts, machinery, a colleague's copy) is never in the database, so
+    // without this every later pass would fetch it all again before reaching
+    // anything new. Only when the listing was complete: a capped listing is
+    // the NEWEST of the range, and resuming past it would skip older mail.
+    const trackResume = Boolean(range) && !listed.capped;
     const vendorDomains = ids.length ? await knownVendorDomains(orgId) : new Set<string>();
 
     for (const [index, id] of ids.entries()) {
@@ -673,6 +708,11 @@ async function ingestInternal(
       const emailStarted = Date.now();
       try {
         const email = await getEmail(gmail, id);
+        // Set before anything can `continue`: a skipped message is dealt with
+        // too. Should this one throw below it is logged and passed over, the
+        // same as a scheduled pass would.
+        const resumedBefore = resumeFrom;
+        if (trackResume && email.receivedAt) resumeFrom = email.receivedAt;
 
         // Machinery, not studio work — a Slack invite, a bot's comment on a
         // pull request, a Dropbox sign-in notice. Dropped before the first
@@ -745,6 +785,8 @@ async function ingestInternal(
         // and never looked at again. Not when nothing has been read yet: one
         // slow attachment must not keep its email out of the system forever.
         if (readable.length && !roomFor('doc') && emailCount > 0) {
+          // Not dealt with after all — the next pass must start before it.
+          resumeFrom = resumedBefore;
           done = false;
           remaining += ids.length - index;
           break;
@@ -1020,9 +1062,9 @@ async function ingestInternal(
   // ── Drive documents (PDF quotes / confirmations) ──────────
   // Skipped entirely when the mail already used the budget; the next pass
   // finds the same files, minus whatever got stored.
-  if (useAi && !roomFor('doc')) done = false;
+  if (useAi && !opts.range && !roomFor('doc')) done = false;
   try {
-    if (!(useAi && roomFor('doc'))) drive = null;
+    if (!(useAi && !opts.range && roomFor('doc'))) drive = null;
     else drive ??= await driveFor(userId);
   } catch (err) {
     // The mail is already written; losing Drive as well would be worse than
@@ -1148,7 +1190,7 @@ async function ingestInternal(
   //
   // `now`, not the last message's own date: a message delivered while the
   // pass was running is covered by the overlap the cursor reads back with.
-  if (done && !opts.emailQuery) await advanceIngestCursor(orgId, userId);
+  if (done && !opts.emailQuery && !opts.range) await advanceIngestCursor(orgId, userId);
 
   let mergedProjects = 0;
   let mergedTasks = 0;
@@ -1210,5 +1252,6 @@ async function ingestInternal(
     skipped: skippedCount,
     done,
     remaining,
+    ...(resumeFrom ? { resumeFrom } : {}),
   };
 }

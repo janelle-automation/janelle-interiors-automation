@@ -1,12 +1,22 @@
 import { useState, type FormEvent } from 'react';
 import { supabase } from '../lib/supabase';
+import { SIGNED_OUT_REASON } from '../lib/api';
 import { PasswordInput } from '../components/ui';
 
 export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // Shown once: why the app signed them out, when it was not their choice.
+  const [error, setError] = useState<string | null>(() => {
+    try {
+      const reason = sessionStorage.getItem(SIGNED_OUT_REASON);
+      sessionStorage.removeItem(SIGNED_OUT_REASON);
+      return reason;
+    } catch {
+      return null;
+    }
+  });
   const [sent, setSent] = useState(false);
 
   const submit = async (e: FormEvent) => {
@@ -18,7 +28,9 @@ export default function Login() {
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) throw error;
     } catch (err) {
-      setError((err as Error).message);
+      const message = (err as Error).message;
+      // Supabase's words for an account switched off in Team & roles.
+      setError(/banned/i.test(message) ? 'This account has been disabled. Ask the studio admin to turn it back on.' : message);
     } finally {
       setBusy(false);
     }
