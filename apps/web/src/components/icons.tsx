@@ -116,3 +116,12 @@ export const IconEyeOff = (p: P) => (
 export const IconMailScan = (p: P) => (
   <svg {...base} {...p}><path d="M21 11.5V6H3v12h8.5" /><path d="m3 7 9 6 9-6" /><circle cx="17.5" cy="17.5" r="3" /><path d="m20 20 2 2" /></svg>
 );
+export const IconCalendar = (p: P) => (
+  <svg {...base} {...p}><rect x="3" y="5" width="18" height="16" rx="1.5" /><path d="M3 10h18M8 3v4M16 3v4" /></svg>
+);
+export const IconChevronLeft = (p: P) => (
+  <svg {...base} {...p}><path d="m15 6-6 6 6 6" /></svg>
+);
+export const IconChevronRight = (p: P) => (
+  <svg {...base} {...p}><path d="m9 6 6 6-6 6" /></svg>
+);

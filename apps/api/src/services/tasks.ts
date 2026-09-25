@@ -13,6 +13,7 @@ import { matchPerson } from './proposals.js';
 import { gmailFor, readSentMail, type ParsedEmail } from './gmail.js';
 import { orgSourceUserId } from '../lib/tokens.js';
 import { bodyColumnsReady, readStoredText } from '../lib/emailStore.js';
+import { extractJson, isAiReady } from './anthropic.js';
 
 /**
  * An email whose "does this need a task?" has already been answered NO.
@@ -892,6 +893,233 @@ async function closeFinished(
     });
   }
   return closed;
+}
+
+// ────────────────────────────────────────────────────────────
+//  The hourly look over the board
+//
+//  closeFinished runs as each email is read, and sees that one email beside
+//  up to eight tasks. That misses a task whose answer came in pieces over
+//  several messages, mail that raised no task of its own (so never reached
+//  the check), and a task that ranked ninth for the email that finished it.
+//  Once an hour every live task is put beside everything said about it since
+//  it was raised, and closed when that shows the work is done.
+//
+//  Only a task with mail it has not been checked against costs a Claude
+//  call, so a quiet hour costs nothing.
+// ────────────────────────────────────────────────────────────
+
+/** Per task, the newest email it has been checked against. */
+const REVIEW_FIELD = 'task_reviewed_at';
+
+/** Most tasks put to the model in one sweep; the rest wait an hour. */
+const MAX_REVIEWS_PER_SWEEP = 20;
+
+/** Of each task's related mail, the latest this many go in the prompt. */
+const REVIEW_EMAILS = 6;
+const REVIEW_CHARS = 1500;
+
+const REVIEW_SYSTEM = `You check whether one task on an interior design studio's board is finished,
+from the emails about it that arrived after it was raised.
+
+Return {"done": true|false, "email": "E1", "evidence": "the few words of that email that prove it"}.
+
+The task is done when an email shows the thing it was waiting for has happened: the vendor sent the
+quote or drawing it was chasing, the client gave the approval it asked for, the order is confirmed,
+the delivery is booked, or a teammate says they have done it. It is NOT done on a promise ("I'll
+send it Friday"), an acknowledgement ("got it, looking into it"), a question back, a partial answer,
+or an email about a different item on the same job. When in doubt, answer done=false: a task closed
+wrongly disappears from the board, while one left open costs a click.
+
+When done is false, email and evidence are null.`;
+
+interface ReviewEmail extends EmailFacts {
+  snippet: string | null;
+  body_text?: string | null;
+  extracted_json?: Record<string, unknown> | null;
+}
+
+export interface TaskReview {
+  ok: boolean;
+  reason?: string;
+  /** Tasks put to the model. */
+  reviewed: number;
+  /** Of those, closed as done. */
+  closed: number;
+  /** Tasks with new mail left for the next sweep, on the cap or the clock. */
+  waiting: number;
+}
+
+async function readOrgSettings(orgId: string): Promise<Record<string, unknown>> {
+  if (!supabaseAdmin) return {};
+  const { data } = await supabaseAdmin.from('organizations').select('settings').eq('id', orgId).maybeSingle();
+  return ((data as { settings: Record<string, unknown> } | null)?.settings ?? {}) as Record<string, unknown>;
+}
+
+async function readReviewMarks(orgId: string): Promise<Record<string, string>> {
+  const marks = (await readOrgSettings(orgId))[REVIEW_FIELD];
+  return marks && typeof marks === 'object' ? { ...(marks as Record<string, string>) } : {};
+}
+
+/** Written against a fresh read, so a setting saved meanwhile is kept. */
+async function saveReviewMarks(orgId: string, marks: Record<string, string>): Promise<void> {
+  if (!supabaseAdmin) return;
+  const settings = await readOrgSettings(orgId);
+  settings[REVIEW_FIELD] = marks;
+  const { error } = await supabaseAdmin.from('organizations').update({ settings }).eq('id', orgId);
+  // Losing the marks costs a re-check next hour, never a wrong close.
+  if (error) console.error('[tasks] review marks not saved:', error.message);
+}
+
+/**
+ * Close every live task that the mail since it was raised shows is done.
+ *
+ * Never throws: it runs on a timer, and one studio's failure must not stop
+ * the next one's. Budgeted, so a hosted cron answers before its timeout.
+ */
+export async function reviewOpenTasks(orgId: string, opts: { budgetMs?: number } = {}): Promise<TaskReview> {
+  const none = (reason: string): TaskReview => ({ ok: false, reason, reviewed: 0, closed: 0, waiting: 0 });
+  if (!supabaseAdmin) return none('supabase_not_configured');
+  if (!(await isAiReady(orgId))) return none('anthropic_not_configured');
+
+  const deadline = Date.now() + (opts.budgetMs ?? 45_000);
+  let reviewed = 0;
+  let closed = 0;
+
+  try {
+    const { data: rows } = await supabaseAdmin
+      .from('tasks')
+      .select(LIVE_TASK_COLUMNS)
+      .eq('org_id', orgId)
+      .in('status', LIVE_STATUSES);
+    let live = (rows ?? []) as unknown as LiveTask[];
+    const marks = await readReviewMarks(orgId);
+
+    // Forget tasks that are no longer live, so the map does not grow forever.
+    const liveIds = new Set(live.map((t) => t.id));
+    for (const id of Object.keys(marks)) if (!liveIds.has(id)) delete marks[id];
+
+    // The same two exclusions as the per-email check: a task a person
+    // reopened after the system closed it, and a parent with live steps.
+    if (live.length) {
+      const ids = live.map((t) => t.id);
+      const { data: reopened } = await supabaseAdmin
+        .from('activity_log')
+        .select('entity_id')
+        .eq('org_id', orgId)
+        .eq('action', 'task.auto_complete')
+        .in('entity_id', ids);
+      const skip = new Set(((reopened ?? []) as { entity_id: string }[]).map((r) => r.entity_id));
+      if (await hasSubtasks()) {
+        const { data: kids } = await supabaseAdmin
+          .from('tasks')
+          .select('parent_task_id')
+          .in('parent_task_id', ids)
+          .in('status', LIVE_STATUSES);
+        for (const k of (kids ?? []) as { parent_task_id: string }[]) skip.add(k.parent_task_id);
+      }
+      live = live.filter((t) => !skip.has(t.id));
+    }
+    if (!live.length) {
+      await saveReviewMarks(orgId, marks);
+      return { ok: true, reviewed: 0, closed: 0, waiting: 0 };
+    }
+
+    // Every email since the oldest live task was raised, newest first.
+    const oldest = live.reduce((min, t) => (t.created_at < min ? t.created_at : min), live[0].created_at);
+    const { data: mailRows } = await supabaseAdmin
+      .from('emails')
+      .select(`id, thread_id, received_at, project_id, vendor_id, subject, from_addr, snippet, ${(await bodyFieldNames()).join(', ')}`)
+      .eq('org_id', orgId)
+      .gte('received_at', oldest)
+      .order('received_at', { ascending: false })
+      .limit(1000);
+    const mail = (mailRows ?? []) as unknown as ReviewEmail[];
+
+    const sourceIds = [...new Set(live.map((t) => t.source_email_id).filter((id): id is string => !!id))];
+    const { data: sourceRows } = sourceIds.length
+      ? await supabaseAdmin.from('emails').select('id, thread_id, received_at').in('id', sourceIds)
+      : { data: [] };
+    const sources = new Map(
+      ((sourceRows ?? []) as { id: string; thread_id: string | null; received_at: string | null }[]).map((e) => [e.id, e]),
+    );
+
+    // Each task's related mail — by the same test the per-email check uses —
+    // and only when some of it is newer than the last time it was checked.
+    const due: { task: LiveTask; related: ReviewEmail[]; newest: string }[] = [];
+    for (const task of live) {
+      const related = mail.filter((e) => !!e.received_at && rankClosable(e, [task], sources).length > 0);
+      if (!related.length) continue;
+      const newest = related[0].received_at!;
+      const mark = marks[task.id];
+      if (mark && newest <= mark) continue;
+      due.push({ task, related, newest });
+    }
+    // Freshest news first: the likeliest to have just been finished.
+    due.sort((a, b) => (a.newest < b.newest ? 1 : a.newest > b.newest ? -1 : 0));
+
+    let index = 0;
+    for (; index < due.length && reviewed < MAX_REVIEWS_PER_SWEEP; index++) {
+      // One call takes a few seconds; stop while there is still room for it.
+      if (deadline - Date.now() < 8_000) break;
+      const { task, related, newest } = due[index];
+      const shown = related.slice(0, REVIEW_EMAILS).reverse(); // oldest first
+      const refs = new Map(shown.map((e, i) => [`E${i + 1}`, e]));
+
+      const user = [
+        `Today's date: ${new Date().toISOString().slice(0, 10)}`,
+        '',
+        `THE TASK: ${closableLine(task, task.due_date ? `due ${task.due_date}` : 'no due date')}`,
+        '',
+        'EMAILS ABOUT IT SINCE IT WAS RAISED (oldest first):',
+        ...shown.map((e, i) => {
+          const text = (readStoredText(e as Parameters<typeof readStoredText>[0]).body ?? e.snippet ?? '')
+            .trim()
+            .slice(0, REVIEW_CHARS);
+          return `\n[E${i + 1}] ${(e.received_at ?? '').slice(0, 10)} · from ${e.from_addr ?? 'unknown'} · ${e.subject ?? '(no subject)'}\n${text}`;
+        }),
+      ].join('\n');
+
+      let answer: { done?: boolean; email?: string | null; evidence?: string | null } | null;
+      try {
+        answer = await extractJson(REVIEW_SYSTEM, user, { feature: 'task.extract', orgId, entity: 'tasks', entityId: task.id });
+      } catch (err) {
+        // Not marked: a failed call is asked again next hour.
+        console.error('[tasks] review failed for', task.id, (err as Error).message);
+        continue;
+      }
+      // Unusable JSON is not an answer either — left to be asked again.
+      if (!answer) continue;
+      reviewed++;
+      marks[task.id] = newest;
+
+      const proof = answer.done === true ? refs.get(String(answer.email ?? '').trim().toUpperCase()) : undefined;
+      if (!proof) continue;
+      try {
+        const done = await closeFinished(orgId, proof, [{ ref: 'T1', task, line: '' }], [
+          { ref: 'T1', evidence: String(answer.evidence ?? '') },
+        ]);
+        closed += done.length;
+      } catch (err) {
+        console.error('[tasks] closing a reviewed task failed:', (err as Error).message);
+      }
+    }
+
+    await saveReviewMarks(orgId, marks);
+    const waiting = due.length - index;
+    if (reviewed) {
+      await supabaseAdmin.from('activity_log').insert({
+        org_id: orgId,
+        action: 'tasks.reviewed',
+        entity: 'tasks',
+        meta: { reviewed, closed, waiting },
+      });
+    }
+    return { ok: true, reviewed, closed, waiting };
+  } catch (err) {
+    console.error('[tasks] hourly review failed:', (err as Error).message);
+    return { ok: false, reason: (err as Error).message, reviewed, closed, waiting: 0 };
+  }
 }
 
 /**

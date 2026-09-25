@@ -126,3 +126,8 @@ export async function advanceIngestCursor(
 export function gmailAfter(since: Date): string {
   return `after:${Math.floor(since.getTime() / 1000)}`;
 }
+
+/** Gmail's `before:` operator, which takes whole seconds. */
+export function gmailBefore(until: Date): string {
+  return `before:${Math.ceil(until.getTime() / 1000)}`;
+}

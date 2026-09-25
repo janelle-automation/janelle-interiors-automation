@@ -7,7 +7,7 @@ import { importHouzzProjects } from '../services/houzz.js';
 import { runFollowUps, resolveFollowUps } from '../services/followups.js';
 import { runReport } from '../services/report.js';
 import { runDigest } from '../services/digest.js';
-import { advanceActiveTasks, backfillTasks, mergeDuplicateTasks } from '../services/tasks.js';
+import { advanceActiveTasks, backfillTasks, mergeDuplicateTasks, reviewOpenTasks } from '../services/tasks.js';
 import { sweepJobs } from '../services/mediaJobs.js';
 import { keepGoogleAlive } from '../services/googleKeepalive.js';
 import { supabaseAdmin } from '../lib/supabase.js';
@@ -95,6 +95,13 @@ cronRouter.all(
     }),
   ),
 );
+// Hourly: close the tasks the mail since they were raised shows are done.
+cronRouter.all(
+  '/tasks',
+  asyncHandler(async (_req, res) =>
+    res.json({ data: await forEachOrg((id, budgetMs) => reviewOpenTasks(id, { budgetMs })) }),
+  ),
+);
 cronRouter.all('/follow-ups', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => runFollowUps(id)) })));
 cronRouter.all('/report', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => runReport(id)) })));
 cronRouter.all('/digest', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => runDigest(id)) })));
@@ -177,6 +184,16 @@ opsRouter.post(
   asyncHandler(async (req, res) => {
     if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
     res.json({ data: await backfillEmailBodies(req.auth!.orgId, { budgetMs: JOB_BUDGET_MS }) });
+  }),
+);
+
+// Run the hourly task review now, rather than waiting for the hour.
+opsRouter.post(
+  '/review-tasks',
+  requireRole('principal', 'coordinator'),
+  asyncHandler(async (req, res) => {
+    if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await reviewOpenTasks(req.auth!.orgId, { budgetMs: JOB_BUDGET_MS }) });
   }),
 );
 

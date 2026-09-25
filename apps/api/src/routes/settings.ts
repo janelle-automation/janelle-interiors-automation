@@ -33,6 +33,9 @@ import {
 } from '../lib/aiSettings.js';
 import { CLOUDFLARE_IMAGE_MODELS, GROK_IMAGE_MODELS, IMAGE_MODELS, PICTURE_ENGINES, VIDEO_MODELS } from '@janelle/shared';
 import { readIngestSettings, saveIngestSettings } from '../lib/ingestSettings.js';
+import { runIngest } from '../services/ingest.js';
+import { gmailFor } from '../services/gmail.js';
+import { isGoogleAuthFailure } from '../lib/tokens.js';
 
 /**
  * Studio settings that used to require a deploy.
@@ -49,6 +52,58 @@ settingsRouter.use(requireAuth);
 // changed nothing. No view, no module — writes are still checked
 // separately below.
 settingsRouter.use(requirePermission('settings', 'read'));
+
+/** Per call; kept short for the same reason as the dashboard's reading. */
+const SYNC_BUDGET_MS = Number(process.env.JOB_BUDGET_MS || 20_000);
+
+/** The longest window one sync may ask for. */
+const MAX_SYNC_DAYS = 92;
+
+/**
+ * Sync the signed-in person's own mailbox for a chosen period.
+ *
+ * Open to everyone who can see Settings — it reads only the caller's own
+ * Gmail, into mail only they (and the studio's mailbox rules) can see. One
+ * short, budgeted pass per call: the screen asks again, from `resumeFrom`,
+ * until the answer comes back `done`. Everything already stored is skipped
+ * without a Claude call, so asking twice for the same day costs nothing.
+ */
+settingsRouter.post(
+  '/mail-sync',
+  asyncHandler(async (req, res) => {
+    const { orgId, userId } = req.auth!;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const since = new Date(String(req.body?.since ?? ''));
+    let until = new Date(String(req.body?.until ?? ''));
+    if (Number.isNaN(since.getTime()) || Number.isNaN(until.getTime())) {
+      return res.status(400).json({ error: 'Choose a start and end date.' });
+    }
+    // Nothing has arrived in the future; a range ending later ends now.
+    const now = new Date();
+    if (until > now) until = now;
+    if (since >= until) return res.status(400).json({ error: 'The start must be before the end.' });
+    if (until.getTime() - since.getTime() > MAX_SYNC_DAYS * 86_400_000) {
+      return res.status(400).json({ error: `Choose ${MAX_SYNC_DAYS} days or fewer.` });
+    }
+
+    // Said plainly here rather than as an empty "0 emails" further down:
+    // without Gmail the pass has nothing to read.
+    try {
+      if (!(await gmailFor(userId))) {
+        return res.status(400).json({ error: 'Connect Gmail above before syncing your email.' });
+      }
+    } catch (err) {
+      if (isGoogleAuthFailure(err)) {
+        return res.status(400).json({ error: 'Google needs reconnecting — use Connect above, then try again.' });
+      }
+      throw err;
+    }
+
+    const result = await runIngest(orgId, { onlyUserId: userId, range: { since, until }, budgetMs: SYNC_BUDGET_MS });
+    res.json({ data: result });
+  }),
+);
 
 settingsRouter.get(
   '/ai',

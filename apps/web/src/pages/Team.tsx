@@ -1,12 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { ROLE_LABELS, SEATS, SEAT_KEYS, USER_ROLES, type Seat, type UserRole } from '@janelle/shared';
-import { Page, PageHeading, Card, Pill } from '../components/ui';
+import { Page, PageHeading, Card, Pill, PasswordInput } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import { startImpersonation } from '../lib/impersonate';
 import {
-  useAddTeamMember, useEditTeamMember, useRemoveTeamMember, useSendInvite, useSetRole, useTeam, useTeamAbilities,
-  type AddedMember, type TeamMember,
+  useAddTeamMember, useEditTeamMember, useRemoveTeamMember, useResetMemberPassword, useSendInvite, useSetMemberDisabled,
+  useSetRole, useTeam, useTeamAbilities,
+  type AddedMember, type PasswordReset, type TeamMember,
 } from '../lib/queries';
 
 
@@ -170,6 +171,107 @@ function GoogleStatus({ g }: { g: TeamMember['google'] }) {
   );
 }
 
+/** Matches the API and the reset-password screen. */
+const MIN_MEMBER_PASSWORD = 8;
+
+const PASSWORD_MODES = [
+  ['generate', 'Generate one'],
+  ['type', 'Type one'],
+] as const;
+
+/**
+ * The row's less frequent actions, behind one button.
+ *
+ * Six buttons on every row read as a wall; the two used most — signing in
+ * as someone and editing them — stay in view, the rest open from here.
+ */
+function RowMenu({ label, children }: { label: string; children: (close: () => void) => ReactNode }) {
+  // Where to draw the menu. Fixed to the viewport, because the table scrolls
+  // sideways and anything positioned inside it is clipped at its edge — the
+  // bottom rows' menus would open into nothing.
+  const [at, setAt] = useState<{ top?: number; bottom?: number; right: number } | null>(null);
+  const open = at !== null;
+  const root = useRef<HTMLDivElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
+
+  const toggle = () => {
+    if (open || !button.current) return setAt(null);
+    const r = button.current.getBoundingClientRect();
+    const right = window.innerWidth - r.right;
+    // Opens upward when there is not room for it below.
+    setAt(window.innerHeight - r.bottom < 280 ? { bottom: window.innerHeight - r.top + 4, right } : { top: r.bottom + 4, right });
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setAt(null);
+    const onDown = (e: MouseEvent) => {
+      if (root.current && !root.current.contains(e.target as Node)) close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close();
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    // A fixed menu would float away from its row on scroll; close instead.
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [open]);
+
+  return (
+    <div ref={root} className="relative">
+      <button
+        ref={button}
+        type="button"
+        className="btn-ghost btn-sm px-2"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={label}
+        title="More"
+        onClick={toggle}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <circle cx="5" cy="12" r="1.8" />
+          <circle cx="12" cy="12" r="1.8" />
+          <circle cx="19" cy="12" r="1.8" />
+        </svg>
+      </button>
+      {at && (
+        <div
+          role="menu"
+          style={{ position: 'fixed', top: at.top, bottom: at.bottom, right: at.right }}
+          className="z-50 w-60 rounded-xl border border-line bg-surface p-1 text-left shadow-pop"
+        >
+          {children(() => setAt(null))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MenuItem({
+  children, hint, onClick, disabled, danger,
+}: { children: ReactNode; hint?: string; onClick: () => void; disabled?: boolean; danger?: boolean }) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      disabled={disabled}
+      onClick={onClick}
+      className="focusable flex w-full flex-col rounded-lg px-3 py-2 text-left transition-colors hover:bg-sunk disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+    >
+      <span className={`text-[13px] font-medium ${danger ? 'text-crit' : 'text-ink'}`}>{children}</span>
+      {hint && <span className="text-[11.5px] text-ink-faint">{hint}</span>}
+    </button>
+  );
+}
+
 /**
  * One person as a table row: who they are, their role and seat, whether
  * their Google is connected, what they carry, and — for someone allowed to
@@ -177,16 +279,29 @@ function GoogleStatus({ g }: { g: TeamMember['google'] }) {
  * open as a full-width row beneath, so a person is never lost by a slip.
  */
 function PersonRow({
-  m, canUpdate, canDelete, canImpersonate, principals, columns,
-}: { m: TeamMember; canUpdate: boolean; canDelete: boolean; canImpersonate: boolean; principals: number; columns: number }) {
+  m, canUpdate, canDelete, canImpersonate, principals, activePrincipals, columns,
+}: {
+  m: TeamMember; canUpdate: boolean; canDelete: boolean; canImpersonate: boolean;
+  principals: number;
+  /** Principals whose accounts are not disabled — the last one cannot be. */
+  activePrincipals: number;
+  columns: number;
+}) {
   const { user } = useAuth();
   const [switching, setSwitching] = useState(false);
   const [switchError, setSwitchError] = useState<string | null>(null);
   const setRole = useSetRole();
   const edit = useEditTeamMember();
   const remove = useRemoveTeamMember();
-  const [mode, setMode] = useState<'view' | 'edit' | 'remove' | 'invite' | null>('view');
+  const [mode, setMode] = useState<'view' | 'edit' | 'remove' | 'invite' | 'password' | 'disable' | null>('view');
   const invite = useSendInvite();
+  const resetPassword = useResetMemberPassword();
+  const setDisabled = useSetMemberDisabled();
+  // The reset form: generate one, or type one; and whether to email it.
+  const [pwMode, setPwMode] = useState<'generate' | 'type'>('generate');
+  const [typedPassword, setTypedPassword] = useState('');
+  const [notify, setNotify] = useState(false);
+  const [reset, setReset] = useState<PasswordReset | null>(null);
   // The issued password, shown once. Kept on the row rather than in a toast,
   // because it belongs to this person and nothing else can recover it.
   const [sent, setSent] = useState<AddedMember | null>(null);
@@ -194,8 +309,22 @@ function PersonRow({
   const [email, setEmail] = useState(m.email ?? '');
 
   const lastPrincipal = m.role === 'principal' && principals <= 1;
-  const error = (setRole.error ?? edit.error ?? remove.error ?? (switchError ? new Error(switchError) : null)) as Error | null;
-  const panel = mode === 'edit' || mode === 'invite' || mode === 'remove' || Boolean(sent) || Boolean(error);
+  const lastActivePrincipal = m.role === 'principal' && !m.disabled && activePrincipals <= 1;
+  const error = (setRole.error ?? edit.error ?? remove.error ?? setDisabled.error ?? (switchError ? new Error(switchError) : null)) as Error | null;
+  const panel =
+    mode === 'edit' || mode === 'invite' || mode === 'remove' || mode === 'password' || mode === 'disable' ||
+    Boolean(sent) || Boolean(reset) || Boolean(error);
+  const who = m.full_name ?? m.email ?? 'this person';
+  const typedTooShort = pwMode === 'type' && typedPassword.length < MIN_MEMBER_PASSWORD;
+
+  const openPassword = () => {
+    setPwMode('generate');
+    setTypedPassword('');
+    setNotify(false);
+    setReset(null);
+    resetPassword.reset();
+    setMode(mode === 'password' ? 'view' : 'password');
+  };
 
   return (
     <>
@@ -206,11 +335,16 @@ function PersonRow({
               {(m.full_name ?? m.email ?? '?').slice(0, 1).toUpperCase()}
             </span>
             <div className="min-w-0">
-              <div className="truncate text-[13.5px] font-medium text-ink">
+              <div className={`truncate text-[13.5px] font-medium ${m.disabled ? 'text-ink-soft' : 'text-ink'}`}>
                 {m.full_name ?? '—'}
                 {m.is_you && <span className="ml-1.5 rounded bg-brass/10 px-1.5 py-px text-[10.5px] font-semibold text-brass-deep">you</span>}
               </div>
-              <div className="truncate text-[12px] text-ink-soft">{m.email ?? '—'}</div>
+              <div className="flex items-center gap-1.5 text-[12px] text-ink-soft">
+                <span className="truncate">{m.email ?? '—'}</span>
+                {m.disabled && (
+                  <span className="shrink-0 rounded bg-crit/10 px-1.5 py-px text-[10.5px] font-semibold text-crit">Disabled</span>
+                )}
+              </div>
             </div>
           </div>
         </td>
@@ -297,29 +431,72 @@ function PersonRow({
                   Edit
                 </button>
               )}
-              {canUpdate && m.email && (
-                <button
-                  type="button"
-                  className="btn-ghost btn-sm"
-                  onClick={() => setMode(mode === 'invite' ? 'view' : 'invite')}
-                  disabled={invite.isPending}
-                  title="Email them a new password to sign in with"
-                  aria-label={`Send sign-in details to ${m.full_name ?? m.email}`}
-                >
-                  {invite.isPending ? 'Sending…' : 'Invite'}
-                </button>
-              )}
-              {canDelete && !m.is_you && (
-                <button
-                  type="button"
-                  className="btn-ghost btn-sm text-crit hover:text-crit"
-                  onClick={() => setMode(mode === 'remove' ? 'view' : 'remove')}
-                  disabled={lastPrincipal}
-                  title={lastPrincipal ? 'The studio needs at least one principal' : undefined}
-                  aria-label={`Remove ${m.full_name ?? m.email}`}
-                >
-                  Remove
-                </button>
+              {(canUpdate || (canDelete && !m.is_you)) && (
+                <RowMenu label={`More actions for ${who}`}>
+                  {(close) => (
+                    <>
+                      {canUpdate && m.email && !m.disabled && (
+                        <MenuItem
+                          onClick={() => {
+                            close();
+                            setMode(mode === 'invite' ? 'view' : 'invite');
+                          }}
+                          hint="Email them a new password"
+                        >
+                          Send sign-in details
+                        </MenuItem>
+                      )}
+                      {canUpdate && (
+                        <MenuItem
+                          onClick={() => {
+                            close();
+                            openPassword();
+                          }}
+                          hint="Type or generate a new one"
+                        >
+                          Reset password
+                        </MenuItem>
+                      )}
+                      {canUpdate && !m.is_you && m.disabled && (
+                        <MenuItem
+                          onClick={() => {
+                            close();
+                            setDisabled.mutate({ id: m.id, disabled: false }, { onSuccess: () => setMode('view') });
+                          }}
+                          hint="Let them sign in again"
+                        >
+                          Enable account
+                        </MenuItem>
+                      )}
+                      {canUpdate && !m.is_you && !m.disabled && (
+                        <MenuItem
+                          onClick={() => {
+                            close();
+                            setDisabled.reset();
+                            setMode('disable');
+                          }}
+                          disabled={lastActivePrincipal}
+                          hint={lastActivePrincipal ? 'The studio needs an active principal' : 'Block sign-in, keep everything'}
+                        >
+                          Disable account
+                        </MenuItem>
+                      )}
+                      {canDelete && !m.is_you && (
+                        <MenuItem
+                          danger
+                          onClick={() => {
+                            close();
+                            setMode(mode === 'remove' ? 'view' : 'remove');
+                          }}
+                          disabled={lastPrincipal}
+                          hint={lastPrincipal ? 'The studio needs at least one principal' : 'Delete their account'}
+                        >
+                          Remove from studio
+                        </MenuItem>
+                      )}
+                    </>
+                  )}
+                </RowMenu>
               )}
             </div>
           </td>
@@ -430,6 +607,144 @@ function PersonRow({
               </div>
             )}
 
+            {mode === 'password' && (
+              <form
+                aria-label={`Reset the password for ${who}`}
+                className="rounded-lg border border-line bg-surface px-4 py-3"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (typedTooShort) return;
+                  resetPassword.mutate(
+                    { id: m.id, password: pwMode === 'type' ? typedPassword : undefined, notify: notify && Boolean(m.email) },
+                    {
+                      onSuccess: (r) => {
+                        setReset(r);
+                        setTypedPassword('');
+                        setMode(null);
+                      },
+                    },
+                  );
+                }}
+              >
+                <p className="text-[13px] text-ink">
+                  New password for <span className="font-semibold">{who}</span>. Whatever they use now stops working straight away.
+                </p>
+                <div role="radiogroup" aria-label="How to set it" className="mt-3 flex flex-wrap gap-1.5">
+                  {PASSWORD_MODES.map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      role="radio"
+                      aria-checked={pwMode === value}
+                      onClick={() => setPwMode(value)}
+                      className={`focusable rounded-lg border px-3 py-1.5 text-[12.5px] font-medium transition-colors ${
+                        pwMode === value ? 'border-brass/50 bg-brass/15 text-ink' : 'border-line text-ink-soft hover:bg-sunk hover:text-ink'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {pwMode === 'type' && (
+                  <label className="mt-3 block max-w-sm">
+                    <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-faint">New password</span>
+                    <PasswordInput
+                      className="w-full"
+                      value={typedPassword}
+                      onChange={(e) => setTypedPassword(e.target.value)}
+                      maxLength={72}
+                      autoComplete="new-password"
+                      autoFocus
+                    />
+                    <span className={`mt-1 block text-[11.5px] ${typedPassword && typedTooShort ? 'text-crit' : 'text-ink-faint'}`}>
+                      At least {MIN_MEMBER_PASSWORD} characters.
+                    </span>
+                  </label>
+                )}
+                {m.email && (
+                  <label className="mt-3 flex w-fit cursor-pointer items-center gap-2 text-[12.5px] text-ink-soft">
+                    <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} className="h-4 w-4" />
+                    Email it to {m.email}
+                  </label>
+                )}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button type="submit" className="btn-primary btn-sm" disabled={resetPassword.isPending || typedTooShort}>
+                    {resetPassword.isPending ? 'Resetting…' : 'Reset password'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-ghost btn-sm"
+                    onClick={() => {
+                      resetPassword.reset();
+                      setMode('view');
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  {resetPassword.isError && <span className="text-[12.5px] text-crit">{(resetPassword.error as Error).message}</span>}
+                </div>
+              </form>
+            )}
+
+            {reset && (
+              <div className={`rounded-lg px-4 py-3 text-[12.5px] ${reset.mailError ? 'bg-warn/10 text-warn' : 'bg-good/10 text-good'}`}>
+                {reset.mailError ? (
+                  <>
+                    <span className="font-semibold">Password changed, but the email did not send.</span> ({reset.mailError})
+                    {reset.password ? ' Give them this:' : ' Pass the new password on yourself.'}
+                  </>
+                ) : reset.emailed ? (
+                  <>Password changed and emailed to {reset.email}.</>
+                ) : reset.password ? (
+                  <>Password changed. Give them this — it is not shown again:</>
+                ) : (
+                  <>Password changed. Pass it on to them yourself.</>
+                )}
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {reset.password && !reset.emailed && (
+                    <>
+                      <code className="select-all rounded bg-ink/10 px-2 py-1 font-mono text-[12.5px] text-ink">{reset.password}</code>
+                      <button type="button" className="btn-secondary btn-sm" onClick={() => void navigator.clipboard?.writeText(reset.password ?? '')}>
+                        Copy
+                      </button>
+                    </>
+                  )}
+                  <button type="button" className="btn-ghost btn-sm" onClick={() => setReset(null)}>
+                    Done
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {mode === 'disable' && (
+              <div role="alertdialog" aria-label={`Disable ${who}`} className="rounded-lg border border-crit/30 bg-crit/5 px-4 py-3">
+                <p className="text-[13px] text-ink">
+                  Disable <span className="font-semibold">{who}</span>? They are signed out at once and cannot sign in until the account
+                  is enabled again. Their tasks, mail and history stay exactly as they are. Nothing is emailed to them.
+                </p>
+                <div className="mt-2.5 flex gap-2">
+                  <button
+                    type="button"
+                    className="rounded-lg bg-crit px-3 py-1.5 text-[12.5px] font-semibold text-white hover:opacity-90 disabled:opacity-50"
+                    disabled={setDisabled.isPending}
+                    onClick={() => setDisabled.mutate({ id: m.id, disabled: true }, { onSuccess: () => setMode('view') })}
+                  >
+                    {setDisabled.isPending ? 'Disabling…' : 'Disable'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary btn-sm"
+                    onClick={() => {
+                      setDisabled.reset();
+                      setMode('view');
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
             {mode === 'remove' && (
               <div role="alertdialog" aria-label={`Remove ${m.full_name ?? m.email}`} className="rounded-lg border border-crit/30 bg-crit/5 px-4 py-3">
                 <p className="text-[13px] text-ink">
@@ -468,6 +783,7 @@ export default function Team() {
   const [adding, setAdding] = useState(false);
 
   const principals = team.filter((m) => m.role === 'principal').length;
+  const activePrincipals = team.filter((m) => m.role === 'principal' && !m.disabled).length;
   const manages = Boolean(can?.create || can?.update || can?.delete || can?.impersonate);
   const columns = manages ? 6 : 5;
   const googleConnected = team.filter((m) => m.google?.connected).length;
@@ -545,6 +861,7 @@ export default function Team() {
                     canDelete={Boolean(can?.delete)}
                     canImpersonate={Boolean(can?.impersonate)}
                     principals={principals}
+                    activePrincipals={activePrincipals}
                     columns={columns}
                   />
                 ))}

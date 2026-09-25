@@ -1,7 +1,7 @@
 import cron from 'node-cron';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { runFollowUps, resolveFollowUps } from './followups.js';
-import { advanceActiveTasks } from './tasks.js';
+import { advanceActiveTasks, reviewOpenTasks } from './tasks.js';
 import { runReport } from './report.js';
 import { runIngest } from './ingest.js';
 import { runDigest } from './digest.js';
@@ -37,6 +37,9 @@ let ingestRunning = false;
 
 /** One media sweep at a time: they poll a provider and can overlap. */
 let mediaRunning = false;
+
+/** One hourly task review at a time. */
+let reviewRunning = false;
 
 /** When each org was last read, so an interval can be honoured. */
 const lastIngest = new Map<string, number>();
@@ -91,6 +94,17 @@ export function startScheduler(): void {
     ingestRunning = true;
     void ingestDueOrgs().finally(() => {
       ingestRunning = false;
+    });
+  });
+
+  // Every hour: put each live task beside the mail since it was raised and
+  // close the ones that are plainly finished. Only tasks with new mail cost
+  // a Claude call, so a quiet hour costs nothing.
+  cron.schedule('15 * * * *', () => {
+    if (reviewRunning) return;
+    reviewRunning = true;
+    void forEachOrg((id) => reviewOpenTasks(id), 'task review').finally(() => {
+      reviewRunning = false;
     });
   });
 

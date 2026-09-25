@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { supabase, supabaseConfigured } from '../lib/supabase';
-import { api } from '../lib/api';
+import { api, SessionExpiredError } from '../lib/api';
 import { clearImpersonation } from '../lib/impersonate';
 import type { Action, Resource, Seat, UserRole } from '@janelle/shared';
 
@@ -115,6 +115,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setProfile(created);
     } catch (err) {
       setProfile(null);
+      // Not an unreachable API: the session was dead and has been dropped,
+      // so the login screen is already on its way.
+      if (err instanceof SessionExpiredError) return;
       setProfileError((err as Error).message || 'Could not reach the server.');
     }
   }, []);
@@ -138,7 +141,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (event === 'PASSWORD_RECOVERY') setRecovery(true);
       setSession(next);
       if (next) await loadProfile();
-      else setProfile(null);
+      else {
+        // Covers a session that expired, not only the Sign out button.
+        clearImpersonation();
+        setProfile(null);
+        setAccess(null);
+        setProfileError(null);
+        setGoogleConnected(null);
+      }
     });
 
     return () => {
