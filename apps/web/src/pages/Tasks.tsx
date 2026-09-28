@@ -17,6 +17,7 @@ import {
   daysEarly, useAddSubtask, useBackfillTasks, useDeleteTask, useTaskDetail, useTasks, useTeam, useUpdateTask,
   type TaskView, type TeamMember,
 } from '../lib/queries';
+import { DatePicker } from '../components/DatePicker';
 
 const tone: Record<TaskKind, 'crit' | 'warn' | 'brass' | 'neutral'> = {
   quote_request: 'brass',
@@ -543,12 +544,14 @@ const BoardCard = memo(function BoardCard({
         )}
 
         {mayEdit ? (
-          <input
-            type="date"
-            className={`control-quiet w-auto shrink-0 tabular-nums ${t.overdue ? 'font-semibold text-crit' : ''}`}
-            value={t.due ?? ''}
-            aria-label={`Due date for "${t.title}"`}
-            onChange={(e) => onDue(t.id, e.target.value || null)}
+          <DatePicker
+            compact
+            className="control-quiet"
+            valueClassName={t.overdue ? 'font-semibold text-crit' : 'text-ink-soft'}
+            value={t.due}
+            placeholder="Due date"
+            ariaLabel={`Due date for "${t.title}"`}
+            onChange={(next) => onDue(t.id, next)}
           />
         ) : (
           <span
@@ -923,21 +926,21 @@ function TaskFilterMenu({
               </select>
               {filters.due === 'range' && (
                 <div className="mt-2 grid grid-cols-2 gap-2">
-                  <input
-                    type="date"
-                    aria-label="Due from"
+                  <DatePicker
+                    ariaLabel="Due from"
+                    placeholder="From"
                     className={field}
                     value={filters.from}
                     max={filters.to || undefined}
-                    onChange={(e) => set({ from: e.target.value })}
+                    onChange={(next) => set({ from: next ?? '' })}
                   />
-                  <input
-                    type="date"
-                    aria-label="Due to"
+                  <DatePicker
+                    ariaLabel="Due to"
+                    placeholder="To"
                     className={field}
                     value={filters.to}
                     min={filters.from || undefined}
-                    onChange={(e) => set({ to: e.target.value })}
+                    onChange={(next) => set({ to: next ?? '' })}
                   />
                 </div>
               )}

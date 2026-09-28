@@ -11,11 +11,18 @@ import { advanceActiveTasks, backfillTasks, mergeDuplicateTasks, reviewOpenTasks
 import { sweepJobs } from '../services/mediaJobs.js';
 import { keepGoogleAlive } from '../services/googleKeepalive.js';
 import { supabaseAdmin } from '../lib/supabase.js';
+import { readIngestSettings } from '../lib/ingestSettings.js';
+import { claimCronSlot } from '../lib/cronSlot.js';
+
+/** When the scheduled ingest last started each studio's read. */
+const INGEST_RAN_FIELD = 'ingest_ran_at';
+/** When the scheduled task review last started for each studio. */
+const TASK_REVIEW_RAN_FIELD = 'task_review_ran_at';
 
 export const opsRouter = Router();
 
 // ── Scheduled jobs ──────────────────────────────────────────
-// Vercel Cron calls these; there is no long-running process to hold the
+// Vercel Cron and Supabase pg_cron call these; there is no long-running process to hold the
 // node-cron timers that `services/scheduler.ts` uses when self-hosted.
 // They authenticate with CRON_SECRET rather than a user session, so they
 // are declared BEFORE `requireAuth` is applied to the rest of the router.
@@ -80,27 +87,53 @@ async function forEachOrg<T>(fn: (orgId: string, budgetMs: number) => Promise<T>
 }
 
 // Vercel Cron issues GET requests; POST is allowed for manual curl testing.
+//
+// Supabase pg_cron calls this every minute (migration 0022), and each studio
+// is read only as often as it asked in Settings → Reading email — "Only when
+// I ask" is never read here. `?force=1` reads every studio now.
 cronRouter.all(
   '/ingest',
   // Reading the mail and acting on what it says are one job: a hosted cron
   // must not leave the board and the follow-up queue behind the inbox.
-  asyncHandler(async (_req, res) =>
+  asyncHandler(async (req, res) => {
+    const force = req.query.force === '1';
     res.json({
       data: await forEachOrg(async (id, budgetMs) => {
+        if (!force) {
+          const { intervalMinutes } = await readIngestSettings(id);
+          if (intervalMinutes <= 0) return { ok: true, skipped: 'on_demand_only' };
+          if (!(await claimCronSlot(id, INGEST_RAN_FIELD, intervalMinutes * 60_000))) {
+            return { ok: true, skipped: 'not_due' };
+          }
+        }
         const result = await runIngest(id, { budgetMs });
         await resolveFollowUps(id);
         await advanceActiveTasks(id);
         return result;
       }),
-    }),
-  ),
+    });
+  }),
 );
-// Hourly: close the tasks the mail since they were raised shows are done.
+// Close the tasks the mail since they were raised shows are done. Called
+// every five minutes (migration 0021); each studio is reviewed only as often
+// as it chose in Settings → Reading email. `?force=1` reviews every studio now.
 cronRouter.all(
   '/tasks',
-  asyncHandler(async (_req, res) =>
-    res.json({ data: await forEachOrg((id, budgetMs) => reviewOpenTasks(id, { budgetMs })) }),
-  ),
+  asyncHandler(async (req, res) => {
+    const force = req.query.force === '1';
+    res.json({
+      data: await forEachOrg(async (id, budgetMs) => {
+        if (!force) {
+          const { taskReviewMinutes } = await readIngestSettings(id);
+          if (taskReviewMinutes <= 0) return { ok: true, skipped: 'off' };
+          if (!(await claimCronSlot(id, TASK_REVIEW_RAN_FIELD, taskReviewMinutes * 60_000))) {
+            return { ok: true, skipped: 'not_due' };
+          }
+        }
+        return reviewOpenTasks(id, { budgetMs });
+      }),
+    });
+  }),
 );
 cronRouter.all('/follow-ups', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => runFollowUps(id)) })));
 cronRouter.all('/report', asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id) => runReport(id)) })));

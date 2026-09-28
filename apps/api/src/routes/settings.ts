@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { DEFAULT_SLA, INGEST_INTERVALS, SELECTABLE_MODELS, type SlaSettings } from '@janelle/shared';
+import { DEFAULT_SLA, INGEST_INTERVALS, TASK_REVIEW_INTERVALS, SELECTABLE_MODELS, type SlaSettings } from '@janelle/shared';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { supabaseAdmin } from '../lib/supabase.js';
@@ -463,7 +463,7 @@ settingsRouter.put(
     const orgId = req.auth!.orgId;
     if (!orgId) return res.status(400).json({ error: 'No organization for user' });
 
-    const patch: { intervalMinutes?: number; useAi?: boolean } = {};
+    const patch: { intervalMinutes?: number; useAi?: boolean; taskReviewMinutes?: number } = {};
 
     if (req.body?.intervalMinutes !== undefined) {
       const minutes = Number(req.body.intervalMinutes);
@@ -478,6 +478,14 @@ settingsRouter.put(
         return res.status(400).json({ error: 'useAi must be true or false' });
       }
       patch.useAi = req.body.useAi;
+    }
+
+    if (req.body?.taskReviewMinutes !== undefined) {
+      const minutes = Number(req.body.taskReviewMinutes);
+      if (!TASK_REVIEW_INTERVALS.some((i) => i.minutes === minutes)) {
+        return res.status(400).json({ error: 'Unknown interval' });
+      }
+      patch.taskReviewMinutes = minutes;
     }
 
     const updated = await saveIngestSettings(orgId, patch);

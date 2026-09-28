@@ -6,6 +6,7 @@ import { runReport } from './report.js';
 import { runIngest } from './ingest.js';
 import { runDigest } from './digest.js';
 import { readIngestSettings } from '../lib/ingestSettings.js';
+import { claimCronSlot } from '../lib/cronSlot.js';
 import { sweepJobs } from './mediaJobs.js';
 import { keepGoogleAlive } from './googleKeepalive.js';
 
@@ -97,13 +98,18 @@ export function startScheduler(): void {
     });
   });
 
-  // Every hour: put each live task beside the mail since it was raised and
-  // close the ones that are plainly finished. Only tasks with new mail cost
-  // a Claude call, so a quiet hour costs nothing.
-  cron.schedule('15 * * * *', () => {
+  // Put each live task beside the mail since it was raised and close the
+  // ones that are plainly finished, as often as the studio chose in Settings
+  // (default hourly). Only tasks with new mail cost a Claude call.
+  cron.schedule('*/5 * * * *', () => {
     if (reviewRunning) return;
     reviewRunning = true;
-    void forEachOrg((id) => reviewOpenTasks(id), 'task review').finally(() => {
+    void forEachOrg(async (id) => {
+      const { taskReviewMinutes } = await readIngestSettings(id);
+      if (taskReviewMinutes <= 0) return;
+      if (!(await claimCronSlot(id, 'task_review_ran_at', taskReviewMinutes * 60_000))) return;
+      await reviewOpenTasks(id);
+    }, 'task review').finally(() => {
       reviewRunning = false;
     });
   });

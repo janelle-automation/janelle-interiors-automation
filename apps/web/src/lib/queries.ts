@@ -1733,7 +1733,7 @@ export function useIngestSettings() {
 export function useSetIngestSettings() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (patch: { intervalMinutes?: number; useAi?: boolean }) =>
+    mutationFn: (patch: { intervalMinutes?: number; useAi?: boolean; taskReviewMinutes?: number }) =>
       api<IngestSettingsView>('/settings/ingest', { method: 'PUT', body: JSON.stringify(patch) }),
     onSuccess: (data) => qc.setQueryData(['ingest-settings'], data),
   });

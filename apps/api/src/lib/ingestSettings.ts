@@ -1,6 +1,8 @@
 import {
   DEFAULT_INGEST_MINUTES,
+  DEFAULT_TASK_REVIEW_MINUTES,
   INGEST_INTERVALS,
+  TASK_REVIEW_INTERVALS,
   type IngestSettingsView,
 } from '@janelle/shared';
 import { supabaseAdmin } from './supabase.js';
@@ -14,6 +16,7 @@ import { supabaseAdmin } from './supabase.js';
  */
 const INTERVAL_FIELD = 'ingest_interval_minutes';
 const USE_AI_FIELD = 'ingest_use_ai';
+const TASK_REVIEW_FIELD = 'task_review_interval_minutes';
 
 const TTL_MS = 30_000;
 const cache = new Map<string, { at: number; value: IngestSettingsView }>();
@@ -28,6 +31,8 @@ function defaults(): IngestSettingsView {
     intervalMinutes: DEFAULT_INGEST_MINUTES,
     useAi: true,
     intervals: INGEST_INTERVALS,
+    taskReviewMinutes: DEFAULT_TASK_REVIEW_MINUTES,
+    taskReviewIntervals: TASK_REVIEW_INTERVALS,
   };
 }
 
@@ -49,6 +54,7 @@ export async function readIngestSettings(orgId: string): Promise<IngestSettingsV
       {}) as Record<string, unknown>;
 
     const stored = settings[INTERVAL_FIELD];
+    const review = settings[TASK_REVIEW_FIELD];
     const value: IngestSettingsView = {
       intervalMinutes:
         typeof stored === 'number' && INGEST_INTERVALS.some((i) => i.minutes === stored)
@@ -56,6 +62,11 @@ export async function readIngestSettings(orgId: string): Promise<IngestSettingsV
           : DEFAULT_INGEST_MINUTES,
       useAi: settings[USE_AI_FIELD] !== false,
       intervals: INGEST_INTERVALS,
+      taskReviewMinutes:
+        typeof review === 'number' && TASK_REVIEW_INTERVALS.some((i) => i.minutes === review)
+          ? review
+          : DEFAULT_TASK_REVIEW_MINUTES,
+      taskReviewIntervals: TASK_REVIEW_INTERVALS,
     };
 
     cache.set(orgId, { at: Date.now(), value });
@@ -68,7 +79,7 @@ export async function readIngestSettings(orgId: string): Promise<IngestSettingsV
 
 export async function saveIngestSettings(
   orgId: string,
-  patch: { intervalMinutes?: number; useAi?: boolean },
+  patch: { intervalMinutes?: number; useAi?: boolean; taskReviewMinutes?: number },
 ): Promise<IngestSettingsView> {
   if (!supabaseAdmin) throw new Error('Backend not configured');
 
@@ -87,6 +98,12 @@ export async function saveIngestSettings(
     settings[INTERVAL_FIELD] = patch.intervalMinutes;
   }
   if (patch.useAi !== undefined) settings[USE_AI_FIELD] = patch.useAi;
+  if (patch.taskReviewMinutes !== undefined) {
+    if (!TASK_REVIEW_INTERVALS.some((i) => i.minutes === patch.taskReviewMinutes)) {
+      throw new Error('Unknown interval');
+    }
+    settings[TASK_REVIEW_FIELD] = patch.taskReviewMinutes;
+  }
 
   const { error } = await supabaseAdmin
     .from('organizations')
