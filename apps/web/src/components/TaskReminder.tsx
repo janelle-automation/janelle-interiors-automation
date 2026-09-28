@@ -13,8 +13,62 @@ const SHOWN = 8;
 
 const SEEN_KEY = 'janelle.reminder.seen';
 
-/** The second reminder of the day: pending work is said again after this hour. */
-const MIDDAY_HOUR = 12;
+/**
+ * The studio is in Ojai, California, and the second reminder is meant to
+ * land at 5pm there — not at 5pm wherever a teammate's laptop happens to
+ * think it is. Anchored to Pacific time via Intl rather than a fixed UTC
+ * offset, so it stays correct across the PST/PDT change.
+ */
+const PACIFIC_TZ = 'America/Los_Angeles';
+const EVENING_HOUR = 17;
+
+/**
+ * Pacific's current offset from UTC, in minutes — negative, e.g. -420 in
+ * summer (PDT), -480 in winter (PST).
+ *
+ * Read by asking Intl for Pacific's own wall-clock digits at `d`, then
+ * comparing that reading (taken as if it were itself UTC) to `d`'s real UTC
+ * instant. The difference is the offset, worked out from what Pacific time
+ * actually is today rather than assumed from a lookup table.
+ */
+function pacificOffsetMinutes(d: Date): number {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: PACIFIC_TZ,
+      hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    })
+      .formatToParts(d)
+      .map((p) => [p.type, p.value]),
+  );
+  const asIfUtc = Date.UTC(
+    Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+    Number(parts.hour), Number(parts.minute), Number(parts.second),
+  );
+  return Math.round((asIfUtc - d.getTime()) / 60_000);
+}
+
+/** The Pacific calendar date ("YYYY-MM-DD") and hour (0–23) `d` falls on. */
+function pacificParts(d: Date): { date: string; hour: number } {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: PACIFIC_TZ,
+      hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit',
+    })
+      .formatToParts(d)
+      .map((p) => [p.type, p.value]),
+  );
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) };
+}
+
+/** The instant a given Pacific calendar date turns to the given Pacific hour. */
+function pacificWallToInstant(date: string, hour: number): Date {
+  const [y, m, d] = date.split('-').map(Number);
+  const naive = Date.UTC(y, m - 1, d, hour, 0, 0);
+  return new Date(naive - pacificOffsetMinutes(new Date(naive)) * 60_000);
+}
 
 /**
  * Today where the person is, written the way a due date is.
@@ -47,30 +101,31 @@ function dueLabel(due: string, today: string): string {
 
 /**
  * The reminder speaks at most twice a day: once in the morning, and once
- * more at midday for whatever is still pending. The slot is the half of the
- * day we are in, and a dismissal only covers the slot it happened in.
+ * more at 5pm Pacific for whatever is still pending. The slot is which half
+ * of the Pacific day `now` falls in, and a dismissal only covers the slot
+ * it happened in.
  */
 function slotStart(now: Date): Date {
-  const s = new Date(now);
-  s.setHours(now.getHours() >= MIDDAY_HOUR ? MIDDAY_HOUR : 0, 0, 0, 0);
-  return s;
+  const { date, hour } = pacificParts(now);
+  return pacificWallToInstant(date, hour >= EVENING_HOUR ? EVENING_HOUR : 0);
 }
 
 function msToNextSlot(now: Date): number {
-  const next = new Date(now);
-  if (now.getHours() < MIDDAY_HOUR) next.setHours(MIDDAY_HOUR, 0, 0, 0);
-  else {
-    next.setDate(next.getDate() + 1);
-    next.setHours(0, 0, 0, 0);
-  }
-  return next.getTime() - now.getTime();
+  const { date, hour } = pacificParts(now);
+  if (hour < EVENING_HOUR) return pacificWallToInstant(date, EVENING_HOUR).getTime() - now.getTime();
+  // Tomorrow's Pacific date, computed from today's without drifting through
+  // the browser's own time zone: a plain UTC day-add on the Y-M-D parts.
+  const [y, m, d] = date.split('-').map(Number);
+  const tomorrow = new Date(Date.UTC(y, m - 1, d + 1));
+  const tomorrowDate = `${tomorrow.getUTCFullYear()}-${String(tomorrow.getUTCMonth() + 1).padStart(2, '0')}-${String(tomorrow.getUTCDate()).padStart(2, '0')}`;
+  return pacificWallToInstant(tomorrowDate, 0).getTime() - now.getTime();
 }
 
 /**
  * When this person last dismissed the reminder, as `<userId>|<ISO time>`.
  *
  * The moment rather than the date: work handed to someone is news whenever
- * it happens, and the midday reminder needs to know which half of the day a
+ * it happens, and the 5pm reminder needs to know which half of the day a
  * dismissal belongs to.
  */
 function readSeen(userId: string): Date | null {
@@ -114,8 +169,8 @@ function initials(name: string): string {
  * also get the whole studio, one collapsible group per person, because
  * chasing other people's overdue and unassigned tasks is their job.
  *
- * It opens by itself in the morning and again at midday while something is
- * overdue or due today, and whenever a task lands on someone. Dismissed, it
+ * It opens by itself in the morning and again at 5pm Pacific while something
+ * is overdue or due today, and whenever a task lands on someone. Dismissed, it
  * collapses to a tab on the right edge rather than vanishing, so the list is
  * one click away for the rest of the day. Silent when nothing is pending: a
  * reminder with nothing to say teaches people to close it without reading.
@@ -142,7 +197,7 @@ function Reminder({ userId, admin }: { userId: string; admin: boolean }) {
   const [view, setView] = useState<View>(admin ? 'all' : 'mine');
   const panelRef = useRef<HTMLDivElement>(null);
 
-  // A tab left open over lunch still gets its midday reminder: wake at the
+  // A tab left open all afternoon still gets its 5pm reminder: wake at the
   // next slot boundary and let everything below recompute.
   useEffect(() => {
     const id = window.setTimeout(() => setNow(new Date()), msToNextSlot(now) + 1000);
@@ -172,7 +227,7 @@ function Reminder({ userId, admin }: { userId: string; admin: boolean }) {
     [mine, seenAt],
   );
 
-  const midday = now.getHours() >= MIDDAY_HOUR;
+  const evening = pacificParts(now).hour >= EVENING_HOUR;
   const pressingIsNews = pressing.length > 0 && (seenAt === null || seenAt < slotStart(now));
   const autoOpen = !isLoading && (pressingIsNews || fresh.length > 0);
   const open = autoOpen || manualOpen;
@@ -234,8 +289,8 @@ function Reminder({ userId, admin }: { userId: string; admin: boolean }) {
       ? fresh.length === 1
         ? 'A task was just assigned to you'
         : `${fresh.length} tasks were just assigned to you`
-      : midday
-        ? 'Midday check-in'
+      : evening
+        ? '5pm check-in'
         : 'Pending tasks';
 
   const breakdown = [

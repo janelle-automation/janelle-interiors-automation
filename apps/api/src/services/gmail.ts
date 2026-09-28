@@ -578,14 +578,18 @@ export async function createDraft(
 }
 
 /**
- * Send one message, now — the only thing in this system that does.
+ * Send one message, now.
  *
  * Everything else the studio writes is left as a draft for a person to read
- * and send, and the app says so on several screens. This is the deliberate
- * exception, and it is kept deliberately narrow: an account invitation,
- * triggered by a principal pressing Add, to an address they just typed. It
- * is administration, not correspondence — nothing here can reach a client
- * or a supplier.
+ * and send, and the app says so on several screens. This function is the
+ * deliberate exception, and each caller is kept deliberately narrow:
+ *   - an account invitation, triggered by a principal pressing Add, to an
+ *     address they just typed;
+ *   - the midday task reminder (services/middayReminder.ts), a scheduled
+ *     send with no click behind it at all — currently addressed to the
+ *     studio's own systems@ mailbox rather than a real person, while the
+ *     content is checked (see TEST_RECIPIENT there).
+ * Both stay inside the studio: nothing here reaches a client or a supplier.
  *
  * `gmail.compose`, already granted, covers sending as well as drafting, so
  * this needs no new consent from the studio.

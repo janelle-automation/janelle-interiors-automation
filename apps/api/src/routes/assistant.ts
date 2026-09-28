@@ -375,7 +375,11 @@ assistantRouter.post(
 
     const roomList = picture.rooms.map((r) => r.room).join(', ');
     const lead = picture.plan
-      ? `Here is your floor plan, furnished — the walls, room names and dimensions are your original drawing.${
+      ? `Here is your floor plan, furnished${
+          picture.mode === 'generate'
+            ? ' — laid out from the room list you gave, with the labels and dimensions drawn exactly as stated'
+            : " — the walls, room names and dimensions are your original drawing"
+        }.${
           picture.rooms.length
             ? ` Below it, ${picture.rooms.length} room${picture.rooms.length === 1 ? '' : 's'} in perspective: ${roomList}. They follow each room's use and size from the plan, not its exact walls and windows.`
             : ' Ask for any room on its own to see it in perspective.'

@@ -15,7 +15,8 @@ import { createJob, jobsTableReady } from './mediaJobs.js';
 import { boardSpecs, composeBoard, studioName } from './board.js';
 import { resolveImageAi, resolvePictureEngine } from '../lib/aiSettings.js';
 import { editWithCloudflare, isCloudflareReady, renderWithCloudflare } from './cloudflare.js';
-import { isFloorPlan, readPlanRooms, renderFloorPlan, renderPlanRooms, type RoomRender } from './floorPlan.js';
+import { isFloorPlan, NAMED_A_PLAN, readPlanRooms, renderFloorPlan, renderPlanRooms, type RoomRender } from './floorPlan.js';
+import { sketchFloorPlanFromBrief } from './floorPlanLayout.js';
 
 /**
  * Making a picture or a clip, in one place.
@@ -202,12 +203,34 @@ export async function makePicture(input: {
   const brief = input.brief.trim();
   if (!brief) return { ok: false, reason: 'Say what you would like to see.' };
 
+  const started = Date.now();
+  const budgetMs = input.timeoutMs ?? 30_000;
+  const ctx = { feature: 'image.render' as const, orgId: actor.orgId, actor: actor.userId, entity: 'media_jobs', entityId: null };
+
+  // A room list with sizes but no plan to edit still deserves real labels
+  // and real dimensions on the picture, not the blanket "no text" every
+  // other from-words render gets below (see floorPlanLayout.ts for why
+  // that rule exists and how this gets around it). Tried before anything
+  // else and quietly skipped on failure — a brief that merely mentions a
+  // floor plan without a proper room list just falls through to drawing
+  // from words as it always did.
+  let syntheticPlan = false;
+  if (!input.sources.length && NAMED_A_PLAN.test(brief)) {
+    const schematic = await sketchFloorPlanFromBrief(brief, ctx, Math.min(20_000, budgetMs)).catch((err) => {
+      console.warn('[imagine] floor plan schematic unavailable:', (err as Error).message);
+      return null;
+    });
+    if (schematic) {
+      input = { ...input, sources: [schematic] };
+      syntheticPlan = true;
+    }
+  }
+
   // Who draws, in order, each tried in turn until one produces a picture.
   //
   // Settings → "Drawn by" decides who goes first. After that the order is
   // always the same: a real photograph from whoever can make one, and the
   // Claude sketch last — it cannot photograph, but it beats an error.
-  const started = Date.now();
   const [grok, gemini, claude, cloudflare, engine, geminiAi] = await Promise.all([
     isGrokReady(actor.orgId),
     isImageReady(actor.orgId),
@@ -230,9 +253,6 @@ export async function makePicture(input: {
   // every render wants. Built once so every provider is told the same.
   const editing = input.sources.length > 0;
   const instructions = [brief, editing ? HOLD_THE_FRAME : '', NO_TEXT].filter(Boolean).join('\n\n');
-
-  const budgetMs = input.timeoutMs ?? 30_000;
-  const ctx = { feature: 'image.render' as const, orgId: actor.orgId, actor: actor.userId, entity: 'media_jobs', entityId: null };
 
   type Attempt = { name: string; minMs: number; run: (left: number) => Promise<NonNullable<typeof picture>> };
 
@@ -366,6 +386,10 @@ export async function makePicture(input: {
       timedOut,
     };
   }
+  // The source that made this an "edit" was this file's own schematic, not
+  // anything the person supplied — reported as drawn from words, which is
+  // what they actually asked for.
+  if (syntheticPlan) mode = 'generate';
   // A photo source failed before this one worked: worth a word, not a fuss.
   if (failures.length && picture.mimeType.includes('svg')) {
     picture.note = `${picture.note ?? ''} (${failures.map((f) => f.slice(0, 120)).join(' · ')})`.trim();

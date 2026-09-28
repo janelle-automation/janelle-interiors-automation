@@ -17,7 +17,7 @@ import type { ImageReference, RenderResult } from './images.js';
  *     drew them. The labels are the studio's own, character for character.
  */
 
-const NAMED_A_PLAN = /\b(floor ?plans?|flooring (sketch|plan|layout)|floor (sketch|layout)|blue ?prints?|site plan|house plan|layout plan)\b/i;
+export const NAMED_A_PLAN = /\b(floor ?plans?|flooring (sketch|plan|layout)|floor (sketch|layout)|blue ?prints?|site plan|house plan|layout plan)\b/i;
 
 const CLAUDE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
@@ -155,6 +155,7 @@ function planPrompt(brief: string): string {
   return `Render this exact architectural floor plan as a high-end, photorealistic, top-down furnished floor plan for a real-estate brochure. Orthographic view looking straight down. Keep every wall, door, window, room shape, room position, the dimension lines and the overall proportions exactly as drawn — do not move, add or remove any wall.
 REMOVE ALL TEXT: no words, no letters, no numbers, no room names, no measurements anywhere in the image — leave those areas as clean floor.
 Fill each room with realistic textures and furniture seen from directly above, matching the furniture already sketched and the room's use: wood plank flooring in living areas, bedrooms and halls; stone or tile in bathrooms and laundry; polished concrete in a garage; stone pavers on porches and patios. Beds with soft linen, upholstered sofas, dining tables with chairs, kitchen cabinets and islands with stone tops, white bathroom fixtures, cars in a garage, a few potted plants. Soft natural shadows, clean white background outside the building.
+Render each room's own sketched furniture IN PLACE — never move a piece of furniture to a different room, and never swap what two rooms contain. In particular: whichever room shows car outlines with wheels is the garage and gets parked cars and concrete flooring, not a bed; a room shown with a bed and pillows gets a bed, never a car. Every room keeps the position, size and furniture it was drawn with.
 
 The studio's design direction — apply it to the materials, colours and furniture style: ${brief.slice(0, 900)}`;
 }

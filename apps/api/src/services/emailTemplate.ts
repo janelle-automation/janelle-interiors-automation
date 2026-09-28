@@ -12,7 +12,12 @@
  * a watch, and a spam filter all judge the mail on.
  */
 
-/** The light-theme tokens, written out — a mail client cannot read our CSS. */
+/**
+ * The light-theme tokens, written out — a mail client cannot read our CSS.
+ * Same values as `--brass` / `--good` / `--warn` / `--crit` in
+ * apps/web/src/styles/index.css (light mode), so a task's colour means the
+ * same thing here as it does on the board.
+ */
 const C = {
   brass: '#4DBC15',
   brassDeep: '#3A9A0C',
@@ -23,6 +28,9 @@ const C = {
   paper: '#F4F5F7',
   line: '#DFE2E6',
   sunk: '#EEF0F2',
+  good: '#2E9E3A',
+  warn: '#D98A1F',
+  crit: '#D63A2F',
 };
 
 const FONT =
@@ -192,5 +200,215 @@ ${button(url, 'Open the workflow system')}
     subject: 'Your Janelle Interiors workflow account',
     text,
     html: shell('Your sign-in details for the Janelle Interiors workflow system.', body),
+  };
+}
+
+// ── The midday task reminder ────────────────────────────────
+
+/** How late (or not) a task reads, and the colour that says so. */
+export type DueTone = 'crit' | 'warn' | 'neutral' | 'faint';
+
+const TONE_COLOR: Record<DueTone, string> = {
+  crit: C.crit,
+  warn: C.warn,
+  neutral: C.inkSoft,
+  faint: C.inkFaint,
+};
+
+export interface MiddayTaskRow {
+  title: string;
+  /** Project or vendor context, when there is one. */
+  project: string | null;
+  /** Already phrased for reading, e.g. "overdue, was due Sep 20" or "due today". */
+  dueText: string;
+  tone: DueTone;
+  blocked: boolean;
+}
+
+export interface MiddayGroup {
+  /** "OVERDUE", "DUE TODAY", "COMING UP", "NO DUE DATE". */
+  label: string;
+  rows: MiddayTaskRow[];
+}
+
+function taskRowHtml(t: MiddayTaskRow): string {
+  const color = TONE_COLOR[t.tone];
+  const meta = [t.project, t.dueText].filter((s): s is string => !!s).map(escape).join(' · ');
+  return `<tr>
+  <td style="padding:9px 0;border-bottom:1px solid ${C.line};">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td style="width:14px;vertical-align:top;padding-top:6px;">
+          <div style="width:6px;height:6px;border-radius:50%;background:${color};"></div>
+        </td>
+        <td style="font-family:${FONT};">
+          <div style="font-size:13.5px;font-weight:600;color:${C.ink};line-height:1.4;">${escape(t.title)}${
+    t.blocked ? ` <span style="color:${C.crit};font-weight:700;">· blocked</span>` : ''
+  }</div>
+          <div style="margin-top:1px;font-size:12px;color:${color};line-height:1.5;">${meta}</div>
+        </td>
+      </tr>
+    </table>
+  </td>
+</tr>`;
+}
+
+function taskRowText(t: MiddayTaskRow): string {
+  const meta = [t.project, t.dueText].filter(Boolean).join(' — ');
+  return `  - ${t.title}${meta ? ` (${meta})` : ''}${t.blocked ? ' [blocked]' : ''}`;
+}
+
+function groupHtml(g: MiddayGroup): string {
+  if (!g.rows.length) return '';
+  return `<div style="margin-top:16px;">
+  <div style="font-family:${FONT};font-size:10.5px;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;color:${C.inkFaint};padding-bottom:2px;">
+    ${g.label} <span style="font-weight:600;">(${g.rows.length})</span>
+  </div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+    ${g.rows.map(taskRowHtml).join('')}
+  </table>
+</div>`;
+}
+
+function groupText(g: MiddayGroup): string {
+  if (!g.rows.length) return '';
+  return `${g.label} (${g.rows.length})\n${g.rows.map(taskRowText).join('\n')}`;
+}
+
+/** Every group in `groups` that has at least one row, rendered as HTML. */
+function groupsHtml(groups: MiddayGroup[]): string {
+  return groups.map(groupHtml).join('');
+}
+
+function groupsText(groups: MiddayGroup[]): string {
+  return groups
+    .filter((g) => g.rows.length)
+    .map(groupText)
+    .join('\n\n');
+}
+
+/** Total tasks across every group. */
+function countOf(groups: MiddayGroup[]): number {
+  return groups.reduce((n, g) => n + g.rows.length, 0);
+}
+
+/** Each teammate's own reminder: what is open, overdue, due today. */
+export function middayPersonalEmail(opts: { name: string; groups: MiddayGroup[]; boardUrl?: string }): Mail {
+  const hi = greeting(opts.name);
+  const total = countOf(opts.groups);
+  const overdue = opts.groups.find((g) => g.label === 'OVERDUE')?.rows.length ?? 0;
+
+  const body = `
+<div style="font-size:15px;line-height:1.55;color:${C.ink};">${escape(hi)}</div>
+
+<div style="margin-top:10px;font-size:14px;line-height:1.6;color:${C.inkSoft};">
+  Here is where your open tasks stand at midday.
+</div>
+
+${groupsHtml(opts.groups)}
+${opts.boardUrl ? button(opts.boardUrl, 'Open the task board') : ''}`;
+
+  const text = [
+    hi,
+    '',
+    'Here is where your open tasks stand at midday.',
+    '',
+    groupsText(opts.groups),
+    opts.boardUrl ? `\nOpen the task board: ${opts.boardUrl}` : '',
+    '',
+    '—',
+    'Sent by the Janelle Interiors workflow system.',
+  ]
+    .filter((l) => l !== '')
+    .join('\n');
+
+  return {
+    subject: `Midday task reminder — ${total} open${overdue ? `, ${overdue} overdue` : ''}`,
+    text,
+    html: shell(`${total} open task${total === 1 ? '' : 's'} as of midday.`, body),
+  };
+}
+
+/** The owner's copy: the whole studio's open work, one card per person. */
+export function middayOwnerEmail(opts: {
+  name: string;
+  people: { name: string; groups: MiddayGroup[] }[];
+  unassigned: MiddayGroup[];
+  boardUrl?: string;
+}): Mail {
+  const hi = greeting(opts.name);
+  const totalOpen = opts.people.reduce((n, p) => n + countOf(p.groups), 0) + countOf(opts.unassigned);
+
+  const personCard = (name: string, groups: MiddayGroup[]): string => {
+    const total = countOf(groups);
+    const late = groups.find((g) => g.label === 'OVERDUE')?.rows.length ?? 0;
+    const dueToday = groups.find((g) => g.label === 'DUE TODAY')?.rows.length ?? 0;
+    const tally = [
+      late ? `<span style="color:${C.crit};font-weight:600;">${late} overdue</span>` : '',
+      dueToday ? `<span style="color:${C.warn};font-weight:600;">${dueToday} today</span>` : '',
+      `${total} open`,
+    ]
+      .filter(Boolean)
+      .join(' &middot; ');
+    return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:14px;border:1px solid ${C.line};border-radius:10px;">
+  <tr>
+    <td style="background:${C.sunk};padding:10px 14px;border-radius:10px 10px 0 0;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+        <tr>
+          <td style="font-family:${FONT};font-size:13.5px;font-weight:700;color:${C.ink};">${escape(name)}</td>
+          <td align="right" style="font-family:${FONT};font-size:11.5px;color:${C.inkFaint};white-space:nowrap;">${tally}</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:2px 14px 12px 14px;">
+      ${groupsHtml(groups)}
+    </td>
+  </tr>
+</table>`;
+  };
+
+  const cards = [
+    ...opts.people.map((p) => personCard(p.name, p.groups)),
+    countOf(opts.unassigned) ? personCard('Unassigned', opts.unassigned) : '',
+  ]
+    .filter(Boolean)
+    .join('');
+
+  const body = `
+<div style="font-size:15px;line-height:1.55;color:${C.ink};">${escape(hi)}</div>
+
+<div style="margin-top:10px;font-size:14px;line-height:1.6;color:${C.inkSoft};">
+  Here is the studio's open work at midday, by person.
+</div>
+
+${cards}
+${opts.boardUrl ? button(opts.boardUrl, 'Open the task board') : ''}`;
+
+  const personText = (name: string, groups: MiddayGroup[]): string => `${name.toUpperCase()} (${countOf(groups)})\n${groupsText(groups)}`;
+  const text = [
+    hi,
+    '',
+    "Here is the studio's open work at midday, by person.",
+    '',
+    [
+      ...opts.people.map((p) => personText(p.name, p.groups)),
+      countOf(opts.unassigned) ? personText('Unassigned', opts.unassigned) : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
+    opts.boardUrl ? `\nOpen the task board: ${opts.boardUrl}` : '',
+    '',
+    '—',
+    'Sent by the Janelle Interiors workflow system.',
+  ]
+    .filter((l) => l !== '')
+    .join('\n');
+
+  return {
+    subject: `Midday team summary — ${totalOpen} open across the studio`,
+    text,
+    html: shell(`${totalOpen} open task${totalOpen === 1 ? '' : 's'} across the studio as of midday.`, body),
   };
 }

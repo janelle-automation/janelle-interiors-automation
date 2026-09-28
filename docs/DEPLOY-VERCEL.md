@@ -74,6 +74,7 @@ calls these endpoints instead, authenticated with `CRON_SECRET`:
 | `/api/ops/cron/digest` | `5 7 * * *` — every morning |
 | `/api/ops/cron/media` | every 2 minutes, from Supabase pg_cron — see below |
 | `/api/ops/cron/tasks` | every 5 minutes, from Supabase pg_cron — see below |
+| `/api/ops/cron/midday-reminder` | polled every 15 minutes, from Supabase pg_cron — see below |
 
 > **Never register a cron more often than once a day on Hobby.** Vercel rejects
 > the whole deployment, after a build that passed, with only "Deployment
@@ -91,11 +92,12 @@ is set in Vercel's cron settings or GitHub for these.
 | `task-review` → `/tasks` | `*/5 * * * *` | `0021_task_review_cron.sql` |
 | `email-ingest` → `/ingest` | `* * * * *` | `0022_ingest_and_media_cron.sql` |
 | `media-sweep` → `/media` | `*/2 * * * *` | `0022_ingest_and_media_cron.sql` |
+| `midday-reminder` → `/midday-reminder` | `*/15 * * * *` | `0024_midday_reminder_cron.sql` |
 
 Setup, once, in the Supabase SQL editor: store the address and secret in
 Vault (`app_url`, and `cron_secret` — the same value as `CRON_SECRET` on
-Vercel; 0021's header has the two lines), then run 0021 and 0022. Recent runs
-are in `cron.job_run_details`, and each call's HTTP status in
+Vercel; 0021's header has the two lines), then run 0021, 0022 and 0024.
+Recent runs are in `cron.job_run_details`, and each call's HTTP status in
 `net._http_response`. A 401 there means the Vault secret and Vercel's differ.
 
 **`/api/ops/cron/ingest`** is called every minute, but reads each studio only
@@ -114,11 +116,23 @@ finished tasks" (default hourly; Off skips it; last start in
 `settings.task_review_ran_at`). Only a task with mail it has not been checked
 against costs a Claude call. `?force=1` reviews every studio now.
 
+**`/api/ops/cron/midday-reminder`** emails the studio's midday task
+reminder: one message per teammate with open work, plus one to the owner
+breaking the whole studio down by person. Polled every 15 minutes, but only
+actually sends in the noon-Pacific hour, and only once per studio per day
+(last start in `settings.midday_reminder_ran_at`) — the wall-clock-hour gate
+is what keeps this at noon Pacific through the PST/PDT change without
+editing the schedule. Real sends, not drafts (see `sendMessage` in
+`services/gmail.ts`); every recipient is currently the studio's own
+`systems@` mailbox rather than the real person, while the content is being
+checked (`TEST_RECIPIENT` in `services/middayReminder.ts`). `?force=1` sends
+now regardless of the hour or the last send.
+
 **The Supabase schedules are only the fastest pace.** How often each job
 really runs for a studio is the admin's setting, read on every call, so a
 change in Settings takes effect on the next call with no SQL and no deploy.
 
-Self-hosted, the node-cron scheduler runs all three and the Supabase jobs
+Self-hosted, the node-cron scheduler runs all four and the Supabase jobs
 should be unscheduled (`select cron.unschedule('email-ingest')` and so on),
 or both will do the work.
 
