@@ -101,6 +101,13 @@ export async function readIngestWindow(orgId: string, userId: string): Promise<I
  * offered: stopping half way and advancing anyway is exactly the hole this
  * replaced, so an interrupted pass leaves the mark where it was and the next
  * one picks the same listing up again.
+ *
+ * Merged into the map by Postgres in one UPDATE (`set_ingest_cursor`,
+ * migration 0023), not read-modify-written here: seven mailboxes can each
+ * be advancing their own entry within the same pass, and a plain
+ * read-then-write of the whole settings blob let one mailbox's write erase
+ * another's — the studio kept re-reading mail it had already stored because
+ * the mark that would have said so never survived.
  */
 export async function advanceIngestCursor(
   orgId: string,
@@ -109,13 +116,12 @@ export async function advanceIngestCursor(
 ): Promise<void> {
   if (!supabaseAdmin) return;
   try {
-    const settings = await readSettings(orgId);
-    const map = (settings[CURSORS_FIELD] && typeof settings[CURSORS_FIELD] === 'object'
-      ? { ...(settings[CURSORS_FIELD] as Record<string, unknown>) }
-      : {}) as Record<string, unknown>;
-    map[userId] = through.toISOString();
-    settings[CURSORS_FIELD] = map;
-    await supabaseAdmin.from('organizations').update({ settings }).eq('id', orgId);
+    const { error } = await supabaseAdmin.rpc('set_ingest_cursor', {
+      p_org_id: orgId,
+      p_user_id: userId,
+      p_iso: through.toISOString(),
+    });
+    if (error) throw new Error(error.message);
   } catch (err) {
     // Losing the write costs a re-read next pass, never a missed message.
     console.error('[ingest] could not advance the cursor:', (err as Error).message);

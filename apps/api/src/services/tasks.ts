@@ -130,16 +130,20 @@ async function resolveSeatHolder(orgId: string, seat: Seat): Promise<string | nu
   if (!supabaseAdmin) return null;
 
   if (await hasSeatColumn()) {
+    // A shared mailbox can end up holding a seat on Team & roles by
+    // misconfiguration (e.g. the studio's own admin/automation account). It
+    // still must not receive tasks: nobody reads work given to it, same as
+    // every other resolver here excludes it.
     const { data } = await supabaseAdmin
       .from('profiles')
-      .select('id')
+      .select('id, email')
       .eq('org_id', orgId)
       .eq('seat', seat)
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    const id = (data as { id?: string } | null)?.id;
-    if (id) return id;
+      .order('created_at', { ascending: true });
+    const holder = ((data ?? []) as { id: string; email: string | null }[]).find(
+      (p) => !isStudioMailbox(p.email),
+    );
+    if (holder) return holder.id;
   }
 
   // "Brianna Johnson / Amanda Neubecker" share the design seat; each in turn.
@@ -165,8 +169,15 @@ async function resolveBySeat(orgId: string, seat: Seat | null): Promise<string |
  * Work out who owns a task from the email chain itself.
  *
  * The sender is delegating, so the person being written TO is the owner —
- * not the person writing. Skips the sender and the connected mailbox, and
- * prefers the first teammate on the To: line, falling back to Cc.
+ * not the person writing. Skips the sender, and prefers the first teammate
+ * on the To: line, falling back to Cc.
+ *
+ * A recipient that is the connected mailbox is not itself a person — but
+ * mail routinely reaches it addressed to whoever reads it today, "Denish
+ * Faldu <systems@...>". Discarding that line entirely threw away the one
+ * signal the sender actually gave, so a shared-inbox recipient still gets a
+ * chance: by the name on it, against the real team, once no recipient
+ * resolved by address alone.
  */
 async function resolveFromChain(
   orgId: string,
@@ -177,36 +188,54 @@ async function resolveFromChain(
   // Gmail gives Cc as one header line, "A <a@x>, b@y"; older callers passed a
   // list. Treating the line as a list threw, and every task from a message
   // failed with it.
-  const addresses = (raw: string | string[] | undefined) =>
+  const parties = (raw: string | string[] | undefined) =>
     (Array.isArray(raw) ? raw.join(',') : raw ?? '')
       .split(',')
       .map((part) => {
         const m = part.match(/<([^>]+)>/);
-        return (m ? m[1] : part).trim().toLowerCase();
+        const email = (m ? m[1] : part).trim().toLowerCase();
+        const name = m ? part.slice(0, m.index).replace(/"/g, '').trim() : '';
+        return { name: name || null, email };
       })
-      .filter((a) => a.includes('@'));
+      .filter((p) => p.email.includes('@'));
 
-  const sender = new Set(addresses(parsed.from));
-  // Mail to a shared inbox was sent to the studio, not handed to a person.
-  const recipients = [...addresses(parsed.to), ...addresses(parsed.cc)]
-    .filter((a) => !sender.has(a) && !isStudioMailbox(a));
+  const senderAddrs = new Set(parties(parsed.from).map((p) => p.email));
+  const recipients = [...parties(parsed.to), ...parties(parsed.cc)].filter((p) => !senderAddrs.has(p.email));
   if (recipients.length === 0) return null;
 
   const { data } = await supabaseAdmin
     .from('profiles')
-    .select('id, email')
+    .select('id, full_name, email')
     .eq('org_id', orgId);
+  const profiles = (data ?? []) as { id: string; full_name: string | null; email: string | null }[];
 
   const byEmail = new Map<string, string>();
-  for (const row of data ?? []) {
-    const p = row as { id: string; email: string | null };
-    if (p.email) byEmail.set(p.email.toLowerCase(), p.id);
-  }
+  for (const p of profiles) if (p.email) byEmail.set(p.email.toLowerCase(), p.id);
+
+  // Pass 1: a recipient's own personal address — the strongest signal.
   // Order matters: To: before Cc:, first named first.
-  for (const addr of recipients) {
-    const id = byEmail.get(addr);
+  for (const r of recipients) {
+    if (isStudioMailbox(r.email)) continue;
+    const id = byEmail.get(r.email);
     if (id) return id;
   }
+
+  // Pass 2: only the shared mailbox was reachable, but a name rode along
+  // with it. Weaker than a personal address, so it runs second, and never
+  // matches a shared mailbox's own profile — nobody reads work given to it.
+  const named = profiles.filter(
+    (p): p is { id: string; full_name: string; email: string | null } => !!p.full_name && !isStudioMailbox(p.email),
+  );
+  for (const r of recipients) {
+    if (!isStudioMailbox(r.email) || !r.name) continue;
+    // The whole name first; a bare first name second — mail headers give
+    // "Denish Faldu" where an account may only ever have been named "Denish".
+    for (const said of [r.name, r.name.split(' ')[0]]) {
+      const match = matchPerson(said, named);
+      if (match.status === 'found') return match.row.id;
+    }
+  }
+
   return null;
 }
 
@@ -961,12 +990,20 @@ async function readReviewMarks(orgId: string): Promise<Record<string, string>> {
   return marks && typeof marks === 'object' ? { ...(marks as Record<string, string>) } : {};
 }
 
-/** Written against a fresh read, so a setting saved meanwhile is kept. */
+/**
+ * Merged into settings by Postgres in one UPDATE (`merge_org_settings`,
+ * migration 0023), not read-modify-written here: this field lives beside
+ * ingest's own cron-slot and per-mailbox watermarks in the same JSONB blob,
+ * and a plain read-then-write let whichever of them wrote last erase the
+ * others — a race, not "a setting saved meanwhile", so reading first no
+ * longer helps.
+ */
 async function saveReviewMarks(orgId: string, marks: Record<string, string>): Promise<void> {
   if (!supabaseAdmin) return;
-  const settings = await readOrgSettings(orgId);
-  settings[REVIEW_FIELD] = marks;
-  const { error } = await supabaseAdmin.from('organizations').update({ settings }).eq('id', orgId);
+  const { error } = await supabaseAdmin.rpc('merge_org_settings', {
+    p_org_id: orgId,
+    p_patch: { [REVIEW_FIELD]: marks },
+  });
   // Losing the marks costs a re-check next hour, never a wrong close.
   if (error) console.error('[tasks] review marks not saved:', error.message);
 }

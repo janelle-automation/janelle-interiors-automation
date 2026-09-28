@@ -10,14 +10,20 @@ import { runDigest } from '../services/digest.js';
 import { advanceActiveTasks, backfillTasks, mergeDuplicateTasks, reviewOpenTasks } from '../services/tasks.js';
 import { sweepJobs } from '../services/mediaJobs.js';
 import { keepGoogleAlive } from '../services/googleKeepalive.js';
+import { runMiddayReminder } from '../services/middayReminder.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { readIngestSettings } from '../lib/ingestSettings.js';
 import { claimCronSlot } from '../lib/cronSlot.js';
+import { pacificHourNow } from '../lib/pacificTime.js';
 
 /** When the scheduled ingest last started each studio's read. */
 const INGEST_RAN_FIELD = 'ingest_ran_at';
 /** When the scheduled task review last started for each studio. */
 const TASK_REVIEW_RAN_FIELD = 'task_review_ran_at';
+/** When the midday reminder last went out for each studio. */
+const MIDDAY_REMINDER_RAN_FIELD = 'midday_reminder_ran_at';
+/** The Pacific hour the midday reminder is allowed to fire in. */
+const MIDDAY_REMINDER_HOUR = 12;
 
 export const opsRouter = Router();
 
@@ -131,6 +137,29 @@ cronRouter.all(
           }
         }
         return reviewOpenTasks(id, { budgetMs });
+      }),
+    });
+  }),
+);
+// Once a day, at noon Pacific (migration 0024). Polled every 15 minutes
+// like the others; the Pacific-hour check is the real gate, and
+// claimCronSlot's ~23h window keeps a studio from getting it twice in the
+// same hour without drifting across the PST/PDT change, since the gate is
+// the wall-clock hour rather than a fixed UTC cron time. `?force=1` sends
+// now regardless of the hour or the last send.
+cronRouter.all(
+  '/midday-reminder',
+  asyncHandler(async (req, res) => {
+    const force = req.query.force === '1';
+    res.json({
+      data: await forEachOrg(async (id) => {
+        if (!force) {
+          if (pacificHourNow() !== MIDDAY_REMINDER_HOUR) return { ok: true, skipped: 'not_midday' };
+          if (!(await claimCronSlot(id, MIDDAY_REMINDER_RAN_FIELD, 23 * 3600_000))) {
+            return { ok: true, skipped: 'already_sent' };
+          }
+        }
+        return runMiddayReminder(id);
       }),
     });
   }),

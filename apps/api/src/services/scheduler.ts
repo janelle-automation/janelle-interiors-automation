@@ -9,6 +9,8 @@ import { readIngestSettings } from '../lib/ingestSettings.js';
 import { claimCronSlot } from '../lib/cronSlot.js';
 import { sweepJobs } from './mediaJobs.js';
 import { keepGoogleAlive } from './googleKeepalive.js';
+import { runMiddayReminder } from './middayReminder.js';
+import { pacificHourNow } from '../lib/pacificTime.js';
 
 async function forEachOrg(fn: (orgId: string) => Promise<unknown>, label: string) {
   if (!supabaseAdmin) return;
@@ -118,6 +120,17 @@ export function startScheduler(): void {
     void forEachOrg((id) => runFollowUps(id), 'followups');
   });
 
+  // Noon Pacific, whatever the server's own time zone is (see
+  // routes/ops.ts's matching /cron/midday-reminder for why this polls
+  // rather than using a single fixed cron time).
+  cron.schedule('*/15 * * * *', () => {
+    if (pacificHourNow() !== 12) return;
+    void forEachOrg(async (id) => {
+      if (!(await claimCronSlot(id, 'midday_reminder_ran_at', 23 * 3600_000))) return;
+      await runMiddayReminder(id);
+    }, 'midday reminder');
+  });
+
   // Video finishes a minute or two after the request that started it, and
   // the provider's URL for a finished clip is temporary. A person watching
   // the screen polls it themselves; this is for the one who closed the tab.
@@ -149,6 +162,6 @@ export function startScheduler(): void {
   keepalive();
 
   console.log(
-    '  ▸ Scheduler started (email: per-studio interval · follow-ups 02:00 · digest 07:05 · report Mon 07:00 · media every 2 min · Google keep-alive every 6h)',
+    '  ▸ Scheduler started (email: per-studio interval · follow-ups 02:00 · midday reminder noon Pacific · digest 07:05 · report Mon 07:00 · media every 2 min · Google keep-alive every 6h)',
   );
 }

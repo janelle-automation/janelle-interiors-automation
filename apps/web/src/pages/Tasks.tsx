@@ -396,6 +396,26 @@ function Initials({ name }: { name: string }) {
   );
 }
 
+/** Two staggered checkmarks — "done", distinct from a single tick used elsewhere. */
+function IconDoubleCheck(p: { width?: number; height?: number }) {
+  return (
+    <svg
+      width={p.width ?? 11}
+      height={p.height ?? 11}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M1.5 12.5 6 17l7-11" />
+      <path d="M8 12.5 12.5 17l7-11" />
+    </svg>
+  );
+}
+
 const BoardCard = memo(function BoardCard({
   t,
   mayEdit,
@@ -405,6 +425,7 @@ const BoardCard = memo(function BoardCard({
   onDue,
   onOpen,
   onDelete,
+  onComplete,
 }: {
   t: TaskView;
   mayEdit: boolean;
@@ -415,6 +436,7 @@ const BoardCard = memo(function BoardCard({
   onOpen: (id: string) => void;
   /** Absent when this role may not delete tasks. */
   onDelete?: (t: TaskView) => void;
+  onComplete: (id: string) => void;
 }) {
   const unowned = !t.assignedTo;
   return (
@@ -461,12 +483,31 @@ const BoardCard = memo(function BoardCard({
           </Tag>
         )}
 
+        {mayEdit && t.status !== 'done' && (
+          <button
+            type="button"
+            aria-label={`Mark "${t.title}" as completed`}
+            title="Mark as completed"
+            className="focusable ml-auto grid h-5 w-5 shrink-0 place-items-center rounded-full border border-line text-ink-faint transition-colors hover:border-good hover:text-good"
+            draggable={false}
+            onDragStart={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onComplete(t.id);
+            }}
+          >
+            <IconDoubleCheck />
+          </button>
+        )}
+
         {onDelete && (
           <button
             type="button"
             aria-label={`Delete "${t.title}"`}
             title="Delete this task"
-            className="focusable ml-auto shrink-0 rounded px-1 text-[13px] leading-none text-ink-faint opacity-0 transition-opacity hover:text-crit focus:opacity-100 group-hover:opacity-100"
+            className={`focusable shrink-0 rounded px-1 text-[13px] leading-none text-ink-faint transition-colors hover:text-crit ${
+              mayEdit && t.status !== 'done' ? '' : 'ml-auto'
+            }`}
             draggable={false}
             onDragStart={(e) => e.stopPropagation()}
             onClick={(e) => {
@@ -667,6 +708,7 @@ function Board({
                   onDue={onDue}
                   onOpen={onOpen}
                   onDelete={onDelete}
+                  onComplete={(id) => onMove(id, 'done')}
                 />
               ))}
               {items.length === 0 && (
@@ -1095,6 +1137,10 @@ export default function Tasks() {
     <Page>
       <PageHeading
         title="Tasks"
+        // Board-only: the drag and the ✓✓ button it describes are both on
+        // the board view, and said once here rather than repeated on every
+        // card.
+        sub={view === 'board' ? 'Drag a card to Done, or use its ✓✓ button, to complete it.' : undefined}
         action={
           <div className="flex items-center gap-2">
             <ScopeToggle mine={mineCount} all={allCount} />
