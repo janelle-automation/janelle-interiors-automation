@@ -860,7 +860,7 @@ function EmailReadingCard() {
       className="lg:col-span-2"
       icon={<IconMailScan width={18} height={18} />}
       title="Reading email"
-      description="How often Gmail and Drive are checked, and whether Claude reads what arrives."
+      description="How often Gmail and Drive are checked, whether Claude reads what arrives, and how often finished tasks are closed."
     >
       {!data ? (
         <p className="text-[13px] text-ink-faint">Loading…</p>
@@ -903,6 +903,28 @@ function EmailReadingCard() {
                   : 'Fetched and filed only — no tasks, no drafts, nothing spent.'}
               </p>
             </div>
+          </div>
+
+          <div>
+            <FieldLabel htmlFor="task-review-every">Close finished tasks</FieldLabel>
+            <select
+              id="task-review-every"
+              className="input w-full"
+              value={data.taskReviewMinutes}
+              disabled={save.isPending}
+              onChange={(e) => save.mutate({ taskReviewMinutes: Number(e.target.value) })}
+            >
+              {data.taskReviewIntervals.map((i) => (
+                <option key={i.minutes} value={i.minutes}>
+                  {i.label}
+                </option>
+              ))}
+            </select>
+            <Hint>
+              {data.taskReviewMinutes === 0
+                ? 'Open tasks are never checked on a schedule — they close when someone marks them done.'
+                : 'Open tasks are checked against the mail since they were raised. Only tasks with new mail cost a Claude call.'}
+            </Hint>
           </div>
         </div>
       )}

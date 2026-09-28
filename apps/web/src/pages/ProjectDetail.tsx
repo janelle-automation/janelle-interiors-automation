@@ -4,6 +4,7 @@ import { Page, PageHeading, Card, StageBadge, Pill, money, shortDate } from '../
 import { IconArrow } from '../components/icons';
 import { useProject, useUpdateProject } from '../lib/queries';
 import { PROJECT_STAGES, STAGE_LABELS, type ProjectStage } from '@janelle/shared';
+import { DatePicker } from '../components/DatePicker';
 
 const inputCls = 'input';
 
@@ -132,7 +133,7 @@ export default function ProjectDetail() {
               <input className={inputCls} type="number" value={form.budget} onChange={(e) => setForm((f) => ({ ...f, budget: e.target.value }))} placeholder="e.g. 120000" />
             </Field>
             <Field label="Target install">
-              <input className={inputCls} type="date" value={form.target_install} onChange={(e) => setForm((f) => ({ ...f, target_install: e.target.value }))} />
+              <DatePicker className={inputCls} ariaLabel="Target install" placeholder="No date set" value={form.target_install} onChange={(next) => setForm((f) => ({ ...f, target_install: next ?? '' }))} />
             </Field>
             <Field label="Stage">
               <select className={inputCls} value={form.stage} onChange={(e) => setForm((f) => ({ ...f, stage: e.target.value as ProjectStage }))}>

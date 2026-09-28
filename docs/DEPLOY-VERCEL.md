@@ -70,9 +70,10 @@ calls these endpoints instead, authenticated with `CRON_SECRET`:
 | --- | --- |
 | `/api/ops/cron/follow-ups` | `0 2 * * *` — nightly |
 | `/api/ops/cron/report` | `0 7 * * 1` — Monday morning |
-| `/api/ops/cron/ingest` | not registered — see below |
+| `/api/ops/cron/ingest` | every minute, from Supabase pg_cron — see below |
 | `/api/ops/cron/digest` | `5 7 * * *` — every morning |
-| `/api/ops/cron/media` | not registered — see below |
+| `/api/ops/cron/media` | every 2 minutes, from Supabase pg_cron — see below |
+| `/api/ops/cron/tasks` | every 5 minutes, from Supabase pg_cron — see below |
 
 > **Never register a cron more often than once a day on Hobby.** Vercel rejects
 > the whole deployment, after a build that passed, with only "Deployment
@@ -81,26 +82,45 @@ calls these endpoints instead, authenticated with `CRON_SECRET`:
 > external scheduler, as below.
 
 **On the Hobby plan Vercel runs each cron job at most once a day**, so
-continuous ingestion is not possible from Vercel Cron. (Three daily crons
-deploy fine — PR #10 shipped with all three above; it is the frequency Hobby
-refuses, not the count.) Until that changes, new mail is read when someone presses **Read
-Gmail & Drive** on the Dashboard.
+everything more frequent is scheduled by **Supabase** instead: `pg_cron`
+fires the job and `pg_net` calls the endpoint with the bearer secret. Nothing
+is set in Vercel's cron settings or GitHub for these.
 
-To get automatic ingestion back, either:
+| Supabase job | Schedule | Migration |
+| --- | --- | --- |
+| `task-review` → `/tasks` | `*/5 * * * *` | `0021_task_review_cron.sql` |
+| `email-ingest` → `/ingest` | `* * * * *` | `0022_ingest_and_media_cron.sql` |
+| `media-sweep` → `/media` | `*/2 * * * *` | `0022_ingest_and_media_cron.sql` |
 
-- **Move the API to an always-on host** (Railway, Render, Fly.io, a VPS).
-  Run `npm run build && npm start -w apps/api` there, keep the web app on
-  Vercel, and set `VITE_API_BASE_URL` to the API's URL and `CORS_ORIGINS` to
-  the web app's. The existing node-cron scheduler then runs as designed.
-- **Or call `/api/ops/cron/ingest` from an external scheduler**
-  (cron-job.org, GitHub Actions, Upstash QStash) as often as you want, with
-  the header `Authorization: Bearer $CRON_SECRET`.
+Setup, once, in the Supabase SQL editor: store the address and secret in
+Vault (`app_url`, and `cron_secret` — the same value as `CRON_SECRET` on
+Vercel; 0021's header has the two lines), then run 0021 and 0022. Recent runs
+are in `cron.job_run_details`, and each call's HTTP status in
+`net._http_response`. A 401 there means the Vault secret and Vercel's differ.
 
-The same applies to **`/api/ops/cron/media`**, which finishes video clips
-whose tab was closed while they rendered. Without it, a clip still arrives for
-anyone watching the conversation, because the browser polls it, but a clip
-nobody is watching when it finishes is written off after ten minutes. Call it
-every few minutes from the same external scheduler once video is switched on.
+**`/api/ops/cron/ingest`** is called every minute, but reads each studio only
+as often as it chose in Settings → Reading email (the last start is kept in
+`settings.ingest_ran_at`), and never a studio set to "Only when I ask". Most
+calls therefore do nothing. Add `?force=1` to read every studio at once.
+
+**`/api/ops/cron/media`** finishes video clips whose tab was closed while they
+rendered. Without it, a clip nobody is watching when it finishes is written
+off after ten minutes.
+
+**`/api/ops/cron/tasks`** closes the tasks that the mail since they were
+raised shows are finished. It is called every five minutes but reviews each
+studio only as often as the admin chose in Settings → Reading email → "Close
+finished tasks" (default hourly; Off skips it; last start in
+`settings.task_review_ran_at`). Only a task with mail it has not been checked
+against costs a Claude call. `?force=1` reviews every studio now.
+
+**The Supabase schedules are only the fastest pace.** How often each job
+really runs for a studio is the admin's setting, read on every call, so a
+change in Settings takes effect on the next call with no SQL and no deploy.
+
+Self-hosted, the node-cron scheduler runs all three and the Supabase jobs
+should be unscheduled (`select cron.unschedule('email-ingest')` and so on),
+or both will do the work.
 
 A single function invocation is capped at 60 seconds (`maxDuration` in
 `vercel.json`), so a very large first ingestion may need several runs. Each

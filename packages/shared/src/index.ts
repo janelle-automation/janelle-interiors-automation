@@ -1489,6 +1489,23 @@ export const INGEST_INTERVALS: IngestInterval[] = [
  */
 export const DEFAULT_INGEST_MINUTES = 10;
 
+/**
+ * How often open tasks are put beside the mail since they were raised and
+ * closed when it shows they are done. Only a task with mail it has not been
+ * checked against costs a Claude call, so a quiet interval costs nothing.
+ */
+export const TASK_REVIEW_INTERVALS: IngestInterval[] = [
+  { minutes: 0, label: 'Off' },
+  { minutes: 15, label: 'Every 15 minutes' },
+  { minutes: 30, label: 'Every 30 minutes' },
+  { minutes: 60, label: 'Every hour' },
+  { minutes: 120, label: 'Every 2 hours' },
+  { minutes: 240, label: 'Every 4 hours' },
+  { minutes: 1440, label: 'Once a day' },
+];
+
+export const DEFAULT_TASK_REVIEW_MINUTES = 60;
+
 export interface IngestSettingsView {
   intervalMinutes: number;
   /**
@@ -1498,4 +1515,7 @@ export interface IngestSettingsView {
    */
   useAi: boolean;
   intervals: IngestInterval[];
+  /** How often finished tasks are looked for and closed; 0 = only on request. */
+  taskReviewMinutes: number;
+  taskReviewIntervals: IngestInterval[];
 }
