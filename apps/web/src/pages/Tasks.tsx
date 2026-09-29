@@ -9,7 +9,7 @@ import {
   type TaskKind,
   type TaskStatus,
 } from '@janelle/shared';
-import { Page, PageHeading, Card, Pill, shortDate } from '../components/ui';
+import { Page, PageHeading, Card, Pill, shortDate, ConfirmDialog } from '../components/ui';
 import { ScopeToggle, useScope } from '../components/ScopeToggle';
 import { IconBoard, IconEye, IconEyeOff, IconList, IconMailScan } from '../components/icons';
 import { useAuth } from '../context/AuthContext';
@@ -156,7 +156,14 @@ function TaskPanel({ id, onClose }: { id: string; onClose: () => void }) {
   return (
     // `dock-aware`: when Jenny's panel is docked on a wide screen, this stops
     // at her edge instead of sliding underneath her.
-    <div className="dock-aware fixed inset-0 z-40 flex justify-end">
+    //
+    // z-50, not z-40: the sidebar (AppShell) is ALSO z-40, and on equal
+    // z-index the later element in the DOM merely happens to win — which is
+    // how the sidebar and header ended up visually competing with this
+    // panel's own top row instead of sitting cleanly underneath it. Every
+    // other full-screen overlay in this app (ConnectGooglePrompt, Prompts)
+    // already uses z-50 for exactly this reason.
+    <div className="dock-aware fixed inset-0 z-50 flex justify-end">
       {/* Black, not ink: in dark mode ink is near-white, and a backdrop made
           from it washed the page grey instead of dimming it. */}
       <div
@@ -1147,9 +1154,12 @@ export default function Tasks() {
    * during a drag.
    */
   const mayDelete = may('tasks', 'delete');
-  const onDelete = (t: TaskView) => {
-    if (!window.confirm(`Delete "${t.title}"? This cannot be undone.`)) return;
-    remove.mutate(t.id);
+  const [deleteTarget, setDeleteTarget] = useState<TaskView | null>(null);
+  const onDelete = (t: TaskView) => setDeleteTarget(t);
+  const confirmDelete = () => {
+    if (!deleteTarget) return;
+    remove.mutate(deleteTarget.id);
+    setDeleteTarget(null);
   };
 
   return (
@@ -1400,6 +1410,15 @@ export default function Tasks() {
       )}
 
       {openTask && <TaskPanel id={openTask} onClose={() => setOpenTask(null)} />}
+
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        title={`Delete "${deleteTarget?.title ?? ''}"?`}
+        message="This cannot be undone."
+        confirmLabel="Delete"
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </Page>
   );
 }

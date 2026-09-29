@@ -347,3 +347,70 @@ export function Pager({
     </div>
   );
 }
+
+/**
+ * A themed stand-in for `window.confirm`.
+ *
+ * The browser's own version breaks immersion the moment it appears — a
+ * plain system box captioned "localhost:5173 says", sitting on top of a
+ * dark, branded app — and it can only ever show plain text, never the
+ * record's own styling. Renders nothing while `open` is false.
+ */
+export function ConfirmDialog({
+  open,
+  title,
+  message,
+  confirmLabel = 'Delete',
+  cancelLabel = 'Cancel',
+  danger = true,
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  message?: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  /** Red "Delete"-style confirm button vs. the ordinary brass primary one. */
+  danger?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onCancel();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [open, onCancel]);
+
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50" onClick={onCancel} aria-hidden />
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-label={title}
+        className="relative w-full max-w-sm rounded-xl border border-line bg-surface p-5 shadow-pop"
+      >
+        <h2 className="text-[15px] font-semibold text-ink">{title}</h2>
+        {message && <p className="mt-2 text-[13.5px] leading-relaxed text-ink-soft">{message}</p>}
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onCancel} className="btn-ghost btn-sm">
+            {cancelLabel}
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            autoFocus
+            className={danger ? 'btn-secondary btn-sm text-crit hover:border-crit' : 'btn-primary btn-sm'}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

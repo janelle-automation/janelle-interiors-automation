@@ -14,13 +14,13 @@ const SHOWN = 8;
 const SEEN_KEY = 'janelle.reminder.seen';
 
 /**
- * The studio is in Ojai, California, and the second reminder is meant to
- * land at 5pm there — not at 5pm wherever a teammate's laptop happens to
- * think it is. Anchored to Pacific time via Intl rather than a fixed UTC
- * offset, so it stays correct across the PST/PDT change.
+ * The studio is in Ojai, California, and the reminder is meant to land at
+ * midday there — not at noon wherever a teammate's laptop happens to think
+ * it is. Anchored to Pacific time via Intl rather than a fixed UTC offset,
+ * so it stays correct across the PST/PDT change.
  */
 const PACIFIC_TZ = 'America/Los_Angeles';
-const EVENING_HOUR = 17;
+const MIDDAY_HOUR = 12;
 
 /**
  * Pacific's current offset from UTC, in minutes — negative, e.g. -420 in
@@ -100,25 +100,31 @@ function dueLabel(due: string, today: string): string {
 }
 
 /**
- * The reminder speaks at most twice a day: once in the morning, and once
- * more at 5pm Pacific for whatever is still pending. The slot is which half
- * of the Pacific day `now` falls in, and a dismissal only covers the slot
- * it happened in.
+ * The reminder speaks once a day, at midday Pacific, for whatever is still
+ * pending. The slot is the most recent midday to have passed, and a
+ * dismissal only covers the slot it happened in.
  */
 function slotStart(now: Date): Date {
   const { date, hour } = pacificParts(now);
-  return pacificWallToInstant(date, hour >= EVENING_HOUR ? EVENING_HOUR : 0);
+  if (hour >= MIDDAY_HOUR) return pacificWallToInstant(date, MIDDAY_HOUR);
+  // Still before today's midday: the slot in effect is yesterday's,
+  // computed from today's Y-M-D without drifting through the browser's own
+  // time zone.
+  const [y, m, d] = date.split('-').map(Number);
+  const yesterday = new Date(Date.UTC(y, m - 1, d - 1));
+  const yesterdayDate = `${yesterday.getUTCFullYear()}-${String(yesterday.getUTCMonth() + 1).padStart(2, '0')}-${String(yesterday.getUTCDate()).padStart(2, '0')}`;
+  return pacificWallToInstant(yesterdayDate, MIDDAY_HOUR);
 }
 
 function msToNextSlot(now: Date): number {
   const { date, hour } = pacificParts(now);
-  if (hour < EVENING_HOUR) return pacificWallToInstant(date, EVENING_HOUR).getTime() - now.getTime();
+  if (hour < MIDDAY_HOUR) return pacificWallToInstant(date, MIDDAY_HOUR).getTime() - now.getTime();
   // Tomorrow's Pacific date, computed from today's without drifting through
   // the browser's own time zone: a plain UTC day-add on the Y-M-D parts.
   const [y, m, d] = date.split('-').map(Number);
   const tomorrow = new Date(Date.UTC(y, m - 1, d + 1));
   const tomorrowDate = `${tomorrow.getUTCFullYear()}-${String(tomorrow.getUTCMonth() + 1).padStart(2, '0')}-${String(tomorrow.getUTCDate()).padStart(2, '0')}`;
-  return pacificWallToInstant(tomorrowDate, 0).getTime() - now.getTime();
+  return pacificWallToInstant(tomorrowDate, MIDDAY_HOUR).getTime() - now.getTime();
 }
 
 /**
@@ -169,11 +175,11 @@ function initials(name: string): string {
  * also get the whole studio, one collapsible group per person, because
  * chasing other people's overdue and unassigned tasks is their job.
  *
- * It opens by itself in the morning and again at 5pm Pacific while something
- * is overdue or due today, and whenever a task lands on someone. Dismissed, it
- * collapses to a tab on the right edge rather than vanishing, so the list is
- * one click away for the rest of the day. Silent when nothing is pending: a
- * reminder with nothing to say teaches people to close it without reading.
+ * It opens by itself at midday Pacific while something is overdue or due
+ * today, and whenever a task lands on someone. Dismissed, it collapses to a
+ * tab on the right edge rather than vanishing, so the list is one click away
+ * for the rest of the day. Silent when nothing is pending: a reminder with
+ * nothing to say teaches people to close it without reading.
  */
 export function TaskReminder() {
   const { user, may } = useAuth();
@@ -197,7 +203,7 @@ function Reminder({ userId, admin }: { userId: string; admin: boolean }) {
   const [view, setView] = useState<View>(admin ? 'all' : 'mine');
   const panelRef = useRef<HTMLDivElement>(null);
 
-  // A tab left open all afternoon still gets its 5pm reminder: wake at the
+  // A tab left open all morning still gets its midday reminder: wake at the
   // next slot boundary and let everything below recompute.
   useEffect(() => {
     const id = window.setTimeout(() => setNow(new Date()), msToNextSlot(now) + 1000);
@@ -227,7 +233,7 @@ function Reminder({ userId, admin }: { userId: string; admin: boolean }) {
     [mine, seenAt],
   );
 
-  const evening = pacificParts(now).hour >= EVENING_HOUR;
+  const middayOrLater = pacificParts(now).hour >= MIDDAY_HOUR;
   const pressingIsNews = pressing.length > 0 && (seenAt === null || seenAt < slotStart(now));
   const autoOpen = !isLoading && (pressingIsNews || fresh.length > 0);
   const open = autoOpen || manualOpen;
@@ -289,8 +295,8 @@ function Reminder({ userId, admin }: { userId: string; admin: boolean }) {
       ? fresh.length === 1
         ? 'A task was just assigned to you'
         : `${fresh.length} tasks were just assigned to you`
-      : evening
-        ? '5pm check-in'
+      : middayOrLater
+        ? 'Midday check-in'
         : 'Pending tasks';
 
   const breakdown = [
