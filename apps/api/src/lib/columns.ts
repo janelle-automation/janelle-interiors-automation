@@ -100,6 +100,11 @@ export function hasFollowUpSnooze(): Promise<boolean> {
   return hasColumn('follow_ups', 'snoozed_until');
 }
 
+/** Whether a draft records the real Gmail message behind it — migration 0025. */
+export function hasDraftGmailMessage(): Promise<boolean> {
+  return hasColumn('drafts', 'gmail_message_id');
+}
+
 /**
  * The profile columns to select, with `seat` only when it exists.
  * `base` is everything the caller needs regardless.

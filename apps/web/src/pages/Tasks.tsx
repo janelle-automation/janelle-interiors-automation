@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   TASK_KIND_LABELS,
   TASK_STATUS_LABELS,
@@ -243,6 +243,11 @@ function TaskPanel({ id, onClose }: { id: string; onClose: () => void }) {
                     Open in Inbox →
                   </Link>
                 </div>
+              ) : data?.emailHiddenFrom ? (
+                <p className="text-[13px] text-ink-faint">
+                  Raised from an email in {data.emailHiddenFrom}'s personal mailbox — theirs to read, not
+                  visible here.
+                </p>
               ) : (
                 <p className="text-[13px] text-ink-faint">
                   Added by hand — there is no email behind this one.
@@ -325,7 +330,7 @@ function TaskPanel({ id, onClose }: { id: string; onClose: () => void }) {
               <ol className="flex flex-col gap-2 border-l border-line-soft pl-4">
                 <li className="relative text-[13px] text-ink-soft">
                   <span className="absolute -left-[21px] top-1.5 h-2 w-2 rounded-full bg-brass" />
-                  Raised from email · {shortDate(t.created_at)}
+                  {data?.email || data?.emailHiddenFrom ? 'Raised from email' : 'Added by hand'} · {shortDate(t.created_at)}
                 </li>
                 {(data?.history ?? []).map((h) => (
                   <li key={h.id} className="relative text-[13px] text-ink-soft">
@@ -1021,19 +1026,33 @@ export default function Tasks() {
   // Seeded from ?task=, so a task named in an answer, a digest or a link
   // someone pasted opens on the task itself rather than on the board with
   // the reader left to find it.
-  const [openTask, setOpenTask] = useState<string | null>(
-    () => new URLSearchParams(window.location.search).get('task'),
-  );
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [openTask, setOpenTask] = useState<string | null>(() => searchParams.get('task'));
+
+  // A `?task=` reading only taken at mount misses every later one: Jenny's
+  // docked panel sits alongside this same page, so clicking a task there is
+  // a same-route navigation, not a fresh page load, and never remounts this
+  // component. Watching the param directly is what makes a second click —
+  // to a different task while one is already open — actually switch panels.
+  useEffect(() => {
+    const wanted = searchParams.get('task');
+    if (!wanted || wanted === openTask) return;
+    setOpenTask(wanted);
+  }, [searchParams, openTask]);
 
   // Drop the parameter once it has been used: it has done its job, and
   // leaving it in the URL would re-open the panel on every later close.
   useEffect(() => {
-    if (!openTask) return;
-    const url = new URL(window.location.href);
-    if (!url.searchParams.has('task')) return;
-    url.searchParams.delete('task');
-    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
-  }, [openTask]);
+    if (!openTask || !searchParams.has('task')) return;
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('task');
+        return next;
+      },
+      { replace: true },
+    );
+  }, [openTask, searchParams, setSearchParams]);
 
   // The board answers "where is everything", the list "what do I owe".
   // Remembered per browser so the studio is not re-choosing every visit.

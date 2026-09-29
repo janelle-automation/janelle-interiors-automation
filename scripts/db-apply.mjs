@@ -34,6 +34,19 @@ if (!connectionString) {
   console.error('  Format: postgresql://postgres:[DB-PASSWORD]@db.<project-ref>.supabase.co:5432/postgres');
   process.exit(1);
 }
+// The most common way this is misconfigured: left as the project's web URL
+// (https://<ref>.supabase.co) instead of the Postgres connection string from
+// Settings → Database → Connection string. `pg` fails on that with an
+// unhelpful, often blank error, so it is caught here with a message that
+// actually says what is wrong.
+if (!/^postgres(ql)?:\/\//.test(connectionString)) {
+  console.error('✗ SUPABASE_DB_URL is not a Postgres connection string:');
+  console.error(`  ${connectionString}`);
+  console.error('  That looks like the project URL. Get the real one from Supabase →');
+  console.error('  Settings → Database → Connection string (URI, direct connection):');
+  console.error('  postgresql://postgres:[DB-PASSWORD]@db.<project-ref>.supabase.co:5432/postgres');
+  process.exit(1);
+}
 
 const withSeed = process.argv.includes('--seed');
 const statusOnly = process.argv.includes('--status');

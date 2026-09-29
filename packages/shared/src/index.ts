@@ -1206,6 +1206,36 @@ export interface DashboardSummary {
 export const ASSISTANT_NAME = 'Jenny';
 
 /**
+ * The named personas a person can switch Jenny to — narrowing her to one
+ * job, the way separate bots in another tool each do one thing. Picking
+ * none means the full, unrestricted assistant: today's default behaviour.
+ *
+ * Named to match the six bots the studio already runs elsewhere, so the
+ * picker reads as the same lineup rather than a different taxonomy.
+ * "Calendar Ops" is deliberately not here yet — it would need a Google
+ * Calendar connection this app has never asked for.
+ */
+export const AGENT_KEYS = ['inbox', 'vendors', 'projects', 'george', 'chief'] as const;
+export type AgentKey = (typeof AGENT_KEYS)[number];
+
+export const AGENT_LABELS: Record<AgentKey, string> = {
+  inbox: 'Inbox Triage',
+  vendors: 'Vendor Follow-ups',
+  projects: 'Project Coordinator',
+  george: 'George',
+  chief: 'Chief of Staff',
+};
+
+/** One line each — shown in the picker, and read back to Jenny herself. */
+export const AGENT_BLURBS: Record<AgentKey, string> = {
+  inbox: 'Reads and triages the mailbox and Drive, and drafts replies.',
+  vendors: 'Chases vendors, and tracks purchase orders and follow-ups.',
+  projects: 'Projects, tasks, spec gaps and the studio’s design work.',
+  george: 'Quick capture only — turn what you just said into a task, nothing else.',
+  chief: 'The daily digest, the team, reports, spend and the studio’s rules.',
+};
+
+/**
  * What an answer is made of.
  *
  * The assistant used to hand back one string, which meant every answer was
@@ -1403,11 +1433,14 @@ export function assistantItemHref(item: AssistantItem): string | null {
   const id = typeof item.id === 'string' && UUID.test(item.id) ? item.id : null;
   if (!id) return base;
 
-  // Only these two can open one record: a project has its own route, and
-  // the task board opens a detail panel from ?task=. The rest land on the
-  // screen that holds them.
+  // These four can open one record: a project has its own route, the task
+  // board opens a detail panel from ?task=, and Inbox / Drafts each open
+  // and highlight the one message or draft from ?open=. The rest land on
+  // the screen that holds them.
   if (item.kind === 'project') return `/projects/${id}`;
   if (item.kind === 'task') return `/tasks?task=${id}`;
+  if (item.kind === 'email') return `/inbox?open=${id}`;
+  if (item.kind === 'draft') return `/drafts?open=${id}`;
   return base;
 }
 

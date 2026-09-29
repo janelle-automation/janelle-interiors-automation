@@ -55,6 +55,10 @@ export interface EmailView {
   vendor: string;
   /** Full ISO timestamp, for the exact date on hover. */
   receivedAt: string;
+  /** Gmail's own message id — '' when this was raised by hand, with no mail behind it. */
+  gmailId: string;
+  /** Claude's one-line read of the message; '' when there is only the snippet. */
+  summary: string;
 }
 export interface DocSource {
   kind: 'gmail' | 'drive';
@@ -601,7 +605,8 @@ export function useConfirmAction() {
 // ── Inbox / documents / activity ────────────────────────────
 interface EmailRow {
   id: string; from_addr: string | null; subject: string | null; snippet: string | null;
-  received_at: string | null; class: string;
+  received_at: string | null; class: string; gmail_id: string | null;
+  extracted_json: { summary?: string } | null;
   projects: { name: string } | null; vendors: { name: string } | null;
 }
 
@@ -628,27 +633,48 @@ export function decodeEntities(s: string): string {
   });
 }
 
+function mapEmailRow(r: EmailRow): EmailView {
+  const who = parseAddress(r.from_addr);
+  return {
+    id: r.id, from: r.from_addr ?? '', subject: decodeEntities(r.subject ?? '(no subject)'),
+    snippet: decodeEntities(r.snippet ?? ''), cls: r.class,
+    // '' not '—' — the table hides a column nothing fills rather than
+    // printing a dash down every row of it.
+    project: r.projects?.name ?? '', vendor: r.vendors?.name ?? '',
+    fromName: who.name, fromEmail: who.email,
+    receivedAt: r.received_at ?? '',
+    when: r.received_at ? ageFrom(r.received_at) : '—',
+    gmailId: r.gmail_id ?? '',
+    summary: decodeEntities(r.extracted_json?.summary ?? ''),
+  };
+}
+
 export function useEmails() {
   const q = useQuery({
     queryKey: ['emails'],
     queryFn: async (): Promise<EmailView[]> => {
       const rows = await api<EmailRow[]>('/emails');
-      return rows.map((r) => {
-        const who = parseAddress(r.from_addr);
-        return {
-          id: r.id, from: r.from_addr ?? '', subject: decodeEntities(r.subject ?? '(no subject)'),
-          snippet: decodeEntities(r.snippet ?? ''), cls: r.class,
-          // '' not '—' — the table hides a column nothing fills rather than
-          // printing a dash down every row of it.
-          project: r.projects?.name ?? '', vendor: r.vendors?.name ?? '',
-          fromName: who.name, fromEmail: who.email,
-          receivedAt: r.received_at ?? '',
-          when: r.received_at ? ageFrom(r.received_at) : '—',
-        };
-      });
+      return rows.map(mapEmailRow);
     },
   });
   return { ...q, data: q.data ?? [] };
+}
+
+/**
+ * One email by id, however old — for a deep link (e.g. a task's "Open in
+ * Inbox") to a message that has since aged out of `useEmails`' list.
+ */
+export function useEmail(id: string | null) {
+  return useQuery({
+    queryKey: ['email', id],
+    queryFn: async (): Promise<EmailView> => mapEmailRow(await api<EmailRow>(`/emails/${id}`)),
+    enabled: !!id,
+  });
+}
+
+/** Where a message opens in the connected mailbox — never a fabricated compose. */
+export function gmailMessageUrl(gmailId: string): string {
+  return `https://mail.google.com/mail/u/0/#all/${gmailId}`;
 }
 
 interface DocRow {
@@ -1320,6 +1346,12 @@ export interface TaskDetail {
     profiles: { full_name: string | null; email: string | null } | null;
   };
   email: TaskEmail | null;
+  /**
+   * Set only when the source email exists but is a teammate's personal mail
+   * (migration 0018) — visible to them, not to whoever is looking at this
+   * task. Distinguishes that from a task genuinely added by hand.
+   */
+  emailHiddenFrom?: string | null;
   history: TaskHistoryEntry[];
   subtasks: Subtask[];
   /** False until migration 0009 is applied. */
@@ -1362,6 +1394,10 @@ export interface DraftRow {
   created_by?: string | null;
   /** Whose mailbox it answers — migration 0018, absent before it applies. */
   owner_id?: string | null;
+  /** Gmail's own draft id, when this one made it into the real Drafts folder. */
+  gmail_draft_id?: string | null;
+  /** The message underneath that draft — migration 0025, absent before it applies. */
+  gmail_message_id?: string | null;
 }
 export function useDrafts() {
   const q = useQuery({ queryKey: ['drafts'], queryFn: () => api<DraftRow[]>('/drafts') });

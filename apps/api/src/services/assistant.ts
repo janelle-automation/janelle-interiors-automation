@@ -8,6 +8,8 @@ import {
 } from '@janelle/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
+  AGENT_BLURBS,
+  AGENT_LABELS,
   AI_FEATURE_LABELS,
   ASSISTANT_NAME,
   DEFAULT_SLA,
@@ -17,6 +19,7 @@ import {
   canManageTasks,
   canWith,
   videoCostUsd,
+  type AgentKey,
   type AssistantAnswer,
   type AssistantField,
   type AssistantItem,
@@ -27,6 +30,7 @@ import {
   type ProjectStage,
   type Seat,
 } from '@janelle/shared';
+import { agentAllows, agentsFor } from './assistantAgents.js';
 import type { drive_v3, gmail_v1 } from 'googleapis';
 import { createMessage, isAiReady, isTimeoutError } from './anthropic.js';
 import { fillTemplate, matchPrompt, missingInputs, runLibraryPrompt } from './promptRunner.js';
@@ -148,6 +152,12 @@ export interface AssistantContext {
   permissions?: PermissionOverrides | null;
   /** Proposals shown earlier that are still waiting for an answer. */
   pending?: PendingProposal[];
+  /**
+   * Named agent(s) switched on for this conversation, if any — narrows
+   * which tools may run (see services/assistantAgents.ts). Empty or unset
+   * means unrestricted: every tool reachable, today's default.
+   */
+  agents?: AgentKey[] | null;
   /**
    * Set when the question was spoken: every way the browser heard it, best
    * first. Speech recognition mishears — names most of all — and the model
@@ -785,7 +795,7 @@ const TOOLS: Anthropic.Tool[] = [
   {
     name: 'propose_draft',
     description:
-      'Prepare an email for someone to send. Does NOT send it, and does not save it until the person confirms — it then lands in Drafts, where they review it and open it in Gmail. Use when asked to write, reply to or draft an email.',
+      'Prepare an email for someone to send. Does NOT send it, and does not save it until the person confirms — it then lands in Drafts AND in the studio\'s real Gmail Drafts, ready to open, edit and send from there. Use when asked to write, reply to or draft an email.',
     input_schema: {
       type: 'object',
       properties: {
@@ -793,6 +803,11 @@ const TOOLS: Anthropic.Tool[] = [
         cc: { type: 'string', description: 'Cc address(es), comma-separated.' },
         subject: { type: 'string' },
         body: { type: 'string', description: 'The message itself, in plain text, signed off as the studio.' },
+        reply_to_email_id: {
+          type: 'string',
+          description:
+            'The id (from search_email or read_email) of the email this replies to. Set it whenever this is a reply to a specific message you looked up, so the Gmail draft lands inside that actual conversation instead of arriving as a disconnected new message.',
+        },
       },
       required: ['subject', 'body'],
     },
@@ -1791,6 +1806,20 @@ async function runTool(
     };
   }
 
+  const activeAgents = ctx.agents ?? [];
+  if (!agentAllows(activeAgents, name)) {
+    const owners = agentsFor(name).map((key) => AGENT_LABELS[key]);
+    const active = activeAgents.map((key) => AGENT_LABELS[key]).join(' and ');
+    return {
+      refused: true,
+      reason: owners.length
+        ? `That needs ${owners.join(' or ')}, not what's switched on right now (${active} only). Turn ${
+            owners.length > 1 ? 'one of them' : owners[0]
+          } on as well, or switch the agent picker off for full access.`
+        : `That is not available with ${active} only. Switch the agent picker off for full access.`,
+    };
+  }
+
   switch (name) {
     case 'list_projects': {
       let q = db
@@ -1911,31 +1940,62 @@ async function runTool(
           .order('updated_at', { ascending: false })
           .limit(5),
         'projects',
-      )) as { id: string; name: string; status: string }[];
+      )) as unknown as {
+        id: string; name: string; client_name: string | null; stage: string; status: string;
+        budget: number | null; target_install: string | null; notes: string | null;
+      }[];
       const live = matches.filter((p) => p.status !== 'archived');
-      const project = (live[0] ?? matches[0]) as { id: string } | undefined;
+      const project = live[0] ?? matches[0];
       if (!project) return { found: false, note: 'No project matched that name.' };
       const alsoMatched = (live.length ? live : matches).slice(1).map((p) => p.name);
 
       const [pos, tasks, gaps, emails] = await Promise.all([
         rows(db.from('purchase_orders').select('po_number, status, amount, eta').eq('project_id', project.id), 'purchase orders'),
-        rows(db.from('tasks').select('title, kind, status, due_date, profiles(full_name)').eq('project_id', project.id).in('status', LIVE), 'tasks'),
+        rows(db.from('tasks').select('id, title, kind, status, due_date, profiles(full_name)').eq('project_id', project.id).in('status', LIVE), 'tasks'),
         rows(db.from('spec_gaps').select('item').eq('project_id', project.id).eq('resolved', false), 'spec gaps'),
-        rows(db.from('emails').select('subject, from_addr, received_at, class').eq('project_id', project.id).order('received_at', { ascending: false }).limit(5), 'email'),
+        rows(db.from('emails').select('id, subject, from_addr, received_at, class').eq('project_id', project.id).order('received_at', { ascending: false }).limit(5), 'email'),
       ]);
       return {
         found: true,
-        project,
+        project: {
+          ref: refs.add('P', {
+            kind: 'project',
+            id: project.id,
+            title: project.name,
+            detail: project.client_name,
+            fields: [field('Stage', project.stage), field('Budget', usd(project.budget)), field('Target install', day(project.target_install))],
+          }),
+          ...project,
+        },
         note: alsoMatched.length
           ? `That name also matches ${alsoMatched.join(', ')} — say which one this answer is about.`
           : undefined,
         purchase_orders: pos,
         open_tasks: tasks.map((t) => {
-          const r = t as unknown as { title: string; kind: string; status: string; due_date: string | null; profiles: { full_name: string | null } | null };
-          return { title: r.title, kind: r.kind, status: r.status, due_date: r.due_date, owner: r.profiles?.full_name ?? 'Unassigned' };
+          const r = t as unknown as {
+            id: string; title: string; kind: string; status: string; due_date: string | null;
+            profiles: { full_name: string | null } | null;
+          };
+          const owner = r.profiles?.full_name ?? 'Unassigned';
+          return {
+            ref: refs.add('T', taskRow({ id: r.id, title: r.title, status: r.status, due_date: r.due_date, owner, project: project.name })),
+            title: r.title, kind: r.kind, status: r.status, due_date: r.due_date, owner,
+          };
         }),
         spec_gaps: gaps.map((g) => (g as { item: string }).item),
-        recent_email: emails,
+        recent_email: emails.map((e) => {
+          const r = e as unknown as { id: string; subject: string | null; from_addr: string | null; received_at: string | null; class: string };
+          return {
+            ref: refs.add('E', {
+              kind: 'email',
+              id: r.id,
+              title: r.subject || '(no subject)',
+              detail: r.from_addr ? addressOf(r.from_addr) : null,
+              fields: [field('Received', day(r.received_at))],
+            }),
+            subject: r.subject, from: r.from_addr, received_at: r.received_at, type: r.class,
+          };
+        }),
       };
     }
 
@@ -1995,26 +2055,42 @@ async function runTool(
           .maybeSingle(),
         "today's digest",
       );
-      if (digest) return digest as ToolOutput;
+
+      // Whatever the cached narrative says, the tasks behind it still need
+      // real, clickable rows — a digest written this morning has no idea
+      // what ref a tool would give a task, so without this every task the
+      // narrative names could be described but never opened.
+      const live = (await rows(
+        db
+          .from('tasks')
+          .select('id, title, kind, status, due_date, assigned_to, profiles(full_name), projects(name)')
+          .in('status', LIVE),
+        'tasks',
+      )) as unknown as {
+        id: string; title: string; kind: string; status: string; due_date: string | null;
+        assigned_to: string | null; profiles: { full_name: string | null } | null;
+        projects: { name: string } | null;
+      }[];
+      const today = new Date().toISOString().slice(0, 10);
+      const owner = (t: (typeof live)[number]) => t.profiles?.full_name ?? 'Unassigned';
+      const overdue = live
+        .filter((t) => (t.due_date && t.due_date < today) || t.status === 'blocked')
+        .map((t) => ({
+          ref: refs.add('T', taskRow({ id: t.id, title: t.title, status: t.status, due_date: t.due_date, owner: owner(t), project: t.projects?.name ?? null })),
+          title: t.title, owner: owner(t), status: t.status, due_date: t.due_date,
+        }));
+      const unassigned = live
+        .filter((t) => !t.assigned_to)
+        .map((t) => ({
+          ref: refs.add('T', taskRow({ id: t.id, title: t.title, status: t.status, due_date: t.due_date, owner: 'Unassigned', project: t.projects?.name ?? null })),
+          title: t.title, kind: t.kind,
+        }));
+
+      if (digest) return { ...(digest as unknown as Record<string, unknown>), overdue, unassigned } as ToolOutput;
 
       // No digest yet (it runs at 07:05). Rather than a dead end, compute
       // the same picture live so "give me the brief" still works.
-      const live = (await rows(
-        db.from('tasks').select('title, kind, status, due_date, assigned_to, profiles(full_name)').in('status', LIVE),
-        'tasks',
-      )) as unknown as {
-        title: string; kind: string; status: string; due_date: string | null;
-        assigned_to: string | null; profiles: { full_name: string | null } | null;
-      }[];
-      const today = new Date().toISOString().slice(0, 10);
-      return {
-        note: 'No digest has been generated yet; this is computed live from the same data.',
-        open_tasks: live.length,
-        overdue: live
-          .filter((t) => (t.due_date && t.due_date < today) || t.status === 'blocked')
-          .map((t) => ({ title: t.title, owner: t.profiles?.full_name ?? 'Unassigned', status: t.status, due_date: t.due_date })),
-        unassigned: live.filter((t) => !t.assigned_to).map((t) => ({ title: t.title, kind: t.kind })),
-      };
+      return { note: 'No digest has been generated yet; this is computed live from the same data.', open_tasks: live.length, overdue, unassigned };
     }
 
     case 'search_email': {
@@ -2315,7 +2391,7 @@ async function runTool(
       const status = typeof input.status === 'string' ? input.status : 'pending';
       let q = db
         .from('follow_ups')
-        .select('type, status, reason, target, due_date, created_at, projects(name), vendors(name)')
+        .select('id, type, status, reason, target, due_date, created_at, projects(name), vendors(name)')
         .order('created_at', { ascending: true });
 
       if (status === 'pending') q = q.in('status', ['open', 'drafted']);
@@ -2323,44 +2399,61 @@ async function runTool(
       if (typeof input.type === 'string') q = q.eq('type', input.type);
 
       const list = (await rows(q, 'follow-ups')) as unknown as {
-        type: string; status: string; reason: string | null; target: string | null;
+        id: string; type: string; status: string; reason: string | null; target: string | null;
         due_date: string | null; created_at: string;
         projects: { name: string } | null; vendors: { name: string } | null;
       }[];
 
-      return list.map((f) => ({
-        type: f.type,
-        status: f.status,
-        reason: f.reason,
-        waiting_on: f.target,
-        due_date: f.due_date,
-        project: f.projects?.name ?? null,
-        vendor: f.vendors?.name ?? null,
-        waiting_days: Math.floor((Date.now() - new Date(f.created_at).getTime()) / 86_400_000),
-      }));
+      return list.map((f) => {
+        const waitingDays = Math.floor((Date.now() - new Date(f.created_at).getTime()) / 86_400_000);
+        return {
+          ref: refs.add('U', {
+            kind: 'follow_up',
+            id: f.id,
+            title: f.type.replace(/_/g, ' '),
+            detail: [f.projects?.name, f.vendors?.name].filter(Boolean).join(' · ') || f.reason || null,
+            meta: `${waitingDays}d waiting`,
+            tone: f.status === 'sent' ? 'good' : waitingDays > 5 ? 'warn' : 'neutral',
+          }),
+          type: f.type,
+          status: f.status,
+          reason: f.reason,
+          waiting_on: f.target,
+          due_date: f.due_date,
+          project: f.projects?.name ?? null,
+          vendor: f.vendors?.name ?? null,
+          waiting_days: waitingDays,
+        };
+      });
     }
 
     case 'list_drafts': {
       const search = typeof input.search === 'string' ? input.search : null;
       let q = db
         .from('drafts')
-        .select('subject, body_preview, follow_up_id, created_at')
+        .select('id, subject, body_preview, follow_up_id, created_at')
         .order('created_at', { ascending: false })
         .limit(25);
       if (search) q = q.ilike('subject', ilike(search));
 
       const list = (await rows(q, 'drafts')) as unknown as {
-        subject: string | null; body_preview: string | null;
+        id: string; subject: string | null; body_preview: string | null;
         follow_up_id: string | null; created_at: string;
       }[];
 
-      return list.map((d) => ({
-        subject: d.subject,
-        // Enough to say what it is about without reading a whole email aloud.
-        preview: (d.body_preview ?? '').slice(0, 200),
-        raised_by_follow_up: Boolean(d.follow_up_id),
-        written: d.created_at,
-      }));
+      return list.map((d) => {
+        const to = (d.body_preview ?? '').match(/^To:\s*(.+)$/im)?.[1]?.trim() || null;
+        return {
+          // So the answer can hand this exact draft over rather than
+          // pointing at the whole Drafts list — see assistantItemHref.
+          ref: refs.add('D', { kind: 'draft', id: d.id, title: d.subject || '(no subject)', detail: to ? `To ${to}` : null }),
+          subject: d.subject,
+          // Enough to say what it is about without reading a whole email aloud.
+          preview: (d.body_preview ?? '').slice(0, 200),
+          raised_by_follow_up: Boolean(d.follow_up_id),
+          written: d.created_at,
+        };
+      });
     }
 
     case 'list_spec_gaps': {
@@ -2803,15 +2896,18 @@ async function runTool(
       const report = await maybeRow(
         db
           .from('reports')
-          .select('week_of, narrative, generated_json, created_at')
+          .select('id, week_of, narrative, generated_json, created_at')
           .order('week_of', { ascending: false })
           .limit(1)
           .maybeSingle(),
         'the weekly report',
       );
-      return report
-        ? (report as ToolOutput)
-        : { note: 'No weekly report has been generated yet. It runs on Monday.' };
+      if (!report) return { note: 'No weekly report has been generated yet. It runs on Monday.' };
+      const r = report as unknown as { id: string; week_of: string };
+      return {
+        ...(report as unknown as Record<string, unknown>),
+        ref: refs.add('R', { kind: 'report', id: r.id, title: `Weekly report — week of ${day(r.week_of)}` }),
+      } as ToolOutput;
     }
 
     case 'get_studio_rules': {
@@ -3218,7 +3314,7 @@ async function runTool(
           });
           return { saved: true, ref, note: 'The task is updated on the board. Say what changed, with the row for this ref.' };
         }
-        const ref = refs.add('D', { kind: 'draft', title: saved.subject, detail: saved.to ? `To ${saved.to}` : null, tone: 'good' });
+        const ref = refs.add('D', { kind: 'draft', id: saved.id, title: saved.subject, detail: saved.to ? `To ${saved.to}` : null, tone: 'good' });
         return { saved: true, ref, note: 'It is saved in Drafts, NOT sent. Say so, with the row for this ref.' };
       } catch (err) {
         if (err instanceof ProposalError) return { saved: false, reason: err.message, note: 'Nothing was saved. Say why, in their words.' };
@@ -3436,9 +3532,10 @@ async function runTool(
           .join(', ');
       const to = addresses(input.to);
       const cc = addresses(input.cc);
+      const replyToEmailId = typeof input.reply_to_email_id === 'string' ? input.reply_to_email_id : undefined;
 
       const summary = `Draft "${subject}"${to ? ` to ${to}` : ''}`;
-      proposed.push({ tool: 'propose_draft', summary, input: { to, cc, subject, body } });
+      proposed.push({ tool: 'propose_draft', summary, input: { to, cc, subject, body, reply_to_email_id: replyToEmailId } });
       return {
         proposed: true,
         summary,
@@ -3632,6 +3729,33 @@ function spokenSection(ctx: AssistantContext): string {
 }
 
 /**
+ * The active agent(s), as an identity fact rather than a restriction bolted
+ * on after the rest of the prompt. Empty selection returns '' so this is a
+ * no-op — literally zero added text — for anyone who has not touched the
+ * picker, which is what keeps that the unchanged default.
+ */
+function agentPersona(ctx: AssistantContext): string {
+  const agents = ctx.agents ?? [];
+  if (!agents.length) return '';
+  if (agents.length === 1) {
+    const key = agents[0];
+    return `
+Right now you are working as the studio's ${AGENT_LABELS[key]} ONLY: ${AGENT_BLURBS[key]} Nothing outside
+that. If asked for something outside it, say plainly that you are set to ${AGENT_LABELS[key]} only and name
+which agent covers it instead of trying the tool — never pretend the rest of the system does not exist, you
+are just deliberately narrowed to this one job right now.
+`;
+  }
+  const names = agents.map((key) => AGENT_LABELS[key]);
+  const labels =
+    names.length === 2 ? names.join(' and ') : `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`;
+  return `
+Right now you are wearing more than one hat at once — ${labels}, together. Answer across all of them without
+saying you are restricted, and mention which hat answered when it is useful to say so.
+`;
+}
+
+/**
  * The half of the system prompt that does not move.
  *
  * Split from the rest so it can be cached. What stays here changes at most
@@ -3695,7 +3819,7 @@ function studioRules(ctx: AssistantContext): string {
 
 You exist because the founder is the bottleneck: she is in client meetings all day and needs to know
 where things stand without digging through the system, and to delegate by simply saying what she needs.
-
+${agentPersona(ctx)}
 Language:
 - ALWAYS reply in English, whatever language the question was asked in. The studio works in English
   and the records are in English; a reply in another language cannot be pasted into an email or read
@@ -3796,8 +3920,11 @@ Handing things over:
   and the tile and grout by code. Hand over the files you read, and say which rooms are still TBD. One
   document per room is not a reason to answer with two filenames.
 - You cannot send email, and you cannot change anything in Drive. To get an email written, use
-  propose_draft: the person confirms, it goes to Drafts, and they send it themselves from there.
-  Say it is prepared — never that it was sent.
+  propose_draft: the person confirms, it goes to Drafts AND into the studio's real Gmail Drafts, and
+  they send it themselves from there. Say it is prepared — never that it was sent. When the draft
+  answers a specific message you looked up with search_email or read_email, pass that email's id as
+  reply_to_email_id — that is what lands the draft inside the actual Gmail thread instead of as a
+  disconnected new message, and it is the difference between "I found it in Gmail" and "I couldn't".
 
 How to behave:
 - You CAN look things up. When asked for anything held in the studio’s records — a project,
@@ -3844,8 +3971,20 @@ How to behave:
   email (search_email; without_task: true lists mail that has no task yet), then call propose_task with
   its email_id and the owner and date they asked for. Write the title from what the email actually asks,
   naming the job by the project it is filed under — never "X's project".
+  · This is not only for that exact phrasing. ANY task whose title or detail comes from something a
+    specific stored email said — including one you decided needed doing yourself while answering "check
+    my email" or a digest, not just one asked for by name — gets that email's id in email_id. Skipping
+    it because nobody said the word "email" is how a task that is plainly about one message ends up
+    shown as "added by hand", with no way back to what actually asked for it.
 - If that email already has a task, never raise a second one: call propose_task_update on the task it
   has, with the owner and date they asked for.
+- Before EVERY propose_task, not only one tied to a specific email: check list_tasks (or what you
+  already have from this turn) for one already covering the same work on the same project or vendor —
+  "chase X for a quote" and "review X's quote" on the same job are the same piece of work under two
+  names. Found one → propose_task_update on it instead, never a second task. This matters most exactly
+  when there is no single email to check against — deciding on your own that something needs doing
+  while reading a digest or a mailbox, rather than being asked for it by name, is how a task ends up
+  duplicating one the automated reading pass already raised and is quietly tracking.
 - To change a task already on the board — who owns it, when it is due, its status, its next step —
   call propose_task_update. Relative dates ("Friday", "end of next week") are worked out from today.
 - When asked whether something was done — "has it been added?", "did that save?", "check the task
@@ -3867,10 +4006,17 @@ How to answer — the shape, not the words:
 - items are the records the answer is ABOUT, one row each, and they are what makes an answer useful:
   each row opens straight through to that project, task, order or email, and a file row is the file
   itself. So whenever an answer names records — the projects, the overdue tasks, the late orders, the
-  attachments — put them in items rather than listing them in the lead.
+  attachments — put them in items rather than listing them in the lead. This applies to a digest just
+  as much as a list: "three problems need your decision" naming the Lemon fabric, the furniture
+  approval and the finish schedule by name in the LEAD, with no rows, is the exact mistake to avoid —
+  each of those is a task with a ref, so it is a row.
   · Every row a tool returns has a ref ("P3", "T1", "F2"). Answer with { "ref": "P3" } — that is a
     complete row: the server lays out its name, every figure as a formatted column, and for a file
     the download. Do NOT copy titles, amounts or dates out of the tool result into a row.
+  · An email with a reply already drafted is two rows, not one: the email row (kind "email", from
+    search_email or read_email) AND the draft row (kind "draft", from list_drafts), so the person can
+    open the source thread and the drafted reply as two separate clicks — never make them re-search
+    for the draft after reading about the email, or the other way around.
   · Add meta or tone to a ref only when you have judgement to add: "worst", "client waiting". A row
     already shows its client, stage, dates, amounts and counts as columns — meta must never repeat
     any of them. When in doubt, leave meta out.

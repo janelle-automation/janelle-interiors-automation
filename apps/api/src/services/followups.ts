@@ -1,9 +1,9 @@
 import { DEFAULT_SLA, TASK_HYGIENE_SEAT, type FollowUpType, type SlaSettings } from '@janelle/shared';
 import { supabaseAdmin } from '../lib/supabase.js';
-import { hasSeatColumn } from '../lib/columns.js';
+import { hasSeatColumn, hasDraftGmailMessage, hasDraftOwner, hasEmailOwner } from '../lib/columns.js';
 import { orgSourceUserId } from '../lib/tokens.js';
 import { generate, isAiReady } from './anthropic.js';
-import { gmailFor, readSentMail } from './gmail.js';
+import { createDraft, gmailFor, gmailForReply, readSentMail, type DraftContent } from './gmail.js';
 import { isStudioAddress } from '../lib/studioTeam.js';
 
 /**
@@ -115,6 +115,8 @@ interface Recipient {
   cc: string[];
   threadId: string | null;
   subject: string | null;
+  /** Whose personal mailbox this thread lives in, when it is not the shared one. */
+  ownerId: string | null;
 }
 
 /**
@@ -127,9 +129,10 @@ async function resolveRecipient(
   key: { vendorId?: string | null; projectId?: string | null; preferClass?: string },
 ): Promise<Recipient | null> {
   if (!supabaseAdmin) return null;
+  const withOwner = await hasEmailOwner();
   let q = supabaseAdmin
     .from('emails')
-    .select('thread_id, subject, extracted_json')
+    .select(`thread_id, subject, extracted_json${withOwner ? ', owner_id' : ''}`)
     .eq('org_id', orgId)
     .order('received_at', { ascending: false, nullsFirst: false })
     .limit(1);
@@ -140,13 +143,16 @@ async function resolveRecipient(
 
   const { data } = await q;
   const e = data?.[0] as
-    | { thread_id: string | null; subject: string | null; extracted_json: { reply_to_email?: string; cc_emails?: string[] } | null }
+    | {
+        thread_id: string | null; subject: string | null; owner_id?: string | null;
+        extracted_json: { reply_to_email?: string; cc_emails?: string[] } | null;
+      }
     | undefined;
   const ex = e?.extracted_json ?? {};
   const to = (ex.reply_to_email ?? '').toLowerCase();
   if (!to.includes('@')) return null;
   const cc = (ex.cc_emails ?? []).map((c) => c.toLowerCase()).filter((a) => a.includes('@') && a !== to);
-  return { to, cc, threadId: e?.thread_id ?? null, subject: e?.subject ?? null };
+  return { to, cc, threadId: e?.thread_id ?? null, subject: e?.subject ?? null, ownerId: e?.owner_id ?? null };
 }
 
 // ────────────────────────────────────────────────────────────
@@ -631,6 +637,8 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
 
   let raised = 0;
   let drafted = 0;
+  const withGmailMessage = await hasDraftGmailMessage();
+  const withDraftOwner = await hasDraftOwner();
 
   for (const t of triggers) {
     // Dedupe against an existing open follow-up of the same kind — and
@@ -677,12 +685,39 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
             ? resolved.subject
             : `Re: ${resolved.subject}`
           : gen.subject;
-        // Kept IN THE SYSTEM (not Gmail): store the composed message.
+        // Kept in the system, and pushed to the real Gmail thread (when one
+        // is known) so the nudge can be found, edited and sent from Gmail.
         const ccLine = resolved?.cc.length ? `\nCc: ${resolved.cc.join(', ')}` : '';
         const composed = `To: ${to}${ccLine}\n\n${gen.body}`;
+
+        // Through whoever's mailbox this thread is actually in — a vendor
+        // relationship resolved from a teammate's PERSONAL mailbox has to
+        // be answered through their own Google connection, or the draft
+        // lands as a stray, unthreaded message in a different account.
+        let pushed: { draftId: string; messageId: string } | null = null;
+        try {
+          const gmail = await gmailForReply(orgId, resolved?.ownerId ?? null);
+          if (gmail) {
+            const content: DraftContent = {
+              to, cc: resolved?.cc.length ? resolved.cc.join(', ') : undefined,
+              subject, body: gen.body, threadId: resolved?.threadId ?? undefined,
+            };
+            pushed = await createDraft(gmail, content);
+          }
+        } catch (err) {
+          console.error('[followups] gmail draft push failed', (err as Error).message);
+        }
+
         const { data: draftRow } = await supabaseAdmin!
           .from('drafts')
-          .insert({ org_id: orgId, follow_up_id: null, subject, body_preview: composed })
+          .insert({
+            org_id: orgId, follow_up_id: null, subject, body_preview: composed,
+            // A reply quotes the thread it answers, so it inherits that
+            // mail's privacy — see ingest.ts's own reply drafts.
+            ...(withDraftOwner && resolved?.ownerId ? { owner_id: resolved.ownerId } : {}),
+            ...(pushed ? { gmail_draft_id: pushed.draftId } : {}),
+            ...(pushed && withGmailMessage ? { gmail_message_id: pushed.messageId } : {}),
+          })
           .select('id')
           .maybeSingle();
         draftId = draftRow?.id ?? null;
