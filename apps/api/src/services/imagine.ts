@@ -215,14 +215,20 @@ export async function makePicture(input: {
   // floor plan without a proper room list just falls through to drawing
   // from words as it always did.
   let syntheticPlan = false;
+  // The walled drawing's own rectangle within the schematic, excluding its
+  // room-dimensions/flooring-legend panel — see renderFloorPlan's own note
+  // on why the panel must never reach the image model. Unset for a real
+  // uploaded plan, which has no such panel to exclude.
+  let syntheticFurnishRegion: { x: number; y: number; width: number; height: number } | undefined;
   if (!input.sources.length && NAMED_A_PLAN.test(brief)) {
     const schematic = await sketchFloorPlanFromBrief(brief, ctx, Math.min(20_000, budgetMs)).catch((err) => {
       console.warn('[imagine] floor plan schematic unavailable:', (err as Error).message);
       return null;
     });
     if (schematic) {
-      input = { ...input, sources: [schematic] };
+      input = { ...input, sources: [schematic.image] };
       syntheticPlan = true;
+      syntheticFurnishRegion = schematic.drawingRegion;
     }
   }
 
@@ -303,7 +309,10 @@ export async function makePicture(input: {
           return [] as RoomRender[];
         });
         const [plan, renders] = await Promise.all([
-          renderFloorPlan(brief, source, ctx, { timeoutMs: Math.max(3_000, deadline - Date.now()) }),
+          renderFloorPlan(brief, source, ctx, {
+            timeoutMs: Math.max(3_000, deadline - Date.now()),
+            furnishRegion: syntheticFurnishRegion,
+          }),
           rooms,
         ]);
         roomRenders = renders;

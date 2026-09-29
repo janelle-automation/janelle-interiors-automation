@@ -15,62 +15,62 @@ import type { ImageReference } from './images.js';
  * room names and measurements the designer typed never appeared anywhere
  * in the result, no matter how precisely they were given.
  *
- * This closes that gap the same way `floorPlan.ts` closes its own: split
- * what needs to be EXACT from what only needs to be PLAUSIBLE.
- *   1. Claude sorts the room list into rows and wings — a small, discrete
- *      judgement call (which rooms sit together, front to back, left to
- *      right) that a language model is actually reliable at.
- *   2. This file's own arithmetic packs those rooms into a real,
- *      non-overlapping, to-scale rectangle layout — the part an LLM is NOT
- *      reliable at, done instead by code that cannot misplace a wall.
- *   3. The result is drawn as a real blueprint (real text, real dimension
- *      lines, a real room-dimensions table) and handed to
- *      `renderFloorPlan` exactly as an uploaded drawing would be: furnished
- *      by the image model, then the blueprint's own lines and lettering
- *      composited back on top, character for character.
+ * This closes that gap the same way `floorPlan.ts` closes its own, split on
+ * the one thing an image model genuinely cannot do rather than on how much
+ * of the design is "AI": Claude designs the ENTIRE layout — every room's
+ * actual position, not just which rooms sit together — because that is a
+ * real design judgement call, and a language model is the right tool for
+ * it. What this file's own code does is narrower and non-negotiable: draw
+ * whatever Claude designed as real text and real lines, because an image
+ * model cannot spell a room name or hold a dimension steady, no matter how
+ * good its layout sense is. Nothing here repositions, rescales or
+ * "corrects" a room Claude placed — the drawing is Claude's plan, exactly,
+ * lettered precisely rather than approximately.
+ *
+ * The result is drawn as a real blueprint (real text, real dimension
+ * lines, a real room-dimensions table) and handed to `renderFloorPlan`
+ * exactly as an uploaded drawing would be: furnished by the image model,
+ * then the blueprint's own lines and lettering composited back on top,
+ * character for character.
  */
-
-// ── Step 1: Claude sorts the rooms (semantic, not geometric) ──
-
-export type RoomPlacement = 'main' | 'wing_left' | 'wing_right' | 'exterior_front' | 'exterior_rear';
 
 export interface LayoutRoom {
   name: string;
+  /** The room's own top-left corner, in feet, in one shared coordinate space for the whole drawing. */
+  x: number;
+  y: number;
   /** Left-right size, in feet. */
   widthFt: number;
   /** Front-back size, in feet. */
   depthFt: number;
-  placement: RoomPlacement;
-  /** Main rooms only: 0 is the front-most row, increasing toward the back. */
-  row: number;
-  /** Left-to-right within a row, or top-to-bottom within a wing/exterior stack. */
-  order: number;
+  /** Inside the main conditioned house the stated footprint describes — false for a garage, porch, patio, deck or balcony. */
+  core: boolean;
+  /** As stated in a flooring schedule, e.g. "600×1200mm porcelain tile"; null when the brief names none for this room. */
+  flooring: string | null;
 }
 
 export interface PlannedFloorPlan {
   title: string;
-  /** The stated overall footprint, in feet — the dimension line drawn around the whole house. */
+  /** The overall footprint Claude was designing toward, in feet — read from the brief when it states one. Display uses the geometry's own measured footprint instead (see computeFloorPlanGeometry), so a label never disagrees with what is actually drawn. */
   widthFt: number;
   depthFt: number;
   rooms: LayoutRoom[];
 }
 
-const PLAN_LAYOUT = `You sort a designer's room list into an architectural floor plan layout. You do not compute positions — only which rooms sit together.
+const PLAN_LAYOUT = `You design a real, buildable single-story floor plan layout from a designer's room list — actual room positions, not just which rooms sit together.
 
-Return JSON: {"title": string, "widthFt": number, "depthFt": number, "rooms": [{"name": string, "widthFt": number, "depthFt": number, "placement": string, "row": number, "order": number}]}
+Return JSON: {"title": string, "widthFt": number, "depthFt": number, "rooms": [{"name": string, "x": number, "y": number, "widthFt": number, "depthFt": number, "core": boolean, "flooring": string|null}]}
 
 - "title": a short building description, e.g. "Single Story Residence" — the home type the brief names.
-- Top-level "widthFt"/"depthFt": the OVERALL footprint. Read it straight from the brief if it states one (e.g. "60 ft wide x 45 ft deep" -> 60, 45). If it does not, estimate a reasonable overall size from the rooms listed.
-- Every room the brief lists becomes exactly one entry — never invent a room, never drop one. Read each room's own "W x D" as given; "widthFt" is its left-right size, "depthFt" its front-to-back size.
-- "placement", one of:
-  - "main": an enclosed room inside the house's own footprint — bedrooms, bathrooms, kitchen, living/dining, closets, laundry, pantry, a hallway or circulation strip, the entry foyer.
-  - "wing_left" / "wing_right": a garage, or anything the brief calls a separate wing or attached to one side. Use the side the brief names; default to "wing_left" when it names neither.
-  - "exterior_front" / "exterior_rear": an open, uncovered structure outside the conditioned house — a porch, patio, deck, terrace. Match "front"/"entry" language to "exterior_front", "rear"/"back" language to "exterior_rear".
-- "row" (main rooms only; 0 for every other placement): which front-to-back band of the house a room sits in. Group rooms the brief places side by side into the same row — "kitchen, centrally located" beside "bedroom 2" beside "bedroom 3" is one row; "living room, front-left" beside "dining room, adjacent to the entry" beside "entry" is another.
-- "order": left-to-right position within its row (main rooms), or top-to-bottom position within its wing/exterior stack (other placements) — 0, 1, 2, ... in the order the brief implies.
-- Each row is drawn spanning the FULL overall width, so a row whose rooms add up to much less than it looks wrong — an empty gap, not a floor plan. Put a room's closet, bathroom or pantry in the SAME row as the room it serves rather than a row of its own, so every row reads as a believable full-width slice of the house. A row that still falls short after that is fine — a hallway of ordinary width fills what is left — but a row left mostly empty is not.`;
+- Top-level "widthFt"/"depthFt": the overall footprint of the MAIN house. Read it straight from the brief if it states one (e.g. "60 ft wide x 45 ft deep" -> 60, 45); otherwise estimate a reasonable one from the rooms listed. This is your own design target, not read back afterward — aim the "core" rooms' combined footprint close to it.
+- Every room the brief lists becomes exactly one entry — never invent a room, never drop one. A room named only in a flooring schedule (material and size, no room dimensions) is still one entry, not skipped for lacking a "W x D".
+- "widthFt"/"depthFt" per room: read each room's own "W x D" as given, "widthFt" its left-right size and "depthFt" its front-to-back size. When the brief gives no size for a room — most often because it only lists flooring materials by room, not room dimensions — choose a plausible size for a home of the stated overall footprint (living/dining larger, a bathroom or utility room small).
+- "x"/"y": the room's own top-left corner, in feet, in ONE shared coordinate space for the whole drawing — (0,0) is the main house's own top-left corner, x increases rightward, y increases toward the back of the house.
+- Design an actual buildable layout, the way a real architect would arrange these rooms, not a grid: no two rooms may ever overlap, and touching rooms should share a wall exactly (one room's right edge equal to its neighbour's left edge) rather than leaving an unexplained gap. Cluster rooms the way a home actually works — an entry leading into living/dining, a kitchen near dining, bedrooms grouped together each near a bathroom, a hallway threading between them wherever rooms are not directly adjacent. Vary room shapes and the layout's overall footprint sensibly instead of forcing every room into uniform rows.
+- "core": true for every room inside the main conditioned house the overall footprint describes; false for a garage, porch, patio, deck or balcony — place it at whatever x/y sits naturally beside the main house (negative x/y, or past the main footprint, is fine for these).
+- "flooring": the flooring material and size for this room, exactly as a flooring schedule in the brief states it (e.g. "600×1200mm porcelain tile", "300×300mm anti-skid tile"), or null when the brief gives none for that room.`;
 
-/** Claude groups the rooms; nothing here computes a single coordinate. */
+/** Claude designs the whole layout; nothing here moves a room it placed. */
 export async function planFloorLayout(
   brief: string,
   ctx: CallContext,
@@ -78,176 +78,83 @@ export async function planFloorLayout(
 ): Promise<PlannedFloorPlan | null> {
   const plan = await extractJson<PlannedFloorPlan>(PLAN_LAYOUT, brief.slice(0, 4000), ctx, timeoutMs);
   if (!plan || !Array.isArray(plan.rooms) || !plan.rooms.length) return null;
-  const PLACEMENTS: RoomPlacement[] = ['main', 'wing_left', 'wing_right', 'exterior_front', 'exterior_rear'];
   const rooms = plan.rooms
     .map((r) => ({
       name: String(r.name ?? 'Room').slice(0, 40),
+      x: Number(r.x) || 0,
+      y: Number(r.y) || 0,
       widthFt: Number(r.widthFt) || 0,
       depthFt: Number(r.depthFt) || 0,
-      placement: PLACEMENTS.includes(r.placement) ? r.placement : ('main' as RoomPlacement),
-      row: Number.isFinite(r.row) ? Math.max(0, Math.round(r.row)) : 0,
-      order: Number.isFinite(r.order) ? Math.max(0, Math.round(r.order)) : 0,
+      core: r.core !== false,
+      flooring: r.flooring ? String(r.flooring).slice(0, 60) : null,
     }))
-    .filter((r) => r.widthFt > 0 && r.depthFt > 0);
+    .filter((r) => r.widthFt > 0 && r.depthFt > 0 && Number.isFinite(r.x) && Number.isFinite(r.y));
   if (!rooms.length) return null;
   return {
     title: String(plan.title || 'Single Story Residence').slice(0, 60),
-    widthFt: Number(plan.widthFt) || rooms.reduce((s, r) => (r.placement === 'main' ? s + r.widthFt : s), 0) || 40,
-    depthFt: Number(plan.depthFt) || 40,
+    widthFt: Number(plan.widthFt) || 40,
+    depthFt: Number(plan.depthFt) || 30,
     rooms,
   };
 }
 
-// ── Step 2: pack the rooms into real, non-overlapping rectangles ──
+// ── Turn Claude's design into drawing coordinates ──────────────
 
 export interface PositionedRoom {
   name: string;
   statedWidthFt: number;
   statedDepthFt: number;
-  /** Rendered position and size, in feet, in the shared drawing space. */
+  /** Position and size, in feet, in the shared drawing space — Claude's own numbers, untouched. */
   x: number;
   y: number;
   w: number;
   h: number;
-  /** A filler strip this code added to square off a row — never labelled. */
-  isFiller?: boolean;
+  flooring?: string | null;
 }
 
 export interface FloorPlanGeometry {
   rooms: PositionedRoom[];
-  /** The main house's own footprint, in feet. */
+  /** The main house's own footprint, in feet — the "core" rooms' own combined bounding box, measured from where Claude actually placed them. */
   main: { x: number; y: number; w: number; h: number };
-  /** Everything, main house plus wings and exteriors. */
+  /** Everything Claude placed, core rooms plus any garage, porch or patio. */
   bounds: { minX: number; minY: number; maxX: number; maxY: number };
 }
 
 /**
- * A row's leftover width becomes a hallway strip only inside this range —
- * a real one. Outside it (too little to read as a corridor, or so much
- * that it would read as a hole in the house) the row is stretched to fit
- * the full width exactly instead: the room LABELS still carry the
- * designer's true stated sizes (the dimension table is never touched),
- * only the drawn rectangles flex, which is the far smaller lie of the
- * two — a floor plan with a blank void in it looks broken outright.
- */
-const MIN_CIRCULATION_FT = 3;
-const MAX_CIRCULATION_FT = 8;
-
-function packRow(row: LayoutRoom[], y: number, overallWidthFt: number): { rooms: PositionedRoom[]; depth: number } {
-  const ordered = [...row].sort((a, b) => a.order - b.order);
-  const totalW = ordered.reduce((s, r) => s + r.widthFt, 0);
-  const depth = Math.max(...ordered.map((r) => r.depthFt), 1);
-  const gap = overallWidthFt - totalW;
-
-  const rooms: PositionedRoom[] = [];
-  let x = 0;
-  for (const r of ordered) {
-    rooms.push({ name: r.name, statedWidthFt: r.widthFt, statedDepthFt: r.depthFt, x, y, w: r.widthFt, h: depth });
-    x += r.widthFt;
-  }
-
-  if (gap >= MIN_CIRCULATION_FT && gap <= MAX_CIRCULATION_FT) {
-    rooms.push({ name: '', statedWidthFt: gap, statedDepthFt: depth, x, y, w: gap, h: depth, isFiller: true });
-  } else if (Math.abs(gap) > 0.05 && totalW > 0) {
-    // Stretch the row to fit the full width exactly, rather than leave a
-    // gap too large to read as a hallway, or run the last room past the
-    // wall when the row overflows.
-    const scale = overallWidthFt / totalW;
-    let sx = 0;
-    for (const p of rooms) {
-      p.x = sx;
-      p.w *= scale;
-      sx += p.w;
-    }
-  }
-  return { rooms, depth };
-}
-
-function packStack(list: LayoutRoom[]): { rooms: PositionedRoom[]; width: number; height: number } {
-  const ordered = [...list].sort((a, b) => a.order - b.order);
-  const rooms: PositionedRoom[] = [];
-  let y = 0;
-  let maxW = 0;
-  for (const r of ordered) {
-    rooms.push({ name: r.name, statedWidthFt: r.widthFt, statedDepthFt: r.depthFt, x: 0, y, w: r.widthFt, h: r.depthFt });
-    y += r.depthFt;
-    maxW = Math.max(maxW, r.widthFt);
-  }
-  return { rooms, width: maxW, height: y };
-}
-
-/**
- * The one place geometry gets decided. Deterministic: the same plan
- * always packs to the same rectangles, and no two rooms ever overlap —
- * the thing an LLM asked for raw coordinates cannot promise.
+ * A straight readout of Claude's own layout — no packing, no rescaling, no
+ * invented filler. The only arithmetic here is measuring what Claude
+ * actually placed, so the dimension lines drawn around it are always true
+ * to the picture rather than to a number Claude merely aimed for.
  */
 export function computeFloorPlanGeometry(plan: PlannedFloorPlan): FloorPlanGeometry {
-  const mainByRow = new Map<number, LayoutRoom[]>();
-  for (const r of plan.rooms) {
-    if (r.placement !== 'main') continue;
-    mainByRow.set(r.row, [...(mainByRow.get(r.row) ?? []), r]);
-  }
-  const rowKeys = [...mainByRow.keys()].sort((a, b) => a - b);
+  const rooms: PositionedRoom[] = plan.rooms.map((r) => ({
+    name: r.name,
+    statedWidthFt: r.widthFt,
+    statedDepthFt: r.depthFt,
+    x: r.x,
+    y: r.y,
+    w: r.widthFt,
+    h: r.depthFt,
+    flooring: r.flooring,
+  }));
 
-  const rooms: PositionedRoom[] = [];
-  let y = 0;
-  for (const key of rowKeys) {
-    const { rooms: rowRooms, depth } = packRow(mainByRow.get(key)!, y, plan.widthFt);
-    rooms.push(...rowRooms);
-    y += depth;
-  }
-  const mainH = y || 1;
+  const core = plan.rooms.filter((r) => r.core);
+  const span = (list: LayoutRoom[]) => ({
+    minX: Math.min(...list.map((r) => r.x)),
+    minY: Math.min(...list.map((r) => r.y)),
+    maxX: Math.max(...list.map((r) => r.x + r.widthFt)),
+    maxY: Math.max(...list.map((r) => r.y + r.depthFt)),
+  });
+  const coreSpan = core.length ? span(core) : { minX: 0, minY: 0, maxX: plan.widthFt, maxY: plan.depthFt };
+  const main = { x: coreSpan.minX, y: coreSpan.minY, w: coreSpan.maxX - coreSpan.minX, h: coreSpan.maxY - coreSpan.minY };
 
-  // Scale the packed depth to match the stated overall depth exactly, so
-  // the dimension line drawn around the house is the designer's own
-  // number, not this code's running total.
-  const depthScale = plan.depthFt / mainH;
-  for (const r of rooms) {
-    r.y *= depthScale;
-    r.h *= depthScale;
-  }
-  const main = { x: 0, y: 0, w: plan.widthFt, h: plan.depthFt };
-
-  const bounds = { minX: 0, minY: 0, maxX: plan.widthFt, maxY: plan.depthFt };
-
-  const wingLeft = packStack(plan.rooms.filter((r) => r.placement === 'wing_left'));
-  for (const r of wingLeft.rooms) {
-    r.x -= wingLeft.width;
-    rooms.push(r);
-  }
-  if (wingLeft.rooms.length) bounds.minX = Math.min(bounds.minX, -wingLeft.width);
-
-  const wingRight = packStack(plan.rooms.filter((r) => r.placement === 'wing_right'));
-  for (const r of wingRight.rooms) {
-    r.x += plan.widthFt;
-    rooms.push(r);
-  }
-  if (wingRight.rooms.length) bounds.maxX = Math.max(bounds.maxX, plan.widthFt + wingRight.width);
-
-  const front = [...plan.rooms.filter((r) => r.placement === 'exterior_front')].sort((a, b) => a.order - b.order);
-  let fx = 0;
-  let frontDepth = 0;
-  for (const r of front) {
-    rooms.push({ name: r.name, statedWidthFt: r.widthFt, statedDepthFt: r.depthFt, x: fx, y: -r.depthFt, w: r.widthFt, h: r.depthFt });
-    fx += r.widthFt;
-    frontDepth = Math.max(frontDepth, r.depthFt);
-  }
-  if (front.length) bounds.minY = Math.min(bounds.minY, -frontDepth);
-
-  const rear = [...plan.rooms.filter((r) => r.placement === 'exterior_rear')].sort((a, b) => a.order - b.order);
-  let rx = 0;
-  let rearDepth = 0;
-  for (const r of rear) {
-    rooms.push({ name: r.name, statedWidthFt: r.widthFt, statedDepthFt: r.depthFt, x: rx, y: plan.depthFt, w: r.widthFt, h: r.depthFt });
-    rx += r.widthFt;
-    rearDepth = Math.max(rearDepth, r.depthFt);
-  }
-  if (rear.length) bounds.maxY = Math.max(bounds.maxY, plan.depthFt + rearDepth);
+  const all = span(plan.rooms);
+  const bounds = { minX: all.minX, minY: all.minY, maxX: all.maxX, maxY: all.maxY };
 
   return { rooms, main, bounds };
 }
 
-// ── Step 3: draw it as a real blueprint ────────────────────────
+// ── Draw Claude's layout as a real blueprint ───────────────────
 
 const PX_PER_FT = 22;
 const TABLE_WIDTH = 340;
@@ -386,15 +293,88 @@ function furnitureIcon(name: string, x: number, y: number, w: number, h: number)
   return '';
 }
 
-function room(r: PositionedRoom, ox: number, oy: number): string {
+const MM_PER_FT = 304.8;
+// Dark enough to still read crossing a furniture icon's own light fill
+// (icons use tones like #e5ddd0, #f4efe8) — #cfcfcf all but vanished there.
+const TILE_STROKE = '#a8a8a8';
+
+/** A tile's long and short edge, in feet, read from "600×1200 mm ... tile" — or null when the brief states no size. */
+function parseTileFt(flooring: string | null | undefined): { longFt: number; shortFt: number; wood: boolean } | null {
+  if (!flooring) return null;
+  const m = flooring.match(/(\d+(?:\.\d+)?)\s*[×x]\s*(\d+(?:\.\d+)?)\s*mm/i);
+  if (!m) return null;
+  const a = Number(m[1]) / MM_PER_FT;
+  const b = Number(m[2]) / MM_PER_FT;
+  if (!(a > 0) || !(b > 0)) return null;
+  return { longFt: Math.max(a, b), shortFt: Math.min(a, b), wood: /wood/i.test(flooring) };
+}
+
+/**
+ * A room's floor, drawn as real tile or plank joints rather than left for an
+ * image model to invent — the exact material size and lay direction the
+ * brief's flooring schedule states, guaranteed by arithmetic rather than
+ * hoped for from a prompt. The tile's long edge runs along the room's own
+ * longer axis, and a wood finish also gets the row-to-row stagger a strip
+ * floor is laid with — everything else lays in a plain aligned grid.
+ */
+function floorPattern(x: number, y: number, w: number, h: number, tile: { longFt: number; shortFt: number; wood: boolean }): string {
+  const long = tile.longFt * PX_PER_FT;
+  const short = tile.shortFt * PX_PER_FT;
+  // Too fine to read as anything but noise at this drawing's scale.
+  if (long < 5 || short < 5) return '';
+  const alongIsX = w >= h;
+  const alongLen = alongIsX ? w : h;
+  const acrossLen = alongIsX ? h : w;
+  const rows = Math.max(1, Math.round(acrossLen / short));
+  const rowH = acrossLen / rows;
+
+  const acrossLine = (at: number) =>
+    alongIsX
+      ? `<line x1="${x.toFixed(1)}" y1="${(y + at).toFixed(1)}" x2="${(x + w).toFixed(1)}" y2="${(y + at).toFixed(1)}" stroke="${TILE_STROKE}" stroke-width="0.7"/>`
+      : `<line x1="${(x + at).toFixed(1)}" y1="${y.toFixed(1)}" x2="${(x + at).toFixed(1)}" y2="${(y + h).toFixed(1)}" stroke="${TILE_STROKE}" stroke-width="0.7"/>`;
+  const alongLine = (at: number, from: number, to: number) =>
+    alongIsX
+      ? `<line x1="${(x + at).toFixed(1)}" y1="${(y + from).toFixed(1)}" x2="${(x + at).toFixed(1)}" y2="${(y + to).toFixed(1)}" stroke="${TILE_STROKE}" stroke-width="0.7"/>`
+      : `<line x1="${(x + from).toFixed(1)}" y1="${(y + at).toFixed(1)}" x2="${(x + to).toFixed(1)}" y2="${(y + at).toFixed(1)}" stroke="${TILE_STROKE}" stroke-width="0.7"/>`;
+
+  const lines: string[] = [];
+  for (let r = 1; r < rows; r++) lines.push(acrossLine(r * rowH));
+  for (let r = 0; r < rows; r++) {
+    const from = r * rowH;
+    const to = Math.min(acrossLen, from + rowH);
+    // Every other row's joints shift half a tile along — a running bond,
+    // the way strip wood flooring is actually laid. Everything else keeps
+    // every row's joints lined up in a plain grid.
+    const offset = tile.wood && r % 2 === 1 ? long / 2 : 0;
+    for (let at = offset; at < alongLen - 0.5; at += long) {
+      if (at < 0.5) continue;
+      lines.push(alongLine(at, from, to));
+    }
+  }
+  return lines.join('');
+}
+
+/** A small lettered circle in a room's corner, keyed to the flooring legend. */
+function keyBadge(x: number, y: number, letter: string): string {
+  const cx = x + 15;
+  const cy = y + 15;
+  return (
+    `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="9" fill="#ffffff" stroke="#111111" stroke-width="1.3"/>` +
+    `<text x="${cx.toFixed(1)}" y="${(cy + 3.5).toFixed(1)}" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="700" fill="#111111">${escape(letter)}</text>`
+  );
+}
+
+function room(r: PositionedRoom, ox: number, oy: number, keyLetter?: string): string {
   const x = ox + r.x * PX_PER_FT;
   const y = oy + r.y * PX_PER_FT;
   const w = r.w * PX_PER_FT;
   const h = r.h * PX_PER_FT;
   const rect = `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" fill="#ffffff" stroke="#111111" stroke-width="3"/>`;
-  if (r.isFiller || !r.name) return rect;
+  if (!r.name) return rect;
   const cx = x + w / 2;
   const cy = y + h / 2;
+  const tile = parseTileFt(r.flooring);
+  const floor = tile ? floorPattern(x, y, w, h, tile) : '';
   // A label wider than its room would spill into the next one; small rooms
   // get the name only; larger ones get the name and the size beneath it.
   const fits = w > 70 && h > 40;
@@ -408,7 +388,26 @@ function room(r: PositionedRoom, ox: number, oy: number): string {
   const size = fits
     ? `<text x="${cx.toFixed(1)}" y="${(cy + 12).toFixed(1)}" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#555555">${escape(sizeLabel(r.statedWidthFt, r.statedDepthFt))}</text>`
     : '';
-  return rect + icon + label + size;
+  // Small enough that even a compact bathroom or utility room clears it.
+  const badge = keyLetter && w > 36 && h > 36 ? keyBadge(x, y, keyLetter) : '';
+  // After the icon, not before: a bath's tub and a closet's hanging rod are
+  // drawn as solid fills wide enough to hide most of a room's floor — the
+  // exact rooms (bath, utility) an anti-skid call-out most needs to read.
+  return rect + icon + floor + label + size + badge;
+}
+
+/**
+ * One letter per distinct flooring call-out, assigned in the order rooms
+ * first state it — A, B, C... — so the legend and the room badges agree.
+ * Rooms the brief gives no flooring for carry no badge at all.
+ */
+function keyFlooring(rooms: { flooring?: string | null }[]): Map<string, string> {
+  const keys = new Map<string, string>();
+  for (const r of rooms) {
+    if (!r.flooring || keys.has(r.flooring)) continue;
+    keys.set(r.flooring, String.fromCharCode(65 + keys.size));
+  }
+  return keys;
 }
 
 function dimensionLine(x1: number, y1: number, x2: number, y2: number, label: string, vertical: boolean): string {
@@ -427,27 +426,30 @@ function dimensionLine(x1: number, y1: number, x2: number, y2: number, label: st
 }
 
 /** The blueprint the image model furnishes, and whose lines and lettering come back exactly as drawn here. */
-export function renderFloorPlanSvg(plan: PlannedFloorPlan, geo: FloorPlanGeometry): { svg: string; width: number; height: number } {
+export function renderFloorPlanSvg(
+  plan: PlannedFloorPlan,
+  geo: FloorPlanGeometry,
+): { svg: string; width: number; height: number; drawing: { x: number; y: number; width: number; height: number } } {
   const ox = MARGIN - geo.bounds.minX * PX_PER_FT;
   const oy = MARGIN - geo.bounds.minY * PX_PER_FT;
   const drawingW = (geo.bounds.maxX - geo.bounds.minX) * PX_PER_FT;
   const drawingH = (geo.bounds.maxY - geo.bounds.minY) * PX_PER_FT;
   const width = Math.round(MARGIN + drawingW + MARGIN + TABLE_WIDTH);
-  const height = Math.round(Math.max(drawingH + MARGIN * 2 + 60, 560));
 
-  const rooms = geo.rooms.map((r) => room(r, ox, oy)).join('');
+  const flooringKeys = keyFlooring(geo.rooms);
+  const rooms = geo.rooms.map((r) => room(r, ox, oy, r.flooring ? flooringKeys.get(r.flooring) : undefined)).join('');
 
   const mainX1 = ox + geo.main.x * PX_PER_FT;
   const mainX2 = ox + (geo.main.x + geo.main.w) * PX_PER_FT;
   const mainY1 = oy + geo.main.y * PX_PER_FT;
   const mainY2 = oy + (geo.main.y + geo.main.h) * PX_PER_FT;
-  const topDim = dimensionLine(mainX1, mainY1 - 40, mainX2, mainY1 - 40, `${ftLabel(plan.widthFt)}-0"`, false);
-  const sideDim = dimensionLine(mainX1 - 40, mainY1, mainX1 - 40, mainY2, `${ftLabel(plan.depthFt)}-0"`, true);
+  // The measured "core" footprint, never the brief's stated target — so
+  // this label can never disagree with the tick marks it sits beside.
+  const topDim = dimensionLine(mainX1, mainY1 - 40, mainX2, mainY1 - 40, `${ftLabel(geo.main.w)}-0"`, false);
+  const sideDim = dimensionLine(mainX1 - 40, mainY1, mainX1 - 40, mainY2, `${ftLabel(geo.main.h)}-0"`, true);
 
   const tableX = MARGIN + drawingW + MARGIN;
-  const tableRooms = plan.rooms
-    .filter((r) => r.placement === 'main' || r.placement === 'wing_left' || r.placement === 'wing_right')
-    .concat(plan.rooms.filter((r) => r.placement === 'exterior_front' || r.placement === 'exterior_rear'));
+  const tableRooms = plan.rooms;
   let ty = 40;
   const tableRows: string[] = [
     `<text x="${tableX}" y="${ty}" font-family="Helvetica, Arial, sans-serif" font-size="15" font-weight="700" letter-spacing="0.5" fill="#111111">ROOM DIMENSIONS</text>`,
@@ -471,13 +473,39 @@ export function renderFloorPlanSvg(plan: PlannedFloorPlan, geo: FloorPlanGeometr
   ty += 14;
   tableRows.push(`<line x1="${tableX}" y1="${ty}" x2="${width - MARGIN / 2}" y2="${ty}" stroke="#111111" stroke-width="1"/>`);
   ty += 24;
-  for (const [label, ft] of [['Width', plan.widthFt], ['Depth', plan.depthFt]] as const) {
+  for (const [label, ft] of [['Width', geo.main.w], ['Depth', geo.main.h]] as const) {
     tableRows.push(`<text x="${tableX}" y="${ty}" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#111111">${label}</text>`);
     tableRows.push(
       `<text x="${width - MARGIN / 2}" y="${ty}" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#111111">${ftLabel(ft)}-0"</text>`,
     );
     ty += 22;
   }
+
+  // Only when the brief actually named flooring materials — a plain room
+  // list with no schedule gets no legend, same layout as before this key.
+  if (flooringKeys.size) {
+    ty += 14;
+    tableRows.push(
+      `<text x="${tableX}" y="${ty}" font-family="Helvetica, Arial, sans-serif" font-size="15" font-weight="700" letter-spacing="0.5" fill="#111111">FLOORING LEGEND</text>`,
+    );
+    ty += 14;
+    tableRows.push(`<line x1="${tableX}" y1="${ty}" x2="${width - MARGIN / 2}" y2="${ty}" stroke="#111111" stroke-width="1"/>`);
+    ty += 24;
+    for (const [material, letter] of [...flooringKeys.entries()].sort((a, b) => a[1].localeCompare(b[1]))) {
+      tableRows.push(
+        `<circle cx="${tableX + 8}" cy="${(ty - 4).toFixed(1)}" r="8" fill="#ffffff" stroke="#111111" stroke-width="1.2"/>` +
+          `<text x="${tableX + 8}" y="${(ty - 0.5).toFixed(1)}" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="700" fill="#111111">${escape(letter)}</text>`,
+      );
+      tableRows.push(
+        `<text x="${tableX + 24}" y="${ty}" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#111111">${escape(material)}</text>`,
+      );
+      ty += 22;
+    }
+  }
+
+  // Tall enough for the drawing, or for the side panel's own content plus
+  // room for the title block beneath it — whichever needs more.
+  const height = Math.round(Math.max(drawingH + MARGIN * 2 + 60, ty + 140, 560));
 
   const titleBlock = `
 <text x="${tableX}" y="${height - 60}" font-family="Georgia, 'Times New Roman', serif" font-size="22" fill="#111111">${escape(plan.title.includes('Floor Plan') ? plan.title : 'FLOOR PLAN')}</text>
@@ -492,7 +520,24 @@ ${tableRows.join('\n')}
 ${titleBlock}
 </svg>`;
 
-  return { svg, width, height };
+  // The drawing itself, excluding the side panel and the outer dimension
+  // ticks — the region an image model should actually be shown (see
+  // sketchFloorPlanFromBrief, which scales this into the rasterised pixels).
+  const drawing = { x: MARGIN, y: MARGIN, width: drawingW, height: drawingH };
+
+  return { svg, width, height, drawing };
+}
+
+export interface FloorPlanSchematic {
+  /** The full schematic — drawing plus the room-dimensions/legend/title panel. */
+  image: ImageReference;
+  /**
+   * Where the actual walled drawing sits within `image`'s own pixels,
+   * excluding the side panel — what should be cropped out and sent to an
+   * image model for furnishing, so a text-heavy legend a third of the
+   * canvas wide never gets mistaken for part of the building.
+   */
+  drawingRegion: { x: number; y: number; width: number; height: number };
 }
 
 /**
@@ -503,11 +548,27 @@ export async function sketchFloorPlanFromBrief(
   brief: string,
   ctx: CallContext,
   timeoutMs: number,
-): Promise<ImageReference | null> {
+): Promise<FloorPlanSchematic | null> {
   const plan = await planFloorLayout(brief, ctx, timeoutMs);
   if (!plan) return null;
   const geo = computeFloorPlanGeometry(plan);
-  const { svg, width, height } = renderFloorPlanSvg(plan, geo);
+  const { svg, width, height, drawing } = renderFloorPlanSvg(plan, geo);
   const bytes = await sharp(Buffer.from(svg), { density: 144 }).png().toBuffer();
-  return { mimeType: 'image/png', bytes, label: `${plan.title} — schematic floor plan` };
+  // The nominal SVG units above and the actual raster pixels agree up to a
+  // uniform scale (the density); read that scale back from what was
+  // actually produced rather than assume it, so this never drifts out of
+  // step with whatever DPI sharp used.
+  const meta = await sharp(bytes).metadata();
+  const scaleX = (meta.width || width) / width;
+  const scaleY = (meta.height || height) / height;
+  const drawingRegion = {
+    x: Math.round(drawing.x * scaleX),
+    y: Math.round(drawing.y * scaleY),
+    width: Math.round(drawing.width * scaleX),
+    height: Math.round(drawing.height * scaleY),
+  };
+  return {
+    image: { mimeType: 'image/png', bytes, label: `${plan.title} — schematic floor plan` },
+    drawingRegion,
+  };
 }

@@ -1,3 +1,4 @@
+import sharp from 'sharp';
 import { createMessage, extractJson, firstJson, type CallContext } from './anthropic.js';
 import { editWithCloudflare, renderWithCloudflare } from './cloudflare.js';
 import type { ImageReference, RenderResult } from './images.js';
@@ -181,20 +182,41 @@ function dimensions(bytes: Buffer): { width: number; height: number } {
  *
  * SVG because it has to hold both pictures and blend them; the rendering is
  * stretched to the drawing's exact size so the two line up.
+ *
+ * `furnishRegion`, when given, is the walled drawing's own rectangle within
+ * `source` — everything outside it (a synthetic schematic's room-dimensions
+ * and flooring-legend panel, a third of the canvas wide) is cropped away
+ * before the image model ever sees it. Sent whole, that panel is pure text
+ * on white with an aspect ratio nothing like the actual building, and an
+ * edit model shown it alongside the real walls has nothing coherent to
+ * furnish — it was producing a different, simpler layout than the one
+ * drawn, not the building it was asked to keep. The full `source` is still
+ * what gets multiplied back on top afterwards, so the panel still appears —
+ * untouched, since it was never sent to be furnished.
  */
 export async function renderFloorPlan(
   brief: string,
   source: ImageReference,
   ctx: CallContext,
-  options?: { timeoutMs?: number },
+  options?: { timeoutMs?: number; furnishRegion?: { x: number; y: number; width: number; height: number } },
 ): Promise<RenderResult> {
-  const rendered = await editWithCloudflare(planPrompt(brief), source, ctx, options);
+  const region = options?.furnishRegion;
+  const toFurnish = region
+    ? {
+        bytes: await sharp(source.bytes).extract({ left: region.x, top: region.y, width: region.width, height: region.height }).png().toBuffer(),
+        mimeType: 'image/png',
+      }
+    : source;
+  const rendered = await editWithCloudflare(planPrompt(brief), toFurnish, ctx, options);
   const { width, height } = dimensions(source.bytes);
   const href = (bytes: Buffer, type: string) => `data:${type};base64,${bytes.toString('base64')}`;
+  const renderedImage = region
+    ? `<image href="${href(rendered.bytes, rendered.mimeType)}" x="${region.x}" y="${region.y}" width="${region.width}" height="${region.height}" preserveAspectRatio="none"/>`
+    : `<image href="${href(rendered.bytes, rendered.mimeType)}" width="${width}" height="${height}" preserveAspectRatio="none"/>`;
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">` +
     `<rect width="${width}" height="${height}" fill="#ffffff"/>` +
-    `<image href="${href(rendered.bytes, rendered.mimeType)}" width="${width}" height="${height}" preserveAspectRatio="none"/>` +
+    renderedImage +
     // The drawing itself, multiplied: white vanishes, lines and lettering stay.
     `<image href="${href(source.bytes, source.mimeType)}" width="${width}" height="${height}" preserveAspectRatio="none" style="mix-blend-mode:multiply"/>` +
     `</svg>`;

@@ -120,13 +120,13 @@ export function startScheduler(): void {
     void forEachOrg((id) => runFollowUps(id), 'followups');
   });
 
-  // Noon Pacific, whatever the server's own time zone is (see
-  // routes/ops.ts's matching /cron/midday-reminder for why this polls
-  // rather than using a single fixed cron time).
+  // 9am and 5pm Pacific, whatever the server's own time zone is (see
+  // routes/ops.ts's matching /cron/midday-reminder for why this polls, and
+  // for the cooldown that lets both daily hours fire without a duplicate).
   cron.schedule('*/15 * * * *', () => {
-    if (pacificHourNow() !== 12) return;
+    if (![9, 17].includes(pacificHourNow())) return;
     void forEachOrg(async (id) => {
-      if (!(await claimCronSlot(id, 'midday_reminder_ran_at', 23 * 3600_000))) return;
+      if (!(await claimCronSlot(id, 'midday_reminder_ran_at', 4 * 3600_000))) return;
       await runMiddayReminder(id);
     }, 'midday reminder');
   });
@@ -162,6 +162,6 @@ export function startScheduler(): void {
   keepalive();
 
   console.log(
-    '  ▸ Scheduler started (email: per-studio interval · follow-ups 02:00 · midday reminder noon Pacific · digest 07:05 · report Mon 07:00 · media every 2 min · Google keep-alive every 6h)',
+    '  ▸ Scheduler started (email: per-studio interval · follow-ups 02:00 · task reminder 9am & 5pm Pacific · digest 07:05 · report Mon 07:00 · media every 2 min · Google keep-alive every 6h)',
   );
 }

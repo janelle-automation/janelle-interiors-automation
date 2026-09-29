@@ -302,7 +302,7 @@ export function middayPersonalEmail(opts: { name: string; groups: MiddayGroup[];
 <div style="font-size:15px;line-height:1.55;color:${C.ink};">${escape(hi)}</div>
 
 <div style="margin-top:10px;font-size:14px;line-height:1.6;color:${C.inkSoft};">
-  Here is where your open tasks stand at midday.
+  Here is where your open tasks stand right now.
 </div>
 
 ${groupsHtml(opts.groups)}
@@ -311,7 +311,7 @@ ${opts.boardUrl ? button(opts.boardUrl, 'Open the task board') : ''}`;
   const text = [
     hi,
     '',
-    'Here is where your open tasks stand at midday.',
+    'Here is where your open tasks stand right now.',
     '',
     groupsText(opts.groups),
     opts.boardUrl ? `\nOpen the task board: ${opts.boardUrl}` : '',
@@ -323,9 +323,9 @@ ${opts.boardUrl ? button(opts.boardUrl, 'Open the task board') : ''}`;
     .join('\n');
 
   return {
-    subject: `Midday task reminder — ${total} open${overdue ? `, ${overdue} overdue` : ''}`,
+    subject: `Task reminder — ${total} open${overdue ? `, ${overdue} overdue` : ''}`,
     text,
-    html: shell(`${total} open task${total === 1 ? '' : 's'} as of midday.`, body),
+    html: shell(`${total} open task${total === 1 ? '' : 's'}.`, body),
   };
 }
 
@@ -380,7 +380,7 @@ export function middayOwnerEmail(opts: {
 <div style="font-size:15px;line-height:1.55;color:${C.ink};">${escape(hi)}</div>
 
 <div style="margin-top:10px;font-size:14px;line-height:1.6;color:${C.inkSoft};">
-  Here is the studio's open work at midday, by person.
+  Here is the studio's open work right now, by person.
 </div>
 
 ${cards}
@@ -390,7 +390,7 @@ ${opts.boardUrl ? button(opts.boardUrl, 'Open the task board') : ''}`;
   const text = [
     hi,
     '',
-    "Here is the studio's open work at midday, by person.",
+    "Here is the studio's open work right now, by person.",
     '',
     [
       ...opts.people.map((p) => personText(p.name, p.groups)),
@@ -407,8 +407,8 @@ ${opts.boardUrl ? button(opts.boardUrl, 'Open the task board') : ''}`;
     .join('\n');
 
   return {
-    subject: `Midday team summary — ${totalOpen} open across the studio`,
+    subject: `Team task summary — ${totalOpen} open across the studio`,
     text,
-    html: shell(`${totalOpen} open task${totalOpen === 1 ? '' : 's'} across the studio as of midday.`, body),
+    html: shell(`${totalOpen} open task${totalOpen === 1 ? '' : 's'} across the studio.`, body),
   };
 }

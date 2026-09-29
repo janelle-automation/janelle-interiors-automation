@@ -20,10 +20,17 @@ import { pacificHourNow } from '../lib/pacificTime.js';
 const INGEST_RAN_FIELD = 'ingest_ran_at';
 /** When the scheduled task review last started for each studio. */
 const TASK_REVIEW_RAN_FIELD = 'task_review_ran_at';
-/** When the midday reminder last went out for each studio. */
+/** When the task reminder email last went out for each studio. */
 const MIDDAY_REMINDER_RAN_FIELD = 'midday_reminder_ran_at';
-/** The Pacific hour the midday reminder is allowed to fire in. */
-const MIDDAY_REMINDER_HOUR = 12;
+/** The Pacific hours the task reminder email is allowed to fire in — morning and end of day. */
+const MIDDAY_REMINDER_HOURS = [9, 17];
+/**
+ * The claim cooldown between sends. Shorter than the 8h gap between the two
+ * daily hours above (so the evening send isn't blocked by the morning one),
+ * longer than the ~1h a Pacific hour stays current across the 15-minute
+ * polls (so one hour's window can't claim twice).
+ */
+const MIDDAY_REMINDER_COOLDOWN_MS = 4 * 3600_000;
 
 export const opsRouter = Router();
 
@@ -141,11 +148,11 @@ cronRouter.all(
     });
   }),
 );
-// Once a day, at noon Pacific (migration 0024). Polled every 15 minutes
-// like the others; the Pacific-hour check is the real gate, and
-// claimCronSlot's ~23h window keeps a studio from getting it twice in the
-// same hour without drifting across the PST/PDT change, since the gate is
-// the wall-clock hour rather than a fixed UTC cron time. `?force=1` sends
+// Twice a day, at 9am and 5pm Pacific (migration 0024). Polled every 15
+// minutes like the others; the Pacific-hour check is the real gate, and
+// claimCronSlot's cooldown keeps a studio from getting either send twice in
+// the same hour without drifting across the PST/PDT change, since the gate
+// is the wall-clock hour rather than a fixed UTC cron time. `?force=1` sends
 // now regardless of the hour or the last send.
 cronRouter.all(
   '/midday-reminder',
@@ -154,8 +161,8 @@ cronRouter.all(
     res.json({
       data: await forEachOrg(async (id) => {
         if (!force) {
-          if (pacificHourNow() !== MIDDAY_REMINDER_HOUR) return { ok: true, skipped: 'not_midday' };
-          if (!(await claimCronSlot(id, MIDDAY_REMINDER_RAN_FIELD, 23 * 3600_000))) {
+          if (!MIDDAY_REMINDER_HOURS.includes(pacificHourNow())) return { ok: true, skipped: 'not_midday' };
+          if (!(await claimCronSlot(id, MIDDAY_REMINDER_RAN_FIELD, MIDDAY_REMINDER_COOLDOWN_MS))) {
             return { ok: true, skipped: 'already_sent' };
           }
         }

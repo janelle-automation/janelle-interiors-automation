@@ -712,9 +712,8 @@ export async function deleteDraft(gmail: gmail_v1.Gmail, draftId: string): Promi
  *   - an account invitation, triggered by a principal pressing Add, to an
  *     address they just typed;
  *   - the midday task reminder (services/middayReminder.ts), a scheduled
- *     send with no click behind it at all — currently addressed to the
- *     studio's own systems@ mailbox rather than a real person, while the
- *     content is checked (see TEST_RECIPIENT there).
+ *     send with no click behind it at all, to each teammate's and the
+ *     owner's own address.
  * Both stay inside the studio: nothing here reaches a client or a supplier.
  *
  * `gmail.compose`, already granted, covers sending as well as drafting, so
