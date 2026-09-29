@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Page, PageHeading, Card } from '../components/ui';
 import { RichTextEditor, toEditorHtml, htmlToPlainText } from '../components/RichTextEditor';
-import { useDrafts, useDeleteDraft, useUpdateDraft, type DraftRow } from '../lib/queries';
+import { useDrafts, useDeleteDraft, useUpdateDraft, gmailMessageUrl, type DraftRow } from '../lib/queries';
 import { ScopeToggle, useScope } from '../components/ScopeToggle';
 import { useAuth } from '../context/AuthContext';
 
@@ -135,10 +136,27 @@ export default function Drafts() {
     const owner = d.owner_id ?? d.created_by ?? null;
     return !owner || owner === user?.id;
   };
-  const drafts = scope === 'mine' ? all.filter(isMine) : all;
+  // Jenny's answers link straight to one draft (/drafts?open=<id>) — that
+  // draft must stay visible and land open, whichever scope is selected.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const openId = searchParams.get('open');
+  const drafts = scope === 'mine' ? all.filter((d) => isMine(d) || d.id === openId) : all;
   const del = useDeleteDraft();
-  const [open, setOpen] = useState<Set<string>>(new Set());
+  const [open, setOpen] = useState<Set<string>>(() => new Set(openId ? [openId] : []));
   const [editing, setEditing] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!openId) return;
+    setOpen((prev) => (prev.has(openId) ? prev : new Set(prev).add(openId)));
+    document.getElementById(`draft-${openId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [openId, all.length]);
+
+  const closeOpened = () =>
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete('open');
+      return next;
+    }, { replace: true });
 
   const toggle = (id: string) =>
     setOpen((prev) => {
@@ -173,11 +191,21 @@ export default function Drafts() {
             const subject = d.subject ?? '';
             const isOpen = open.has(d.id);
             const isEditing = editing === d.id;
-            const gmailUrl = gmailComposeUrl({ to, cc, subject, body });
+            // A real Gmail draft (pushed when this was saved) beats a
+            // fabricated compose window — it opens the actual draft, in its
+            // actual thread, ready to send from there.
+            const isRealDraft = Boolean(d.gmail_message_id);
+            const gmailUrl = isRealDraft
+              ? gmailMessageUrl(d.gmail_message_id as string)
+              : gmailComposeUrl({ to, cc, subject, body });
+            const gmailTitle = isRealDraft
+              ? 'Open the actual Gmail draft, in its thread'
+              : 'Open a prefilled compose window in Gmail — this draft never reached a live Gmail account';
             const preview = htmlToPlainText(body).replace(/\s+/g, ' ').slice(0, 110);
+            const isLinked = d.id === openId;
             return (
-              <Card key={d.id} className="overflow-hidden">
-                <div className="flex items-start gap-4 px-5 py-4">
+              <Card key={d.id} className={`overflow-hidden ${isLinked ? 'ring-2 ring-brass' : ''}`}>
+                <div id={`draft-${d.id}`} className="flex items-start gap-4 px-5 py-4">
                   <button
                     onClick={() => toggle(d.id)}
                     aria-expanded={isOpen}
@@ -202,7 +230,7 @@ export default function Drafts() {
                       target="_blank"
                       rel="noopener noreferrer"
                       className="btn-primary btn-sm"
-                      title="Open a prefilled compose window in Gmail"
+                      title={gmailTitle}
                     >
                       <GmailIcon /> Open in Gmail
                     </a>
@@ -250,7 +278,16 @@ export default function Drafts() {
                       >
                         Delete
                       </button>
-                      <span className="ml-auto text-[12px] text-ink-faint">Opens a new Gmail message with this content filled in. Review, then send from Gmail.</span>
+                      {isLinked && (
+                        <button onClick={closeOpened} className="text-[12px] text-ink-faint hover:text-ink-soft hover:underline">
+                          Clear from link
+                        </button>
+                      )}
+                      <span className="ml-auto text-[12px] text-ink-faint">
+                        {isRealDraft
+                          ? 'Opens the actual draft in Gmail. Review, then send from there.'
+                          : 'Opens a new Gmail message with this content filled in. Review, then send from Gmail.'}
+                      </span>
                     </div>
                   </div>
                 )}

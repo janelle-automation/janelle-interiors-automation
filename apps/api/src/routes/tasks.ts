@@ -2,7 +2,8 @@ import { Router } from 'express';
 import { TASK_KINDS, TASK_STATUSES, canManageTasks } from '@janelle/shared';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
-import { hasSubtasks, hasTaskAssignment, hasTaskCompletion } from '../lib/columns.js';
+import { hasEmailOwner, hasSubtasks, hasTaskAssignment, hasTaskCompletion } from '../lib/columns.js';
+import { supabaseAdmin } from '../lib/supabase.js';
 
 export const tasksRouter = Router();
 tasksRouter.use(requireAuth);
@@ -100,10 +101,35 @@ tasksRouter.get(
       subtaskQuery,
     ]);
 
+    const email = emailRes?.data ?? null;
+
+    // source_email_id set but RLS handed back nothing is not the same as no
+    // email at all: a task raised from a teammate's PERSONAL mailbox is
+    // visible to everyone on the board, but the mail itself, by design
+    // (migration 0018), is only visible to them. Telling those two apart
+    // needs the admin client — the whole point of RLS is that the request's
+    // own client cannot see far enough to say which one happened.
+    let emailHiddenFrom: string | null = null;
+    if (t.source_email_id && !email && supabaseAdmin) {
+      const withOwner = await hasEmailOwner();
+      const { data: real } = await supabaseAdmin
+        .from('emails')
+        .select(withOwner ? 'owner_id, profiles(full_name)' : 'id')
+        .eq('id', t.source_email_id)
+        .maybeSingle();
+      if (real) {
+        emailHiddenFrom =
+          (real as { profiles?: { full_name: string | null } | null }).profiles?.full_name ?? 'a teammate';
+      }
+    }
+
     res.json({
       data: {
         task,
-        email: emailRes?.data ?? null,
+        email,
+        // Set only when the email exists but is someone's personal mail —
+        // lets the panel say why, instead of the false "added by hand".
+        emailHiddenFrom,
         history: historyRes.data ?? [],
         subtasks: subtaskRes?.data ?? [],
         // So the panel can say why it is not offering subtasks, rather than

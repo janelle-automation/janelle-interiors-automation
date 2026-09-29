@@ -11,7 +11,9 @@ import {
 } from 'react';
 import { useLocation } from 'react-router-dom';
 import {
+  AGENT_KEYS,
   ASSISTANT_NAME,
+  type AgentKey,
   type AssistantAnswer,
   type AssistantItem,
   type MediaJobView,
@@ -188,6 +190,10 @@ interface AssistantCtx {
   /** The project on screen, by name, when there is one. */
   lookingAt: string | null;
 
+  /** Named agent(s) switched on. Empty means every tool is reachable. */
+  agents: AgentKey[];
+  setAgents: (next: AgentKey[]) => void;
+
   handsFree: boolean;
   setHandsFree: (on: boolean) => void;
   voice: VoiceState;
@@ -242,6 +248,13 @@ interface Stored {
   /** The local day the last briefing was made, so there is one a day. */
   briefedOn: string | null;
   unseen: number;
+  /** Named agent(s) switched on, narrowing Jenny to their tools. Empty = unrestricted. */
+  agents: AgentKey[];
+}
+
+/** An unvalidated value from storage or the wire, kept only if it is a known agent key. */
+function agentsOf(raw: unknown): AgentKey[] {
+  return Array.isArray(raw) ? raw.filter((a): a is AgentKey => (AGENT_KEYS as readonly string[]).includes(a)) : [];
 }
 
 /** The version-1 shape: one conversation, forever. */
@@ -270,7 +283,7 @@ const blankConversation = (): Conversation => {
 
 const emptyStore = (): Stored => {
   const first = blankConversation();
-  return { v: 2, conversations: [first], activeId: first.id, briefedOn: null, unseen: 0 };
+  return { v: 2, conversations: [first], activeId: first.id, briefedOn: null, unseen: 0, agents: [] };
 };
 
 /** The conversation on screen; there is always one. */
@@ -299,13 +312,13 @@ function load(userId: string): Stored {
         updatedAt: messages[messages.length - 1]?.at ?? Date.now(),
         messages,
       };
-      return { v: 2, conversations: [conversation], activeId: conversation.id, briefedOn: parsed.briefedOn ?? null, unseen: parsed.unseen ?? 0 };
+      return { v: 2, conversations: [conversation], activeId: conversation.id, briefedOn: parsed.briefedOn ?? null, unseen: parsed.unseen ?? 0, agents: [] };
     }
     if (parsed?.v !== 2 || !Array.isArray(parsed.conversations) || !parsed.conversations.length) return emptyStore();
     const conversations = parsed.conversations.filter((c) => c && typeof c.id === 'string' && Array.isArray(c.messages));
     if (!conversations.length) return emptyStore();
     const activeId = conversations.some((c) => c.id === parsed.activeId) ? parsed.activeId : conversations[0].id;
-    return { ...parsed, conversations, activeId };
+    return { ...parsed, conversations, activeId, agents: agentsOf(parsed.agents) };
   } catch {
     return emptyStore();
   }
@@ -444,7 +457,7 @@ function acknowledgement(saved: SavedProposal): AssistantAnswer {
     const lead = `Saved to Drafts${saved.to ? ` — ready to send to ${saved.to}` : ''}.`;
     return {
       lead,
-      items: [{ kind: 'draft', title: saved.subject, detail: saved.to ? `To ${saved.to}` : null, tone: 'good' }],
+      items: [{ kind: 'draft', id: saved.id, title: saved.subject, detail: saved.to ? `To ${saved.to}` : null, tone: 'good' }],
       more: 0,
       speech: 'Saved to your drafts.',
       sources: [],
@@ -892,6 +905,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         files: earlier,
         attachments: files.map((f) => ({ token: f.token })),
         ...(opts.alternatives?.length ? { spoken: { alternatives: opts.alternatives } } : {}),
+        ...(storeRef.current.agents.length ? { agents: storeRef.current.agents } : {}),
       };
       const onEvent = (event: Record<string, unknown>) => {
         answered = true;
@@ -1048,6 +1062,11 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
 
   const pinConversation = useCallback((id: string, pinned: boolean) => {
     setStore((s) => ({ ...s, conversations: s.conversations.map((c) => (c.id === id ? { ...c, pinned } : c)) }));
+  }, []);
+
+  /** A per-person preference, not tied to any one conversation. */
+  const setAgents = useCallback((next: AgentKey[]) => {
+    setStore((s) => ({ ...s, agents: next }));
   }, []);
 
   const deleteConversation = useCallback((id: string) => {
@@ -1325,6 +1344,8 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       focusRequest,
       requestFocus,
       lookingAt,
+      agents: store.agents,
+      setAgents,
       handsFree,
       setHandsFree,
       voice,
@@ -1342,7 +1363,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       active.messages, active.id, store.unseen, pending, status, send, imagine, editMessage, uploadFile, vocabulary, interim, stop, newConversation,
       conversations, openConversation, renameConversation, pinConversation, deleteConversation, downloadConversation,
       prefill, setPrefill, attachRequest, requestAttach, markDone, markDismissed, acknowledge,
-      briefingLoading, open, setOpen, focusRequest, requestFocus, lookingAt, handsFree,
+      briefingLoading, open, setOpen, focusRequest, requestFocus, lookingAt, store.agents, setAgents, handsFree,
       setHandsFree, voice, skipSpeaking, doneTalking, speakReplies, micError, micLevel, canListen, canSpeak,
     ],
   );

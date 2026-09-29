@@ -1,8 +1,8 @@
-import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { Page, PageHeading, Card, Pill, money, usePager, Pager } from '../components/ui';
+import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
+import { Page, PageHeading, Card, Pill, money, usePager, Pager, shortDate } from '../components/ui';
 import { IconSearch } from '../components/icons';
-import { useEmails, useDocuments, type DocSource } from '../lib/queries';
+import { useEmails, useEmail, useDocuments, gmailMessageUrl, type DocSource } from '../lib/queries';
 import { apiBlob } from '../lib/api';
 
 /** Fetch a document's original PDF and open it in a new tab. */
@@ -54,6 +54,34 @@ export function Inbox() {
   const { data: emails, isLoading } = useEmails();
   const [query, setQuery] = useState('');
   const [cls, setCls] = useState<string>('all');
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  // A task's "Open in Inbox →" link lands here as /inbox?open=<id>. The id
+  // is fetched on its own (not just found in the list above) because the
+  // list only holds the 500 most recent messages, and a filter or page the
+  // person was already on must not be able to hide the one thing the link
+  // promised to show.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const openId = searchParams.get('open');
+  const { data: openedEmail, isLoading: openedLoading } = useEmail(openId);
+  const closeOpened = () =>
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete('open');
+      return next;
+    }, { replace: true });
+
+  useEffect(() => {
+    if (!openId) return;
+    setExpanded((prev) => (prev.has(openId) ? prev : new Set(prev).add(openId)));
+  }, [openId]);
+
+  const toggle = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
 
   // Only the classes actually present, so the filter never offers a dead option.
   const classes = useMemo(
@@ -65,12 +93,15 @@ export function Inbox() {
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
     return emails.filter((m) => {
+      // The message a task deep-linked to stays visible no matter what
+      // filter is set — that is the one thing this screen must not hide.
+      if (m.id === openId) return true;
       if (cls !== 'all' && m.cls !== cls) return false;
       if (!q) return true;
       return [m.subject, m.snippet, m.fromName, m.fromEmail, m.project, m.vendor]
         .some((f) => f.toLowerCase().includes(q));
     });
-  }, [emails, query, cls]);
+  }, [emails, query, cls, openId]);
 
   // A column nothing fills is left out entirely rather than drawn as a stack
   // of em dashes — measured over all mail so the shape holds while filtering.
@@ -82,11 +113,65 @@ export function Inbox() {
   // screenful, and the filters above decide what is being paged through.
   const pager = usePager(shown, 25);
 
+  // Land on whichever page holds the message a task linked to, so "Open in
+  // Inbox" does not drop someone on page 1 and leave them to go hunting.
+  useEffect(() => {
+    if (!openId) return;
+    const idx = shown.findIndex((m) => m.id === openId);
+    if (idx === -1) return;
+    pager.setPage(Math.floor(idx / 25) + 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openId, shown]);
+
+  useEffect(() => {
+    if (!openId) return;
+    document.getElementById(`email-${openId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [openId, pager.page]);
+
+  // The list above only holds the 500 most recent messages. On the rare
+  // message old enough to have aged out of it, this is the only place its
+  // content is ever shown.
+  const openedAgedOut = Boolean(openId) && !isLoading && !emails.some((m) => m.id === openId);
+
   return (
     <Page>
       <PageHeading
         title="Inbox Intelligence"
       />
+      {openedAgedOut && (
+        <Card className="mb-4 border-brass/40">
+          <div className="flex items-start justify-between gap-4 px-5 py-4">
+            {openedLoading && <p className="text-[13px] text-ink-faint">Loading the message…</p>}
+            {!openedLoading && !openedEmail && (
+              <p className="text-[13px] text-ink-faint">That message could not be found.</p>
+            )}
+            {!openedLoading && openedEmail && (
+              <div className="min-w-0 flex-1">
+                <p className="text-[13.5px] font-medium text-ink">{openedEmail.subject || '(no subject)'}</p>
+                <p className="mt-0.5 text-[12px] text-ink-faint">
+                  {openedEmail.fromName || openedEmail.fromEmail}
+                  {openedEmail.receivedAt && <> · {shortDate(openedEmail.receivedAt)}</>}
+                  {' · outside the 500 most recent messages shown below'}
+                </p>
+                <p className="mt-2 text-[13px] leading-relaxed text-ink-soft">
+                  {openedEmail.summary || openedEmail.snippet || ''}
+                </p>
+                {openedEmail.gmailId && (
+                  <a
+                    href={gmailMessageUrl(openedEmail.gmailId)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="focusable mt-2 inline-block text-[12.5px] font-semibold text-brass-deep hover:underline"
+                  >
+                    Open in Gmail →
+                  </a>
+                )}
+              </div>
+            )}
+            <button onClick={closeOpened} className="btn-ghost btn-sm shrink-0">Close</button>
+          </div>
+        </Card>
+      )}
       <Card>
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line-soft px-5 py-3">
           <div className="relative">
@@ -158,52 +243,97 @@ export function Inbox() {
                   </td>
                 </tr>
               )}
-              {pager.rows.map((m) => (
-                <tr key={m.id} className="align-middle transition-colors hover:bg-sunk/40">
-                  <td className="px-5 py-2.5">
-                    <Pill tone={emailClassTone[m.cls] ?? 'neutral'}>{emailClassLabel[m.cls] ?? m.cls}</Pill>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <span className="block truncate text-[13px] text-ink" title={m.fromEmail || undefined}>
-                      {m.fromName || m.fromEmail || '—'}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    {/* Subject and snippet share one line so the width is spent
-                        on content instead of on a third row of text. */}
-                    <div className="flex min-w-0 items-baseline gap-2">
-                      <span className="shrink-0 max-w-[60%] truncate text-[13.5px] font-medium text-ink">
-                        {m.subject}
-                      </span>
-                      {m.snippet && (
-                        <span className="min-w-0 flex-1 truncate text-[13px] text-ink-faint">{m.snippet}</span>
+              {pager.rows.map((m) => {
+                const isOpen = expanded.has(m.id);
+                const isLinked = m.id === openId;
+                return (
+                  <Fragment key={m.id}>
+                    <tr
+                      id={`email-${m.id}`}
+                      onClick={() => toggle(m.id)}
+                      className={`cursor-pointer align-middle transition-colors hover:bg-sunk/40 ${
+                        isLinked ? 'bg-brass/5' : ''
+                      }`}
+                    >
+                      <td className="px-5 py-2.5">
+                        <Pill tone={emailClassTone[m.cls] ?? 'neutral'}>{emailClassLabel[m.cls] ?? m.cls}</Pill>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <span className="block truncate text-[13px] text-ink" title={m.fromEmail || undefined}>
+                          {m.fromName || m.fromEmail || '—'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {/* Subject and snippet share one line so the width is spent
+                            on content instead of on a third row of text. */}
+                        <div className="flex min-w-0 items-baseline gap-2">
+                          <span className="shrink-0 max-w-[60%] truncate text-[13.5px] font-medium text-ink">
+                            {m.subject}
+                          </span>
+                          {m.snippet && (
+                            <span className="min-w-0 flex-1 truncate text-[13px] text-ink-faint">{m.snippet}</span>
+                          )}
+                          {REPLYABLE.includes(m.cls) && (
+                            <Link
+                              to="/drafts"
+                              onClick={(e) => e.stopPropagation()}
+                              className="focusable shrink-0 rounded text-[12px] font-semibold text-brass-deep hover:underline"
+                              title="A reply is waiting in Drafts"
+                            >
+                              ✎ drafted
+                            </Link>
+                          )}
+                        </div>
+                      </td>
+                      {showProject && (
+                        <td className="px-3 py-2.5">
+                          <span className="block truncate text-[13px] text-ink-soft">{m.project || '—'}</span>
+                        </td>
                       )}
-                      {REPLYABLE.includes(m.cls) && (
-                        <Link
-                          to="/drafts"
-                          className="focusable shrink-0 rounded text-[12px] font-semibold text-brass-deep hover:underline"
-                          title="A reply is waiting in Drafts"
-                        >
-                          ✎ drafted
-                        </Link>
+                      {showVendor && (
+                        <td className="px-3 py-2.5">
+                          <span className="block truncate text-[13px] text-ink-soft">{m.vendor || '—'}</span>
+                        </td>
                       )}
-                    </div>
-                  </td>
-                  {showProject && (
-                    <td className="px-3 py-2.5">
-                      <span className="block truncate text-[13px] text-ink-soft">{m.project || '—'}</span>
-                    </td>
-                  )}
-                  {showVendor && (
-                    <td className="px-3 py-2.5">
-                      <span className="block truncate text-[13px] text-ink-soft">{m.vendor || '—'}</span>
-                    </td>
-                  )}
-                  <td className="px-5 py-2.5 text-right text-[12px] text-ink-faint" title={exactWhen(m.receivedAt)}>
-                    {m.when}
-                  </td>
-                </tr>
-              ))}
+                      <td className="px-5 py-2.5 text-right text-[12px] text-ink-faint" title={exactWhen(m.receivedAt)}>
+                        {m.when}
+                      </td>
+                    </tr>
+                    {isOpen && (
+                      <tr className={isLinked ? 'bg-brass/5' : 'bg-sunk/20'}>
+                        <td colSpan={cols} className="px-5 py-4">
+                          <p className="text-[13px] leading-relaxed text-ink-soft">
+                            {m.summary || m.snippet || 'No preview available.'}
+                          </p>
+                          <div className="mt-2 flex flex-wrap items-center gap-3">
+                            {m.gmailId ? (
+                              <a
+                                href={gmailMessageUrl(m.gmailId)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                className="focusable text-[12.5px] font-semibold text-brass-deep hover:underline"
+                              >
+                                Open in Gmail →
+                              </a>
+                            ) : (
+                              <span className="text-[12px] text-ink-faint">No Gmail message on file for this row.</span>
+                            )}
+                            {isLinked && (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); closeOpened(); }}
+                                className="text-[12px] text-ink-faint hover:text-ink-soft hover:underline"
+                              >
+                                Clear from link
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>

@@ -9,6 +9,7 @@ import { AssistantAnswerView, AttachedFiles, answerIsWide, sizeLabel } from './A
 import { useImagineOptions } from '../lib/queries';
 import { readableAttachment } from '../lib/attachments';
 import { AssistantGuide } from './AssistantGuide';
+import { AgentPicker } from './AgentPicker';
 import { IconMic, IconSend, IconStop } from './icons';
 
 /**
@@ -624,6 +625,7 @@ function ModeMenu({ mode, options, onChange }: { mode: ComposeMode; options: Mod
 function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.MutableRefObject<((files: File[]) => void) | null> }) {
   const {
     send, imagine, pending, stop, canListen, lookingAt, focusRequest, setMicError, vocabulary, uploadFile, prefill, attachRequest,
+    agents, setAgents,
   } = useAssistant();
   const { data: canMake } = useImagineOptions();
   const [text, setText] = useState('');
@@ -938,6 +940,7 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
             ]}
           />
         )}
+        {mode === 'ask' && <AgentPicker agents={agents} onChange={setAgents} />}
         <button
           type="button"
           onClick={() => picker.current?.click()}

@@ -1,4 +1,5 @@
 import express, { Router, type Request, type Response } from 'express';
+import { AGENT_KEYS, type AgentKey } from '@janelle/shared';
 import { requireAuth } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { ask, type AssistantContext, type AssistantTurn, type PendingProposal } from '../services/assistant.js';
@@ -71,6 +72,16 @@ function pendingFrom(raw: unknown): PendingProposal[] {
     }));
 }
 
+/** Which named agent(s) the person switched on, if any — an allow-listed set. */
+function agentsFrom(raw: unknown): AgentKey[] {
+  if (!Array.isArray(raw)) return [];
+  const allowed = new Set<AgentKey>();
+  for (const v of raw) {
+    if (typeof v === 'string' && (AGENT_KEYS as readonly string[]).includes(v)) allowed.add(v as AgentKey);
+  }
+  return [...allowed];
+}
+
 // Ask the assistant a question. Read-only: any write it decides on comes
 // back as a proposal for the person to confirm.
 assistantRouter.post(
@@ -91,6 +102,7 @@ assistantRouter.post(
       .slice(-4);
 
     const ctx = await assistantContext(req, req.body?.page, req.body?.pending);
+    ctx.agents = agentsFrom(req.body?.agents);
     // Spoken: every way the browser heard it, best first.
     const heard = (req.body?.spoken as { alternatives?: unknown } | undefined)?.alternatives;
     if (Array.isArray(heard)) {

@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { google, type gmail_v1 } from 'googleapis';
-import { googleClientForUser } from '../lib/tokens.js';
+import { googleClientForUser, orgSourceUserId } from '../lib/tokens.js';
 
 export interface PdfAttachment {
   filename: string;
@@ -58,6 +58,35 @@ export async function gmailFor(userId: string): Promise<gmail_v1.Gmail | null> {
   const auth = await googleClientForUser(userId, 'gmail');
   if (!auth) return null;
   return google.gmail({ version: 'v1', auth });
+}
+
+/** Gmail client for whichever account the studio's Google connection runs through. */
+export async function orgGmail(orgId: string | null): Promise<gmail_v1.Gmail | null> {
+  if (!orgId) return null;
+  const userId = await orgSourceUserId(orgId);
+  return userId ? gmailFor(userId) : null;
+}
+
+/**
+ * Gmail client for whoever should actually own a reply: the mailbox's own
+ * connected owner when one is known, the studio's shared connection
+ * otherwise.
+ *
+ * A team member's mail is read into this system without ever being shared
+ * (migration 0018) — Carissa's personal inbox is hers, Joanna's is hers.
+ * A draft answering one of their threads has to be created through THAT
+ * same person's Google connection, or it does not land as a reply at all:
+ * pushed through the studio's shared connection instead, it becomes a
+ * stray, unthreaded message sitting in a completely different person's
+ * Gmail — not the conversation it was supposed to answer, and never seen
+ * by the person actually having it.
+ */
+export async function gmailForReply(orgId: string | null, ownerId: string | null | undefined): Promise<gmail_v1.Gmail | null> {
+  if (ownerId) {
+    const own = await gmailFor(ownerId);
+    if (own) return own;
+  }
+  return orgGmail(orgId);
 }
 
 /** The connected account's own email address (to detect self / forwards). */
@@ -548,61 +577,35 @@ export async function downloadAttachment(
   return Buffer.from(data, 'base64');
 }
 
-/**
- * Create a Gmail draft (never sent). Returns the draft id. Pass
- * `threadId` + `inReplyTo` to make it a proper reply in the thread.
- */
-export async function createDraft(
-  gmail: gmail_v1.Gmail,
-  opts: { to: string; cc?: string; subject: string; body: string; threadId?: string; inReplyTo?: string },
-): Promise<string> {
-  const headers = [`To: ${opts.to}`];
-  if (opts.cc) headers.push(`Cc: ${opts.cc}`);
-  headers.push(`Subject: ${opts.subject}`, 'Content-Type: text/plain; charset="UTF-8"');
-  if (opts.inReplyTo) {
-    headers.push(`In-Reply-To: ${opts.inReplyTo}`);
-    headers.push(`References: ${opts.inReplyTo}`);
-  }
+export interface DraftContent {
+  to: string; cc?: string; bcc?: string; subject: string; body: string;
+  /** Rendered alongside `body` as multipart/alternative when given. */
+  html?: string;
+  /** Set together, to make this a proper reply sitting in the original thread. */
+  threadId?: string; inReplyTo?: string;
+}
 
-  const raw = Buffer.from([...headers, '', opts.body].join('\r\n'))
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
-
-  const res = await gmail.users.drafts.create({
-    userId: 'me',
-    requestBody: { message: opts.threadId ? { raw, threadId: opts.threadId } : { raw } },
-  });
-  return res.data.id ?? '';
+/** A draft (or sent message), as Gmail's own ids for it — never its text. */
+export interface DraftHandle {
+  draftId: string;
+  /** The message underneath the draft; this is what a "#all/<id>" link opens. */
+  messageId: string;
 }
 
 /**
- * Send one message, now.
- *
- * Everything else the studio writes is left as a draft for a person to read
- * and send, and the app says so on several screens. This function is the
- * deliberate exception, and each caller is kept deliberately narrow:
- *   - an account invitation, triggered by a principal pressing Add, to an
- *     address they just typed;
- *   - the midday task reminder (services/middayReminder.ts), a scheduled
- *     send with no click behind it at all — currently addressed to the
- *     studio's own systems@ mailbox rather than a real person, while the
- *     content is checked (see TEST_RECIPIENT there).
- * Both stay inside the studio: nothing here reaches a client or a supplier.
- *
- * `gmail.compose`, already granted, covers sending as well as drafting, so
- * this needs no new consent from the studio.
+ * The base64url `raw` field every send/draft call needs, built once so
+ * sending and drafting can never drift into different MIME shapes.
  */
-export async function sendMessage(
-  gmail: gmail_v1.Gmail,
-  opts: { to: string; cc?: string; bcc?: string; subject: string; body: string; html?: string },
-): Promise<string> {
+function buildRawMime(opts: DraftContent): string {
   const headers = [`To: ${opts.to}`];
   if (opts.cc) headers.push(`Cc: ${opts.cc}`);
   // Bcc is a header Gmail strips on the way out; recipients never see it.
   if (opts.bcc) headers.push(`Bcc: ${opts.bcc}`);
   headers.push(`Subject: ${encodeHeader(opts.subject)}`, 'MIME-Version: 1.0');
+  if (opts.inReplyTo) {
+    headers.push(`In-Reply-To: ${opts.inReplyTo}`);
+    headers.push(`References: ${opts.inReplyTo}`);
+  }
 
   let message: string;
   if (opts.html) {
@@ -635,12 +638,90 @@ export async function sendMessage(
     message = [...headers, '', opts.body].join('\r\n');
   }
 
-  const raw = Buffer.from(message)
+  return Buffer.from(message)
     .toString('base64')
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/, '');
+}
 
+/**
+ * Create a Gmail draft (never sent). Pass `threadId` + `inReplyTo` to make
+ * it a proper reply sitting in the thread it answers, rather than a new,
+ * unthreaded message the recipient has no context for.
+ */
+export async function createDraft(gmail: gmail_v1.Gmail, opts: DraftContent): Promise<DraftHandle> {
+  const raw = buildRawMime(opts);
+  const res = await gmail.users.drafts.create({
+    userId: 'me',
+    requestBody: { message: opts.threadId ? { raw, threadId: opts.threadId } : { raw } },
+  });
+  return { draftId: res.data.id ?? '', messageId: res.data.message?.id ?? '' };
+}
+
+/**
+ * Replace a draft's content in place — an edit made in the app, carried
+ * into Gmail. When the caller does not already know which thread it
+ * belongs to, this reads the draft back first so the edit cannot
+ * accidentally un-reply it — Gmail treats a draft with no `threadId` on the
+ * update as a fresh, unthreaded message.
+ */
+export async function updateDraft(
+  gmail: gmail_v1.Gmail,
+  draftId: string,
+  opts: DraftContent,
+): Promise<DraftHandle> {
+  let threadId = opts.threadId;
+  if (!threadId) {
+    try {
+      const existing = await gmail.users.drafts.get({ userId: 'me', id: draftId, format: 'metadata' });
+      threadId = existing.data.message?.threadId ?? undefined;
+    } catch {
+      // Draft may already be gone (sent or deleted by hand); fall through
+      // and let the update call below report that properly.
+    }
+  }
+  const raw = buildRawMime(opts);
+  const res = await gmail.users.drafts.update({
+    userId: 'me',
+    id: draftId,
+    requestBody: { message: threadId ? { raw, threadId } : { raw } },
+  });
+  return { draftId: res.data.id ?? draftId, messageId: res.data.message?.id ?? '' };
+}
+
+/**
+ * Remove a draft from Gmail. Swallows the error rather than throwing: the
+ * app's own copy of the draft is the thing the caller is actually deleting,
+ * and a draft already sent or removed by hand in Gmail must not block that.
+ */
+export async function deleteDraft(gmail: gmail_v1.Gmail, draftId: string): Promise<void> {
+  try {
+    await gmail.users.drafts.delete({ userId: 'me', id: draftId });
+  } catch (err) {
+    console.error('[gmail] could not delete draft', draftId, (err as Error).message);
+  }
+}
+
+/**
+ * Send one message, now.
+ *
+ * Everything else the studio writes is left as a draft for a person to read
+ * and send, and the app says so on several screens. This function is the
+ * deliberate exception, and each caller is kept deliberately narrow:
+ *   - an account invitation, triggered by a principal pressing Add, to an
+ *     address they just typed;
+ *   - the midday task reminder (services/middayReminder.ts), a scheduled
+ *     send with no click behind it at all — currently addressed to the
+ *     studio's own systems@ mailbox rather than a real person, while the
+ *     content is checked (see TEST_RECIPIENT there).
+ * Both stay inside the studio: nothing here reaches a client or a supplier.
+ *
+ * `gmail.compose`, already granted, covers sending as well as drafting, so
+ * this needs no new consent from the studio.
+ */
+export async function sendMessage(gmail: gmail_v1.Gmail, opts: DraftContent): Promise<string> {
+  const raw = buildRawMime(opts);
   const res = await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
   return res.data.id ?? '';
 }

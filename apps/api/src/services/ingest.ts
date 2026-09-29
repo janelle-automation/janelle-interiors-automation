@@ -3,6 +3,7 @@ import { connectedMailboxUserIds, isGoogleAuthFailure, orgSourceUserId } from '.
 import {
   gmailFor, getEmail, listMessageIds, listAllMessageIds, downloadAttachment, addressOf, addressesOf, type PdfAttachment,
   getProfileEmail, ignoredSenderQuery, noiseQuery, isIgnoredSender, isBulkMail, linksIn, studioOnlyQuery,
+  createDraft, updateDraft, type DraftContent,
 } from './gmail.js';
 import { advanceIngestCursor, gmailAfter, gmailBefore, readIngestWindow } from '../lib/ingestCursor.js';
 import { driveFor, listPdfs, downloadFile, type DriveFile } from './drive.js';
@@ -22,7 +23,7 @@ import { createTaskFromEmail, mergeDuplicateTasks } from './tasks.js';
 import { isAiReady, sweepStaleUploads } from './anthropic.js';
 import { readIngestSettings } from '../lib/ingestSettings.js';
 import { bodyColumnsReady, bodyFields, readStoredText } from '../lib/emailStore.js';
-import { hasEmailOwner, hasMessageId } from '../lib/columns.js';
+import { hasEmailOwner, hasMessageId, hasDraftGmailMessage } from '../lib/columns.js';
 
 export interface IngestResult {
   ok: boolean;
@@ -990,12 +991,15 @@ async function ingestInternal(
             if (!to) {
               console.warn('[ingest] no external recipient for reply on', email.gmailId);
             } else {
-              // Reply drafts are kept IN THE SYSTEM (not Gmail). Dedupe by
-              // subject so re-ingests don't create a second copy.
+              // Kept in the system AND pushed to the real Gmail thread it
+              // answers, so the studio can find, edit and send it from
+              // Gmail — not just review it here. Dedupe by subject so
+              // re-ingests don't create a second copy.
               const subject = email.subject.toLowerCase().startsWith('re:') ? email.subject : `Re: ${email.subject}`;
+              const withGmailMessage = await hasDraftGmailMessage();
               const { data: existingDraft } = await supabaseAdmin
                 .from('drafts')
-                .select('id, created_at')
+                .select('id, created_at, gmail_draft_id')
                 .eq('org_id', orgId)
                 .eq('subject', subject)
                 .limit(1)
@@ -1021,6 +1025,27 @@ async function ingestInternal(
                 if (reply) {
                   const ccLine = cc.length ? `\nCc: ${cc.join(', ')}` : '';
                   const composed = `To: ${to}${ccLine}\n\n${reply.body}`;
+                  const priorDraftId = (existingDraft as { gmail_draft_id?: string | null } | null)?.gmail_draft_id;
+
+                  // A failed Gmail push (an expired token, a quota error)
+                  // must not lose the reply itself — the row above is
+                  // still written either way, just without a live Gmail
+                  // counterpart to open.
+                  let pushed: { draftId: string; messageId: string } | null = null;
+                  try {
+                    const content: DraftContent = {
+                      to, cc: cc.length ? cc.join(', ') : undefined,
+                      subject: reply.subject, body: reply.body,
+                      threadId: email.threadId || undefined,
+                      inReplyTo: email.messageIdHeader || undefined,
+                    };
+                    pushed = priorDraftId
+                      ? await updateDraft(gmail, priorDraftId, content)
+                      : await createDraft(gmail, content);
+                  } catch (err) {
+                    console.error('[ingest] gmail draft push failed', email.gmailId, (err as Error).message);
+                  }
+
                   if (existingDraft) {
                     // created_at moves with the message it answers, so the
                     // age shown in Drafts is the age of the answer.
@@ -1029,6 +1054,8 @@ async function ingestInternal(
                       .update({
                         body_preview: composed,
                         created_at: email.receivedAt ?? new Date().toISOString(),
+                        ...(pushed ? { gmail_draft_id: pushed.draftId } : {}),
+                        ...(pushed && withGmailMessage ? { gmail_message_id: pushed.messageId } : {}),
                       })
                       .eq('id', existingDraft.id as string);
                   } else {
@@ -1040,6 +1067,8 @@ async function ingestInternal(
                       // that mail's privacy — otherwise the draft would hand
                       // over the very words owner_id exists to protect.
                       ...(ownerColumn ? { owner_id: ownerId } : {}),
+                      ...(pushed ? { gmail_draft_id: pushed.draftId } : {}),
+                      ...(pushed && withGmailMessage ? { gmail_message_id: pushed.messageId } : {}),
                     });
                   }
                   replyCount++;

@@ -10,6 +10,8 @@ import {
 } from '@janelle/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { addressOf, isStudioMailbox, namesFor, studioPerson } from '../lib/studioTeam.js';
+import { gmailForReply, createDraft, type DraftContent } from './gmail.js';
+import { hasDraftGmailMessage, hasEmailOwner, hasMessageId } from '../lib/columns.js';
 
 /**
  * Turning something Jenny prepared into something that exists.
@@ -362,8 +364,10 @@ export async function commitTask(
  *
  * Stored exactly as every other draft in the system is — To and Cc as
  * header lines above the body — so it appears in Drafts beside the reply
- * drafts and follow-up nudges, and goes out the same way: a person opens
- * it in Gmail and presses Send there.
+ * drafts and follow-up nudges. It is also pushed to the studio's real
+ * Gmail Drafts (see pushDraftToGmail below), so "open it in Gmail and
+ * press Send there" is something a person can actually do — not just
+ * text this app is holding onto.
  */
 export async function commitDraft(
   actor: Actor,
@@ -383,9 +387,21 @@ export async function commitDraft(
   const cc = String(input.cc ?? '').trim();
   const headers = [to ? `To: ${to}` : null, cc ? `Cc: ${cc}` : null].filter(Boolean).join('\n');
 
+  const pushed = to
+    ? await pushDraftToGmail(db, orgId, { to, cc, subject, body }, input.reply_to_email_id)
+    : null;
+
+  const row: Record<string, unknown> = {
+    org_id: orgId, subject, body_preview: headers ? `${headers}\n\n${body}` : body, created_by: userId,
+  };
+  if (pushed) {
+    row.gmail_draft_id = pushed.draftId;
+    if (await hasDraftGmailMessage()) row.gmail_message_id = pushed.messageId;
+  }
+
   const { data, error } = await db
     .from('drafts')
-    .insert({ org_id: orgId, subject, body_preview: headers ? `${headers}\n\n${body}` : body, created_by: userId })
+    .insert(row)
     .select('id')
     .maybeSingle();
   if (error) throw new Error(error.message);
@@ -402,6 +418,57 @@ export async function commitDraft(
   });
 
   return { kind: 'draft', id, subject, to: to || null };
+}
+
+/**
+ * Put a drafted reply into the studio's actual Gmail Drafts, through
+ * whoever's mailbox the conversation is actually in — not always the
+ * studio's shared connection. Failure here (no Google connection, an
+ * expired token) must not lose the draft itself — it only costs the
+ * "Open in Gmail" link.
+ *
+ * A reply to a teammate's PERSONAL mailbox has to be created through THAT
+ * person's own Google connection (gmailForReply), or it lands as a stray,
+ * unthreaded draft in a different account entirely — not a reply to
+ * anything, and never seen by the person actually having the conversation.
+ */
+async function pushDraftToGmail(
+  db: SupabaseClient,
+  orgId: string | null,
+  content: { to: string; cc: string; subject: string; body: string },
+  replyToEmailId: unknown,
+): Promise<{ draftId: string; messageId: string } | null> {
+  try {
+    let threadId: string | undefined;
+    let inReplyTo: string | undefined;
+    let ownerId: string | null = null;
+    if (typeof replyToEmailId === 'string' && replyToEmailId) {
+      const [withMessageId, withOwner] = await Promise.all([hasMessageId(), hasEmailOwner()]);
+      const { data: source } = await db
+        .from('emails')
+        .select(`thread_id${withOwner ? ', owner_id' : ''}${withMessageId ? ', message_id' : ''}`)
+        .eq('id', replyToEmailId)
+        .maybeSingle();
+      const row = source as { thread_id?: string | null; owner_id?: string | null; message_id?: string | null } | null;
+      if (row) {
+        threadId = row.thread_id ?? undefined;
+        inReplyTo = row.message_id ?? undefined;
+        ownerId = row.owner_id ?? null;
+      }
+    }
+
+    const gmail = await gmailForReply(orgId, ownerId);
+    if (!gmail) return null;
+
+    const draftContent: DraftContent = {
+      to: content.to, cc: content.cc || undefined, subject: content.subject, body: content.body,
+      threadId, inReplyTo,
+    };
+    return await createDraft(gmail, draftContent);
+  } catch (err) {
+    console.error('[proposals] could not create the Gmail draft:', (err as Error).message);
+    return null;
+  }
 }
 
 export interface SavedTaskUpdate {
