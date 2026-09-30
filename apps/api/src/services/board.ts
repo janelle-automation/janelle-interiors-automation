@@ -1,5 +1,6 @@
 import { supabaseAdmin } from '../lib/supabase.js';
 import { extractJson, type CallContext } from './anthropic.js';
+import { LOGO_ASPECT, LOGO_DATA_URI } from '../lib/brandLogo.js';
 
 /**
  * A rendering laid out as a studio presentation board.
@@ -264,10 +265,11 @@ export function composeBoard(input: {
     under.forEach((l, j) => parts.push(text(mid, top + size + 22 + j * 16, l, { size: 12, fill: SOFT, anchor: 'middle' })));
   });
 
-  // The studio.
-  parts.push(`<line x1="${cx - 190}" y1="${H - 62}" x2="${cx + 190}" y2="${H - 62}" stroke="${RULE}" stroke-width="0.8"/>`);
-  parts.push(text(cx, H - 36, input.studio.toUpperCase(), { size: 20, spacing: 6, anchor: 'middle', family: SERIF }));
-  parts.push(text(cx, H - 16, 'INTERIOR DESIGN', { size: 11, spacing: 4, anchor: 'middle', family: SERIF, fill: SOFT }));
+  // The studio: its own logo, which already carries the name and the line under it.
+  parts.push(`<line x1="${cx - 190}" y1="${H - 116}" x2="${cx + 190}" y2="${H - 116}" stroke="${RULE}" stroke-width="0.8"/>`);
+  const logoH = 96;
+  const logoW = Math.round(logoH / LOGO_ASPECT);
+  parts.push(`<image href="${LOGO_DATA_URI}" xlink:href="${LOGO_DATA_URI}" x="${cx - logoW / 2}" y="${H - logoH - 12}" width="${logoW}" height="${logoH}"><title>${esc(input.studio)}</title></image>`);
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${parts.join('')}</svg>`;
   return Buffer.from(svg, 'utf8');

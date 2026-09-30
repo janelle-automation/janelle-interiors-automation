@@ -1633,6 +1633,50 @@ export function useSetMediaModel() {
   );
 }
 
+// ── OpenAI (GPT Image) ──────────────────────────────────────
+
+export interface OpenAiConfig {
+  configured: boolean;
+  source: 'studio' | 'environment' | 'none';
+  keyHint: string | null;
+  imageModel: string;
+  quality: 'low' | 'medium' | 'high';
+  models: { id: string; label: string; usd: Record<'low' | 'medium' | 'high', number>; approx?: boolean; note: string }[];
+  qualities: { id: 'low' | 'medium' | 'high'; label: string }[];
+}
+
+export function useOpenAiConfig() {
+  return useQuery({ queryKey: ['openai-config'], queryFn: () => api<OpenAiConfig>('/settings/openai') });
+}
+
+/** A new key changes which providers the Create buttons can use, so both are refreshed. */
+function useOpenAiMutation<V>(fn: (v: V) => Promise<OpenAiConfig>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: (data) => {
+      qc.setQueryData(['openai-config'], data);
+      qc.invalidateQueries({ queryKey: ['imagine-options'] });
+    },
+  });
+}
+
+export function useSetOpenAiKey() {
+  return useOpenAiMutation((apiKey: string) =>
+    api<OpenAiConfig>('/settings/openai/key', { method: 'PUT', body: JSON.stringify({ apiKey }) }),
+  );
+}
+
+export function useClearOpenAiKey() {
+  return useOpenAiMutation(() => api<OpenAiConfig>('/settings/openai/key', { method: 'DELETE' }));
+}
+
+export function useSetOpenAiModel() {
+  return useOpenAiMutation((v: { model?: string; quality?: string }) =>
+    api<OpenAiConfig>('/settings/openai/model', { method: 'PUT', body: JSON.stringify(v) }),
+  );
+}
+
 // ── Renderings and boards (Gemini) ──────────────────────────
 
 export interface GeminiConfig extends AiSettingsView {
@@ -1790,7 +1834,7 @@ export interface UsageLink {
 
 /** What the Create buttons can offer right now, and what a clip would cost. */
 export interface ImagineOptions {
-  image: { ready: boolean; provider: 'grok' | 'gemini' | 'cloudflare' | 'claude' | null };
+  image: { ready: boolean; provider: 'openai' | 'grok' | 'gemini' | 'cloudflare' | 'claude' | null };
   video: {
     ready: boolean;
     model: string;

@@ -5,6 +5,11 @@ import {
   DEFAULT_PICTURE_ENGINE,
   PICTURE_ENGINES,
   DEFAULT_GROK_IMAGE_MODEL,
+  DEFAULT_OPENAI_IMAGE_MODEL,
+  DEFAULT_OPENAI_QUALITY,
+  OPENAI_IMAGE_MODELS,
+  OPENAI_QUALITIES,
+  type OpenAiQuality,
   DEFAULT_IMAGE_MODEL,
   DEFAULT_MODEL,
   DEFAULT_VIDEO_MODEL,
@@ -48,6 +53,12 @@ const IMAGE_MODEL_FIELD = 'image_model';
 const XAI_KEY_FIELD = 'xai_api_key_encrypted';
 const XAI_IMAGE_MODEL_FIELD = 'xai_image_model';
 const XAI_VIDEO_MODEL_FIELD = 'xai_video_model';
+
+// OpenAI: a fourth key, one image model and a quality dial (quality is what
+// moves the price most, so it is the studio's to choose).
+const OPENAI_KEY_FIELD = 'openai_api_key_encrypted';
+const OPENAI_MODEL_FIELD = 'openai_image_model';
+const OPENAI_QUALITY_FIELD = 'openai_image_quality';
 
 export interface ResolvedAi {
   apiKey: string | null;
@@ -560,4 +571,132 @@ export async function saveModel(orgId: string, model: string): Promise<void> {
     .eq('id', orgId);
   if (error) throw new Error(error.message);
   invalidateAiSettings(orgId);
+}
+
+
+// ── OpenAI (GPT Image) ─────────────────────────────────────────
+
+export interface ResolvedOpenAi {
+  apiKey: string | null;
+  imageModel: string;
+  quality: OpenAiQuality;
+  source: 'studio' | 'environment' | 'none';
+}
+
+export interface OpenAiSettingsView {
+  configured: boolean;
+  source: ResolvedOpenAi['source'];
+  keyHint: string | null;
+  imageModel: string;
+  quality: OpenAiQuality;
+}
+
+const openAiCache = new Map<string, { at: number; value: ResolvedOpenAi }>();
+
+export function invalidateOpenAiSettings(orgId?: string | null): void {
+  if (orgId) openAiCache.delete(orgId);
+  else openAiCache.clear();
+}
+
+function openAiFromEnvironment(): ResolvedOpenAi {
+  const model = env.openai.imageModel;
+  return {
+    apiKey: env.openai.apiKey || null,
+    imageModel: OPENAI_IMAGE_MODELS.some((m) => m.id === model) ? model : DEFAULT_OPENAI_IMAGE_MODEL,
+    quality: DEFAULT_OPENAI_QUALITY,
+    source: env.openai.apiKey ? 'environment' : 'none',
+  };
+}
+
+/** The OpenAI key and model this org should use: its own if set in Settings, else the server's. */
+export async function resolveOpenAi(given?: string | null): Promise<ResolvedOpenAi> {
+  if (!supabaseAdmin) return openAiFromEnvironment();
+
+  const orgId = await resolveOrgId(given);
+  if (!orgId) return openAiFromEnvironment();
+
+  const hit = openAiCache.get(orgId);
+  if (hit && Date.now() - hit.at < TTL_MS) return hit.value;
+
+  let value = openAiFromEnvironment();
+  try {
+    const settings = await readSettings(orgId);
+
+    const stored = settings[OPENAI_KEY_FIELD];
+    if (typeof stored === 'string' && stored) {
+      try {
+        const apiKey = decrypt(stored);
+        if (apiKey) value = { ...value, apiKey, source: 'studio' };
+      } catch {
+        console.error('[openai] stored API key could not be decrypted — using the environment key');
+      }
+    }
+    const model = settings[OPENAI_MODEL_FIELD];
+    if (typeof model === 'string' && OPENAI_IMAGE_MODELS.some((m) => m.id === model)) {
+      value = { ...value, imageModel: model };
+    }
+    const quality = settings[OPENAI_QUALITY_FIELD];
+    if (typeof quality === 'string' && OPENAI_QUALITIES.some((q) => q.id === quality)) {
+      value = { ...value, quality: quality as OpenAiQuality };
+    }
+  } catch (err) {
+    console.error('[openai] settings unreadable, using the environment:', (err as Error).message);
+    return openAiFromEnvironment();
+  }
+
+  openAiCache.set(orgId, { at: Date.now(), value });
+  return value;
+}
+
+export async function saveOpenAiApiKey(orgId: string, apiKey: string): Promise<void> {
+  if (!supabaseAdmin) throw new Error('Backend not configured');
+  const settings = await readSettings(orgId);
+  const { error } = await supabaseAdmin
+    .from('organizations')
+    .update({ settings: { ...settings, [OPENAI_KEY_FIELD]: encrypt(apiKey.trim()) } })
+    .eq('id', orgId);
+  if (error) throw new Error(error.message);
+  invalidateOpenAiSettings(orgId);
+}
+
+export async function clearOpenAiApiKey(orgId: string): Promise<void> {
+  if (!supabaseAdmin) throw new Error('Backend not configured');
+  const settings = await readSettings(orgId);
+  delete settings[OPENAI_KEY_FIELD];
+  const { error } = await supabaseAdmin.from('organizations').update({ settings }).eq('id', orgId);
+  if (error) throw new Error(error.message);
+  invalidateOpenAiSettings(orgId);
+}
+
+export async function saveOpenAiModel(orgId: string, model?: string, quality?: string): Promise<void> {
+  if (!supabaseAdmin) throw new Error('Backend not configured');
+  const next: Record<string, unknown> = { ...(await readSettings(orgId)) };
+  if (model !== undefined) {
+    if (!OPENAI_IMAGE_MODELS.some((m) => m.id === model)) throw new Error('Unknown model');
+    next[OPENAI_MODEL_FIELD] = model;
+  }
+  if (quality !== undefined) {
+    if (!OPENAI_QUALITIES.some((q) => q.id === quality)) throw new Error('Unknown quality');
+    next[OPENAI_QUALITY_FIELD] = quality;
+  }
+  const { error } = await supabaseAdmin.from('organizations').update({ settings: next }).eq('id', orgId);
+  if (error) throw new Error(error.message);
+  invalidateOpenAiSettings(orgId);
+}
+
+/** What the settings screen may see. Never the key itself. */
+export async function openAiSettingsView(orgId: string): Promise<OpenAiSettingsView> {
+  const r = await resolveOpenAi(orgId);
+  return {
+    configured: Boolean(r.apiKey),
+    source: r.source,
+    keyHint: r.apiKey ? r.apiKey.slice(-4) : null,
+    imageModel: r.imageModel,
+    quality: r.quality,
+  };
+}
+
+/** Basic shape check — OpenAI keys begin sk- (sk-proj- for project keys). */
+export function looksLikeOpenAiKey(key: string): boolean {
+  return /^sk-[A-Za-z0-9_-]{20,}$/.test(key.trim());
 }

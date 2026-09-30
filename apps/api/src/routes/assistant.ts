@@ -1,4 +1,5 @@
 import express, { Router, type Request, type Response } from 'express';
+import { FLOORING_PLAN } from '../services/flooringPlan.js';
 import { AGENT_KEYS, type AgentKey } from '@janelle/shared';
 import { requireAuth } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
@@ -306,9 +307,16 @@ assistantRouter.get(
  * result and answering take. It used to inherit the 25s cap written for a
  * render inside one of Jenny's turns, and a long brief at 2K ran past it.
  */
-const IMAGINE_BUDGET_MS = Number(process.env.IMAGINE_BUDGET_MS || 50_000);
+const IMAGINE_BUDGET_MS = Number(process.env.IMAGINE_BUDGET_MS || 56_000);
+/**
+ * A flooring plan is a whole presentation sheet: GPT Image 2 takes 45–55s to
+ * draw one, over the ordinary budget. Hosted, the function's own limit is
+ * what actually stops it (raise `maxDuration` in vercel.json to allow this);
+ * anywhere without that limit it now finishes.
+ */
+const IMAGINE_LONG_BUDGET_MS = Number(process.env.IMAGINE_LONG_BUDGET_MS || 110_000);
 /** Held back for the upload, the job row and the reply once the picture is in. */
-const IMAGINE_STORE_RESERVE_MS = 6_000;
+const IMAGINE_STORE_RESERVE_MS = 4_000;
 
 assistantRouter.post(
   '/imagine',
@@ -378,7 +386,10 @@ assistantRouter.post(
       resolution: req.body?.resolution === '1K' ? '1K' : '2K',
       projectId: typeof req.body?.project_id === 'string' ? req.body.project_id : null,
       // Whatever reading the attachments left of the budget.
-      timeoutMs: Math.max(15_000, IMAGINE_BUDGET_MS - (Date.now() - startedAt) - IMAGINE_STORE_RESERVE_MS),
+      timeoutMs: Math.max(
+        15_000,
+        (FLOORING_PLAN.test(prompt) ? IMAGINE_LONG_BUDGET_MS : IMAGINE_BUDGET_MS) - (Date.now() - startedAt) - IMAGINE_STORE_RESERVE_MS,
+      ),
     });
     // `timedOut` lets the page offer the same brief again as it stands;
     // a refusal or a missing key would only fail the same way twice.

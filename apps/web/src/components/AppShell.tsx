@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { BrandLogo } from './BrandLogo';
 import { NavLink, Link, useLocation } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
@@ -114,12 +115,16 @@ function readCollapsed(): boolean {
 function Brand({ collapsed }: { collapsed: boolean }) {
   return (
     <Link to="/" className={`focusable flex items-center gap-3 rounded-lg ${collapsed ? 'justify-center px-0' : 'px-2'} py-1`}>
-      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brass text-[17px] font-bold text-white">J</div>
-      {!collapsed && (
-        <div className="min-w-0 leading-tight">
-          <div className="truncate text-[15px] font-semibold text-nav-text">Janelle Interiors</div>
-          <div className="text-[11px] font-medium text-nav-muted">Workflow System</div>
-        </div>
+      {collapsed ? (
+        <BrandLogo variant="mark" className="w-11 shrink-0 text-nav-text" />
+      ) : (
+        <>
+          <BrandLogo variant="mark" className="w-14 shrink-0 text-nav-text" />
+          <div className="min-w-0 leading-tight">
+            <div className="truncate text-[15px] font-semibold text-nav-text">Janelle Interiors</div>
+            <div className="text-[11px] font-medium text-nav-muted">Workflow System</div>
+          </div>
+        </>
       )}
     </Link>
   );

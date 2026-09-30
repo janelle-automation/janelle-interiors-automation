@@ -1,3 +1,4 @@
+import { env } from '../env.js';
 /**
  * The studio's email, as mail clients actually render it.
  *
@@ -60,6 +61,23 @@ function greeting(name: string): string {
   return `Hi ${first.charAt(0).toUpperCase()}${first.slice(1)},`;
 }
 
+/**
+ * The header mark. The studio's logo when the app's address is known — mail
+ * clients only show an image they can fetch, so it is served from the app's
+ * own public folder — and the plain monogram otherwise.
+ */
+function logoCell(): string {
+  const base = (env.appUrl ?? '').replace(/\/+$/, '');
+  if (base) {
+    return `<td style="font-family:${FONT};"><img src="${base}/logo-email.png" width="150" alt="Janelle Interiors" style="display:block;width:150px;height:auto;border:0;outline:none;"></td>`;
+  }
+  return `<td style="width:40px;height:40px;background:${C.brass};border-radius:10px;text-align:center;vertical-align:middle;font-family:${FONT};font-size:20px;font-weight:700;color:#ffffff;line-height:40px;">J</td>
+                <td style="padding-left:12px;font-family:${FONT};">
+                  <div style="font-size:16px;font-weight:600;color:${C.ink};line-height:1.2;">Janelle Interiors</div>
+                  <div style="font-size:12px;color:${C.inkFaint};line-height:1.4;">Workflow System</div>
+                </td>`;
+}
+
 function shell(preheader: string, body: string): string {
   return `<!doctype html>
 <html lang="en">
@@ -84,11 +102,7 @@ function shell(preheader: string, body: string): string {
           <td style="padding:0 4px 20px 4px;">
             <table role="presentation" cellpadding="0" cellspacing="0" border="0">
               <tr>
-                <td style="width:40px;height:40px;background:${C.brass};border-radius:10px;text-align:center;vertical-align:middle;font-family:${FONT};font-size:20px;font-weight:700;color:#ffffff;line-height:40px;">J</td>
-                <td style="padding-left:12px;font-family:${FONT};">
-                  <div style="font-size:16px;font-weight:600;color:${C.ink};line-height:1.2;">Janelle Interiors</div>
-                  <div style="font-size:12px;color:${C.inkFaint};line-height:1.4;">Workflow System</div>
-                </td>
+                ${logoCell()}
               </tr>
             </table>
           </td>

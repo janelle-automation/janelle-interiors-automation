@@ -28,7 +28,7 @@ import { extractJson, isAiReady } from './anthropic.js';
  */
 const TASK_CHECKED_KEY = '_task_checked';
 
-async function markTaskChecked(emailId: string): Promise<void> {
+export async function markTaskChecked(emailId: string): Promise<void> {
   if (!supabaseAdmin) return;
   try {
     const { data } = await supabaseAdmin.from('emails').select('extracted_json').eq('id', emailId).maybeSingle();
@@ -318,6 +318,18 @@ function titleKey(title: string): string {
     .trim();
 }
 
+/**
+ * Document numbers a task names — a quote, order or PO reference such as
+ * EX00043246. Claude words each task fresh, so "Follow up on updated quote
+ * EX00043246", "Receive and review updated quote EX00043246" and "Review
+ * updated quote EX00043246" are three titles for one piece of work that a
+ * title comparison never sees as the same.
+ */
+function refsOf(...texts: (string | null | undefined)[]): string[] {
+  const found = texts.join(' ').toUpperCase().match(/[A-Z]{1,4}-?d{5,}|d{7,}/g) ?? [];
+  return [...new Set(found.map((r) => r.replace('-', '')))];
+}
+
 interface DuplicateTaskRow {
   id: string;
   title: string;
@@ -362,7 +374,7 @@ export async function mergeDuplicateTasks(orgId: string): Promise<TaskDedupe> {
 
   const { data } = await supabaseAdmin
     .from('tasks')
-    .select('id, title, status, project_id, assigned_to, next_step, due_date, detail, created_at')
+    .select('id, title, status, project_id, assigned_to, next_step, due_date, detail, created_at, source_email_id')
     .eq('org_id', orgId)
     .in('status', LIVE_STATUSES)
     .order('created_at', { ascending: true });
@@ -409,6 +421,12 @@ export async function mergeDuplicateTasks(orgId: string): Promise<TaskDedupe> {
         .eq('org_id', orgId)
         .in('id', losers.map((l) => l.id));
       if (error) throw new Error(error.message);
+
+      // The emails the removed copies came from must not raise them again on the next scan.
+      for (const l of losers) {
+        const src = (l as DuplicateTaskRow & { source_email_id?: string | null }).source_email_id;
+        if (src) await markTaskChecked(src);
+      }
 
       result.removed += losers.length;
       result.merged.push({ kept: keep.title, removed: losers.length });
@@ -461,8 +479,127 @@ export async function mergeDuplicateTasks(orgId: string): Promise<TaskDedupe> {
  * Returns how many were advanced. Never throws: this runs behind ingestion
  * and must not be able to fail it.
  */
+/**
+ * Close a live task whose document number belongs to a task the system
+ * already closed automatically — same quote or order, same project. Three
+ * tasks were raised for one quote (chase it, receive it, review it); the mail
+ * that finished two of them left the third open. Never touches a task a
+ * person reopened (it has its own auto-close on record), and never one with
+ * no project on either side to tie the two together.
+ */
+export async function closeRepeatsOfFinishedQuotes(orgId: string): Promise<number> {
+  if (!supabaseAdmin) return 0;
+  const cols = 'id, title, detail, project_id';
+  const [{ data: liveRows }, { data: doneRows }] = await Promise.all([
+    supabaseAdmin.from('tasks').select(cols).eq('org_id', orgId).in('status', LIVE_STATUSES).not('project_id', 'is', null),
+    supabaseAdmin.from('tasks').select(cols).eq('org_id', orgId).eq('status', 'done').not('project_id', 'is', null),
+  ]);
+  type Row = { id: string; title: string; detail: string | null; project_id: string };
+  const live = ((liveRows ?? []) as Row[]).map((t) => ({ ...t, refs: refsOf(t.title, t.detail) })).filter((t) => t.refs.length);
+  if (!live.length) return 0;
+  const done = ((doneRows ?? []) as Row[]).map((t) => ({ ...t, refs: refsOf(t.title, t.detail) })).filter((t) => t.refs.length);
+  if (!done.length) return 0;
+
+  // Only work the system itself closed counts as proof; a person's own
+  // completion says nothing about a different task.
+  const { data: autoRows } = await supabaseAdmin
+    .from('activity_log')
+    .select('entity_id')
+    .eq('org_id', orgId)
+    .eq('action', 'task.auto_complete')
+    .in('entity_id', [...done.map((t) => t.id), ...live.map((t) => t.id)]);
+  const auto = new Set(((autoRows ?? []) as { entity_id: string }[]).map((r) => r.entity_id));
+
+  const withNote = await hasTaskCompletion();
+  let closed = 0;
+  for (const t of live) {
+    if (auto.has(t.id)) continue; // reopened by a person
+    const twin = done.find(
+      (d) => auto.has(d.id) && d.project_id === t.project_id && d.refs.some((r) => t.refs.includes(r)),
+    );
+    if (!twin) continue;
+    const patch: Record<string, unknown> = { status: 'done' };
+    if (withNote) patch.completion_note = `Closed automatically — the same quote was already closed as "${twin.title}".`;
+    const { data } = await supabaseAdmin
+      .from('tasks')
+      .update(patch)
+      .eq('id', t.id)
+      .eq('org_id', orgId)
+      .in('status', LIVE_STATUSES)
+      .select('id');
+    if (!data?.length) continue;
+    closed++;
+    await supabaseAdmin.from('activity_log').insert({
+      org_id: orgId,
+      action: 'task.auto_complete',
+      entity: 'tasks',
+      entity_id: t.id,
+      meta: { title: t.title, evidence: `same document as closed task "${twin.title}"`, repeat_of: twin.id },
+    });
+  }
+  return closed;
+}
+
+/**
+ * Give a live task with no project the job its own wording names.
+ *
+ * Deliberately narrow: a project counts only when its whole name appears in
+ * the title or detail as a run of words, and only one project (the longest,
+ * when one name contains another) qualifies. A wrong project on a task is
+ * worse than none, so anything less clear is left for a person.
+ */
+export async function linkUnfiledTasks(orgId: string): Promise<number> {
+  if (!supabaseAdmin) return 0;
+  const { data } = await supabaseAdmin
+    .from('tasks')
+    .select('id, title, detail')
+    .eq('org_id', orgId)
+    .in('status', LIVE_STATUSES)
+    .is('project_id', null);
+  const unfiled = (data ?? []) as { id: string; title: string; detail: string | null }[];
+  if (!unfiled.length) return 0;
+
+  const words = (s: string) =>
+    ` ${s
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '')
+      .toLowerCase()
+      .replace(/['’]s\b/g, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()} `;
+  const { projects } = await loadStudioNames(orgId);
+  const candidates = projects
+    .filter((p) => !p.archived)
+    .map((p) => ({ id: p.id, key: words(p.name) }))
+    .filter((p) => p.key.trim().length >= 5);
+
+  let linked = 0;
+  for (const t of unfiled) {
+    const text = words(`${t.title} ${t.detail ?? ''}`);
+    const hits = candidates.filter((p) => text.includes(p.key)).sort((a, b) => b.key.length - a.key.length);
+    if (!hits.length) continue;
+    // Two different jobs named, neither containing the other: not safe to pick.
+    if (hits.slice(1).some((h) => !hits[0].key.includes(h.key))) continue;
+    const { error } = await supabaseAdmin.from('tasks').update({ project_id: hits[0].id }).eq('id', t.id);
+    if (!error) linked++;
+  }
+  return linked;
+}
+
 export async function advanceActiveTasks(orgId: string): Promise<number> {
   if (!supabaseAdmin) return 0;
+
+  try {
+    await closeRepeatsOfFinishedQuotes(orgId);
+  } catch (err) {
+    console.error('[tasks] closing repeats of finished quotes failed:', (err as Error).message);
+  }
+
+  try {
+    await linkUnfiledTasks(orgId);
+  } catch (err) {
+    console.error('[tasks] linking unfiled tasks failed:', (err as Error).message);
+  }
 
   try {
     const { data: openTasks } = await supabaseAdmin
@@ -1329,6 +1466,14 @@ export async function createTaskFromEmail(
     (email as { vendor_id: string | null } | null)?.vendor_id ??
     (extracted.vendor ? matchProjectId(names.vendors, extracted.vendor) : null);
 
+  // The job the task is about: the one the email is filed under, else the
+  // one the task itself names. A request from a contact at a hotel is often
+  // not filed anywhere ("Chase Cari for Casa Elar Roman shade specs"), and
+  // the task then showed no project on the board.
+  const projectId =
+    (email as { project_id: string | null } | null)?.project_id ??
+    (extracted.project_hint ? matchProjectId(names.projects, extracted.project_hint) : null);
+
   // Who to reach, so whoever picks the task up does not have to open the
   // thread to find out. Never a studio address or a no-reply sender.
   const contactEmail = extracted.contact_email?.trim() || null;
@@ -1351,14 +1496,18 @@ export async function createTaskFromEmail(
   // Scoped to the project, not the whole studio: "Chase the vendor for a
   // quote" is one task per job, and org-wide matching would silently drop
   // the second job's.
+  // Work finished (or dropped) in the last fortnight counts as well: a rescan
+  // of the thread, or a later reply repeating the ask, would otherwise raise
+  // the task again the moment the first one was ticked off.
+  const finishedSince = new Date(Date.now() - 14 * 24 * 3600_000).toISOString();
   const { data: liveSame } = await supabaseAdmin
     .from('tasks')
     .select('id, title, project_id')
     .eq('org_id', orgId)
-    .in('status', LIVE_STATUSES);
+    .or(`status.in.(${LIVE_STATUSES.join(',')}),and(status.in.(done,cancelled),updated_at.gte.${finishedSince})`);
 
   const wanted = titleKey(title);
-  const projectOf = (email as { project_id: string | null } | null)?.project_id ?? null;
+  const projectOf = projectId;
   // Same ask on the same job — or on a job and on nothing. A reply that
   // arrives before the project exists files the first copy nowhere, and
   // requiring the projects to be equal let the second one in beside it.
@@ -1369,6 +1518,25 @@ export async function createTaskFromEmail(
     return r.project_id === projectOf || r.project_id === null || projectOf === null;
   });
   if (already) return false;
+
+  // The same document already has a task — open, or finished in the last few
+  // days. A quote that arrives closes the chase for it; the mail that follows
+  // about the same quote is the same piece of work, not a new one.
+  const refs = refsOf(title, extracted.detail);
+  if (refs.length) {
+    const since = new Date(Date.now() - 3 * 24 * 3600_000).toISOString();
+    const { data: sameRef } = await supabaseAdmin
+      .from('tasks')
+      .select('title, detail, project_id, status, updated_at')
+      .eq('org_id', orgId)
+      .or(`status.in.(${LIVE_STATUSES.join(',')}),and(status.eq.done,updated_at.gte.${since})`);
+    const repeat = (sameRef ?? []).some((row) => {
+      const r = row as { title: string; detail: string | null; project_id: string | null };
+      if (!(r.project_id === projectId || r.project_id === null || projectId === null)) return false;
+      return refsOf(r.title, r.detail).some((ref) => refs.includes(ref));
+    });
+    if (repeat) return false;
+  }
 
   // Four ways to decide the owner, most specific first. Each step is a
   // weaker signal than the one above it:
@@ -1394,7 +1562,7 @@ export async function createTaskFromEmail(
     assigned_role: seat ? SEATS[seat].role : role,
     seat,
     next_step: extracted.next_step ?? null,
-    project_id: (email as { project_id: string | null } | null)?.project_id ?? null,
+    project_id: projectId,
     vendor_id: vendorId,
     source_email_id: emailId,
     // The email's own date when it gave one; otherwise the studio's SLA for

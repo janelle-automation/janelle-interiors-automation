@@ -98,6 +98,13 @@ export const env = {
     videoModel: optional('XAI_VIDEO_MODEL', 'grok-imagine-video-1.5'),
   },
 
+  // Renderings from OpenAI's GPT Image models. Empty until a key is set here
+  // or in Settings; without one this provider is simply not offered.
+  openai: {
+    apiKey: optional('OPENAI_API_KEY'),
+    imageModel: optional('OPENAI_IMAGE_MODEL', 'gpt-image-2'),
+  },
+
   // Free photoreal renderings: Cloudflare Workers AI (FLUX.1 schnell). The
   // free plan's daily allowance is blocked when used up, never billed.
   // Settings → AI & media overrides these per studio.
@@ -118,6 +125,8 @@ export const isSupabaseConfigured = () =>
 export const isAnthropicConfigured = () => Boolean(env.anthropic.apiKey);
 
 export const isGrokConfigured = () => Boolean(env.xai.apiKey);
+
+export const isOpenAiConfigured = () => Boolean(env.openai.apiKey);
 
 // `required` is kept for values we may enforce later; reference it so
 // strict unused checks stay quiet without changing behaviour.

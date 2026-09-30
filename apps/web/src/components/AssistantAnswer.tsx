@@ -1,4 +1,5 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { EXPORT_FORMATS, exportImage, saveBlob, type ExportFormat } from '../lib/imageExport';
 import { Link } from 'react-router-dom';
 import {
   assistantItemHref,
@@ -485,6 +486,82 @@ export function AttachedFiles({ files }: { files: { name: string; mimeType: stri
   );
 }
 
+/**
+ * Download a picture Jenny drew as PNG, JPG, JPEG, PDF or SVG.
+ *
+ * The file is fetched once (already cached from showing it) and converted in
+ * the browser, so choosing a format costs nothing on the server.
+ */
+function ImageDownloadMenu({ file, name }: { file: AssistantFile; name: string }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState<ExportFormat | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const box = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent | KeyboardEvent) => {
+      if (e instanceof KeyboardEvent ? e.key === 'Escape' : !box.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', close);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', close);
+    };
+  }, [open]);
+
+  async function pick(format: ExportFormat) {
+    setBusy(format);
+    setError(null);
+    try {
+      const source = await fetchPreviewFile(file);
+      const { blob, filename } = await exportImage(source, file.mimeType, format, name);
+      saveBlob(blob, filename);
+      setOpen(false);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <span ref={box} className="relative flex shrink-0 flex-col items-end gap-1">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="btn-primary btn-sm"
+      >
+        Download ▾
+      </button>
+      {open && (
+        <span
+          role="menu"
+          className="absolute right-0 top-full z-30 mt-1 w-56 overflow-hidden rounded-xl border border-line bg-surface py-1 text-left shadow-pop"
+        >
+          {EXPORT_FORMATS.map((f) => (
+            <button
+              key={f.id}
+              type="button"
+              role="menuitem"
+              disabled={busy !== null}
+              onClick={() => pick(f.id)}
+              className="flex w-full flex-col px-3 py-1.5 text-left hover:bg-sunk disabled:opacity-60"
+            >
+              <span className="text-[13px] font-medium text-ink">{busy === f.id ? `Preparing ${f.label}…` : f.label}</span>
+              <span className="text-[11.5px] text-ink-faint">{f.note}</span>
+            </button>
+          ))}
+        </span>
+      )}
+      {error && <span className="max-w-[16rem] text-right text-[12px] text-crit">{error}</span>}
+    </span>
+  );
+}
+
 // ── Pages and pictures ──────────────────────────────────────
 
 interface RenderedImage {
@@ -600,7 +677,7 @@ function PagePreview({ item, compact }: { item: AssistantItem; compact: boolean 
         <span className="min-w-0 truncate text-[13.5px] font-medium text-ink" title={item.title}>
           {item.title}
         </span>
-        <FileActions item={item} />
+        {item.preview === 'image' ? <ImageDownloadMenu file={file} name={stem} /> : <FileActions item={item} />}
       </div>
 
       {error ? (
@@ -632,9 +709,11 @@ function PagePreview({ item, compact }: { item: AssistantItem; compact: boolean 
               </a>
               <figcaption className="flex items-center justify-between gap-2 border-t border-line bg-surface px-2.5 py-1.5 text-[11.5px] text-ink-soft">
                 <span>{img.label}</span>
-                <a href={img.url} download={`${stem} - ${img.label}.png`} className="focusable rounded px-1 font-medium text-brass-deep hover:underline">
-                  Save image
-                </a>
+                {item.preview !== 'image' && (
+                  <a href={img.url} download={`${stem} - ${img.label}.png`} className="focusable rounded px-1 font-medium text-brass-deep hover:underline">
+                    Save image
+                  </a>
+                )}
               </figcaption>
             </figure>
           ))}
@@ -689,9 +768,15 @@ function ClipPreview({ item }: { item: AssistantItem }) {
 
 // ── The answer ──────────────────────────────────────────────
 
+/** An answer that is nothing but pictures Jenny drew — shown thumbnail-sized, so its bubble is too. */
+export function answerIsPictures(answer: AssistantAnswer | undefined): boolean {
+  return Boolean(answer?.items.length) && answer!.items.every((i) => i.kind === 'file' && i.preview === 'image');
+}
+
 /** Whether this answer wants the room a table needs. */
 export function answerIsWide(answer: AssistantAnswer | undefined): boolean {
   if (!answer?.items.length) return false;
+  if (answerIsPictures(answer)) return false;
   return Boolean(sharedColumns(answer.items.filter((i) => i.kind !== 'file'))) || answer.items.some((i) => i.kind === 'file');
 }
 
@@ -770,7 +855,14 @@ export function AssistantAnswerView({
         ))}
 
       {files.length > 0 && (
-        <div className="mt-2.5 divide-y divide-line rounded-lg border border-line bg-surface">
+        // A picture Jenny drew is shown thumbnail-sized, not stretched across the
+        // whole chat: at full width a 3:2 sheet was taller than the window.
+        // Clicking it opens it at full size.
+        <div
+          className={`mt-2.5 divide-y divide-line rounded-lg border border-line bg-surface ${
+            files.every((f) => f.preview === 'image') ? 'max-w-[34rem]' : ''
+          }`}
+        >
           {files.map((item, i) =>
             item.preview === 'video' ? (
               <ClipPreview key={i} item={item} />

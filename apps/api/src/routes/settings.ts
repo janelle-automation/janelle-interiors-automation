@@ -12,6 +12,11 @@ import {
 } from '../lib/aiSettings.js';
 import {
   clearXaiApiKey,
+  clearOpenAiApiKey,
+  looksLikeOpenAiKey,
+  openAiSettingsView,
+  saveOpenAiApiKey,
+  saveOpenAiModel,
   looksLikeXaiKey,
   saveXaiApiKey,
   saveXaiModel,
@@ -31,7 +36,15 @@ import {
   saveCloudflareCredentials,
   saveCloudflareModel,
 } from '../lib/aiSettings.js';
-import { CLOUDFLARE_IMAGE_MODELS, GROK_IMAGE_MODELS, IMAGE_MODELS, PICTURE_ENGINES, VIDEO_MODELS } from '@janelle/shared';
+import {
+  CLOUDFLARE_IMAGE_MODELS,
+  GROK_IMAGE_MODELS,
+  IMAGE_MODELS,
+  OPENAI_IMAGE_MODELS,
+  OPENAI_QUALITIES,
+  PICTURE_ENGINES,
+  VIDEO_MODELS,
+} from '@janelle/shared';
 import { readIngestSettings, saveIngestSettings } from '../lib/ingestSettings.js';
 import { runIngest } from '../services/ingest.js';
 import { gmailFor } from '../services/gmail.js';
@@ -218,6 +231,104 @@ settingsRouter.put(
     });
 
     res.json({ data: { ...(await xaiSettingsView(orgId)), imageModels: GROK_IMAGE_MODELS, videoModels: VIDEO_MODELS } });
+  }),
+);
+
+/**
+ * OpenAI (GPT Image) — renderings.
+ *
+ * A fourth provider on the same terms as the others: the key is encrypted at
+ * rest, never sent back (the screen gets the last four characters), and the
+ * model and quality are the studio's to choose because quality is what moves
+ * the price.
+ */
+async function openAiView(orgId: string) {
+  return { ...(await openAiSettingsView(orgId)), models: OPENAI_IMAGE_MODELS, qualities: OPENAI_QUALITIES };
+}
+
+settingsRouter.get(
+  '/openai',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await openAiView(orgId) });
+  }),
+);
+
+settingsRouter.put(
+  '/openai/key',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const apiKey = String(req.body?.apiKey ?? '').trim();
+    if (!looksLikeOpenAiKey(apiKey)) {
+      return res.status(400).json({
+        error: 'That does not look like an OpenAI API key',
+        detail: 'Keys begin with sk- and come from platform.openai.com/api-keys.',
+      });
+    }
+    await saveOpenAiApiKey(orgId, apiKey);
+
+    // The key never reaches the log — the last four says which one it was.
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.openai_key_set',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: { hint: apiKey.slice(-4) },
+    });
+    res.json({ data: await openAiView(orgId) });
+  }),
+);
+
+settingsRouter.delete(
+  '/openai/key',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    await clearOpenAiApiKey(orgId);
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.openai_key_cleared',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: {},
+    });
+    res.json({ data: await openAiView(orgId) });
+  }),
+);
+
+/** Which GPT Image model draws, and at what quality. Either may be sent alone. */
+settingsRouter.put(
+  '/openai/model',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const model = req.body?.model === undefined ? undefined : String(req.body.model);
+    const quality = req.body?.quality === undefined ? undefined : String(req.body.quality);
+    try {
+      await saveOpenAiModel(orgId, model, quality);
+    } catch (err) {
+      return res.status(400).json({ error: (err as Error).message });
+    }
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.openai_model_set',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: { model: model ?? null, quality: quality ?? null },
+    });
+    res.json({ data: await openAiView(orgId) });
   }),
 );
 

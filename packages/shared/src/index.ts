@@ -802,6 +802,11 @@ export interface PictureEngine {
 
 export const PICTURE_ENGINES: PictureEngine[] = [
   {
+    id: 'openai',
+    label: 'OpenAI GPT Image',
+    note: 'Photoreal renderings, and the best at keeping lettering and layouts accurate. Billed per image on the OpenAI key below; Cloudflare, Gemini and Claude step in if it fails.',
+  },
+  {
     id: 'cloudflare',
     label: 'Cloudflare FLUX — free photos',
     note: 'Photoreal in seconds on Cloudflare’s free daily allowance — FLUX.1 from words (~100–170 a day), FLUX.2 [klein] to transform an attached photo (~80 a day). Blocked, never billed, when used up; Claude sketches until it resets.',
@@ -913,6 +918,71 @@ export const GROK_IMAGE_MODELS: GrokImageModel[] = [
 ];
 
 export const DEFAULT_GROK_IMAGE_MODEL = 'grok-imagine-image-2.0';
+
+/**
+ * OpenAI's GPT Image models. Priced per image, and by quality and shape:
+ * `usd` is the price of a 1024×1024 image at each quality, and a wide or
+ * tall one (1536×1024 / 1024×1536) costs about half as much again.
+ */
+export type OpenAiQuality = 'low' | 'medium' | 'high';
+
+export interface OpenAiImageModel {
+  id: string;
+  label: string;
+  usd: Record<OpenAiQuality, number>;
+  /** The price is an estimate, not OpenAI's published figure. */
+  approx?: boolean;
+  note: string;
+}
+
+export const OPENAI_IMAGE_MODELS: OpenAiImageModel[] = [
+  {
+    id: 'gpt-image-2',
+    label: 'GPT Image 2',
+    usd: { low: 0.011, medium: 0.042, high: 0.167 },
+    approx: true,
+    note: 'Recommended. Draws clean, correctly spelled lettering and coherent layouts — the one for plans and boards. About 20–50 seconds a picture. Price shown is an estimate.',
+  },
+  {
+    id: 'chatgpt-image-latest',
+    label: 'ChatGPT Image (latest)',
+    usd: { low: 0.011, medium: 0.042, high: 0.167 },
+    approx: true,
+    note: 'The model ChatGPT itself draws with, always its newest. Best lettering and layout. Price shown is an estimate; OpenAI bills by usage.',
+  },
+  {
+    id: 'gpt-image-1.5',
+    label: 'GPT Image 1.5',
+    usd: { low: 0.009, medium: 0.034, high: 0.133 },
+    approx: true,
+    note: 'A step up from GPT Image 1 at a slightly lower price. Price shown is an estimate.',
+  },
+  {
+    id: 'gpt-image-1',
+    label: 'GPT Image 1',
+    usd: { low: 0.011, medium: 0.042, high: 0.167 },
+    note: 'The full model. Follows a long brief closely and draws legible text. Needs a verified OpenAI organization.',
+  },
+  {
+    id: 'gpt-image-1-mini',
+    label: 'GPT Image 1 mini',
+    usd: { low: 0.005, medium: 0.011, high: 0.036 },
+    note: 'About a quarter of the price, for drafts and iterating on a direction.',
+  },
+];
+
+export const DEFAULT_OPENAI_IMAGE_MODEL = 'gpt-image-2';
+export const DEFAULT_OPENAI_QUALITY: OpenAiQuality = 'medium';
+export const OPENAI_QUALITIES: { id: OpenAiQuality; label: string }[] = [
+  { id: 'low', label: 'Low — quickest, cheapest' },
+  { id: 'medium', label: 'Medium — good for most renders' },
+  { id: 'high', label: 'High — for the one a client sees' },
+];
+
+export function openAiImageCostUsd(model: string, quality: OpenAiQuality, wide = false, images = 1): number {
+  const base = OPENAI_IMAGE_MODELS.find((m) => m.id === model)?.usd[quality] ?? 0;
+  return base * (wide ? 1.5 : 1) * images;
+}
 
 export function grokImageCostUsd(model: string, images = 1): number {
   return (GROK_IMAGE_MODELS.find((m) => m.id === model)?.usdPerImage ?? 0) * images;
