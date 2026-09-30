@@ -14,9 +14,12 @@ import { isImageReady, isSketchReady, renderImage, sketchWithClaude, type ImageR
 import { createJob, jobsTableReady } from './mediaJobs.js';
 import { boardSpecs, composeBoard, studioName } from './board.js';
 import { resolveImageAi, resolvePictureEngine } from '../lib/aiSettings.js';
+import { brandSheet } from '../lib/brandSheet.js';
+import { generateOpenAiImage, isOpenAiReady } from './openaiImage.js';
 import { editWithCloudflare, isCloudflareReady, renderWithCloudflare } from './cloudflare.js';
 import { isFloorPlan, NAMED_A_PLAN, readPlanRooms, renderFloorPlan, renderPlanRooms, type RoomRender } from './floorPlan.js';
 import { sketchFloorPlanFromBrief } from './floorPlanLayout.js';
+import { FLOORING_PLAN, planFlooring, type FlooringPlanResult } from './flooringPlan.js';
 
 /**
  * Making a picture or a clip, in one place.
@@ -91,7 +94,7 @@ export async function videoSpentToday(db: SupabaseClient): Promise<number> {
 
 /** What each mode can do right now, for the composer and for a quote. */
 export interface ImagineOptions {
-  image: { ready: boolean; provider: 'grok' | 'gemini' | 'cloudflare' | 'claude' | null };
+  image: { ready: boolean; provider: 'openai' | 'grok' | 'gemini' | 'cloudflare' | 'claude' | null };
   video: {
     ready: boolean;
     model: string;
@@ -104,11 +107,13 @@ export interface ImagineOptions {
 }
 
 export async function imagineOptions(actor: ImagineActor): Promise<ImagineOptions> {
-  const [grok, gemini, claude, cloudflare, models, spent, jobsReady] = await Promise.all([
+  const [grok, gemini, claude, cloudflare, openai, engine, models, spent, jobsReady] = await Promise.all([
     isGrokReady(actor.orgId),
     isImageReady(actor.orgId),
     isSketchReady(actor.orgId),
     isCloudflareReady(actor.orgId),
+    isOpenAiReady(actor.orgId),
+    resolvePictureEngine(actor.orgId),
     grokModels(actor.orgId),
     videoSpentToday(actor.db),
     jobsTableReady(),
@@ -117,8 +122,22 @@ export async function imagineOptions(actor: ImagineActor): Promise<ImagineOption
   const seconds = clampSeconds(undefined, models.video);
   return {
     image: {
-      ready: grok || gemini || cloudflare || claude,
-      provider: grok ? 'grok' : gemini ? 'gemini' : cloudflare ? 'cloudflare' : claude ? 'claude' : null,
+      ready: openai || grok || gemini || cloudflare || claude,
+      // OpenAI leads only when the studio chose it in Settings.
+      provider:
+        openai && engine === 'openai'
+          ? 'openai'
+          : grok
+            ? 'grok'
+            : gemini
+              ? 'gemini'
+              : cloudflare
+                ? 'cloudflare'
+                : openai
+                  ? 'openai'
+                  : claude
+                    ? 'claude'
+                    : null,
     },
     video: {
       // Video is Grok only, and needs somewhere to write the job down.
@@ -164,6 +183,25 @@ export interface MadePicture {
  */
 /** Less than this left in the request and a Claude sketch cannot finish. */
 const SKETCH_MIN_MS = 12_000;
+
+/**
+ * What a flooring plan sheet must contain, said once. The brief names the
+ * deliverable; this says what makes one usable, and asks for accurate
+ * lettering because the labels are the point of the sheet.
+ */
+const FLOORING_POSTER =
+  'Draw this as one finished presentation sheet, viewed straight down (2D plan, no perspective): a landscape ' +
+  'page with the plan on the left and a panel on the right holding a flooring-materials legend (a swatch and ' +
+  'a name for each material), an installation-direction key, a material-transition key, and short notes. On ' +
+  'the plan: thick walls, door openings, every room labelled with its name and size, each floor filled with ' +
+  'its real material texture and pattern (plank, herringbone, tile grid, stone), arrows showing which way ' +
+  'planks and tiles run, and a marked transition strip wherever two materials meet. Render it as a soft, ' +
+  'refined designer presentation: warm muted palette, and light furniture, rugs, fixtures and plants drawn ' +
+  'in plan view so each room reads as a lived-in space while the flooring stays clearly visible. Add overall ' +
+  'dimension lines, a north arrow and a scale bar. Keep all lettering sharp, correctly spelled and legible. ' +
+  'The title block holds ONLY the sheet title, the scale and the north arrow: do NOT invent or show any ' +
+  'company or firm name, logo, address, phone number, website, project number, date, or initials anywhere ' +
+  'on the sheet. Leave a clear blank strip along the bottom edge.';
 
 const NO_TEXT ='Do not draw any text, labels, watermarks or dimension figures into the image.';
 
@@ -214,13 +252,75 @@ export async function makePicture(input: {
   // else and quietly skipped on failure — a brief that merely mentions a
   // floor plan without a proper room list just falls through to drawing
   // from words as it always did.
+  // A FLOORING plan is a different drawing from a furnished floor plan, and
+  // is drawn in code from Claude's design decisions, never furnished by an
+  // image model: what it shows is the floor (materials, lay direction,
+  // transitions, dimensions), and furnishing it put beds in dining rooms.
+  // Tried first; when it cannot be drawn the furnished path below still runs.
+  // With OpenAI connected, a flooring plan is drawn by its image model: it
+  // composes the whole sheet the way a designer's presentation does (open-plan
+  // rooms, real wall thickness, material textures, legend and notes), which
+  // the code-drawn version below cannot match. That one stays as the fallback
+  // and as the exact, dimensioned drawing. This request also skips the "no
+  // text" rule every other from-words picture carries: a plan is its labels.
+  const flooringBrief = !input.sources.length && FLOORING_PLAN.test(brief);
+  let flooringImage: Awaited<ReturnType<typeof generateOpenAiImage>> | null = null;
+  if (flooringBrief && (await isOpenAiReady(actor.orgId).catch(() => false))) {
+    flooringImage = await generateOpenAiImage(
+      {
+        prompt: `${brief}
+
+${FLOORING_POSTER}`,
+        aspectRatio: '3:2',
+        resolution: '2K',
+        // GPT Image 2 at medium draws clean lettering in 20–50s; it is given
+        // every second the request has.
+        quality: 'medium',
+        timeoutMs: Math.max(20_000, budgetMs - 1_000),
+      },
+      ctx,
+    ).catch((err) => {
+      console.warn('[imagine] OpenAI flooring plan unavailable:', (err as Error).message);
+      return null;
+    });
+    // Whatever firm the model put in the title block, the sheet carries the studio's own.
+    if (flooringImage) {
+      const branded = await brandSheet(flooringImage).catch((err) => {
+        console.warn('[imagine] could not brand the flooring plan:', (err as Error).message);
+        return null;
+      });
+      if (branded) flooringImage = { ...flooringImage, bytes: branded.bytes, mimeType: branded.mimeType };
+    }
+  }
+
+  let drawnFlooring: FlooringPlanResult | null = null;
+  if (flooringBrief && !flooringImage && budgetMs - (Date.now() - started) > 15_000 && (await isSketchReady(actor.orgId).catch(() => false))) {
+    drawnFlooring = await planFlooring(brief, ctx, Math.min(45_000, Math.round((budgetMs - (Date.now() - started)) * 0.85))).catch((err) => {
+      console.warn('[imagine] flooring plan unavailable:', (err as Error).message);
+      return null;
+    });
+  }
+
+  // A flooring plan is a sheet of exact labels. If neither the OpenAI drawing
+  // nor the code-drawn one could be made, a generic picture with "no text" is
+  // worse than an honest answer: it came back as a board of overlapping
+  // boxes marked "TBD — CONFIRM".
+  if (flooringBrief && !flooringImage && !drawnFlooring) {
+    return {
+      ok: false,
+      timedOut: true,
+      reason:
+        'The flooring plan did not finish in time. It usually takes 30–60 seconds — try again. It needs OpenAI (Settings → AI & media) or Claude connected.',
+    };
+  }
+
   let syntheticPlan = false;
   // The walled drawing's own rectangle within the schematic, excluding its
   // room-dimensions/flooring-legend panel — see renderFloorPlan's own note
   // on why the panel must never reach the image model. Unset for a real
   // uploaded plan, which has no such panel to exclude.
   let syntheticFurnishRegion: { x: number; y: number; width: number; height: number } | undefined;
-  if (!input.sources.length && NAMED_A_PLAN.test(brief)) {
+  if (!input.sources.length && !drawnFlooring && !flooringImage && NAMED_A_PLAN.test(brief)) {
     const schematic = await sketchFloorPlanFromBrief(brief, ctx, Math.min(20_000, budgetMs)).catch((err) => {
       console.warn('[imagine] floor plan schematic unavailable:', (err as Error).message);
       return null;
@@ -237,11 +337,12 @@ export async function makePicture(input: {
   // Settings → "Drawn by" decides who goes first. After that the order is
   // always the same: a real photograph from whoever can make one, and the
   // Claude sketch last — it cannot photograph, but it beats an error.
-  const [grok, gemini, claude, cloudflare, engine, geminiAi] = await Promise.all([
+  const [grok, gemini, claude, cloudflare, openai, engine, geminiAi] = await Promise.all([
     isGrokReady(actor.orgId),
     isImageReady(actor.orgId),
     isSketchReady(actor.orgId),
     isCloudflareReady(actor.orgId),
+    isOpenAiReady(actor.orgId),
     resolvePictureEngine(actor.orgId),
     resolveImageAi(actor.orgId),
   ]);
@@ -254,6 +355,26 @@ export async function makePicture(input: {
   /** A floor plan's rooms in perspective, made alongside the plan itself. */
   let roomRenders: RoomRender[] = [];
   let mode: 'edit' | 'generate' = input.sources.length ? 'edit' : 'generate';
+  if (flooringImage) {
+    picture = {
+      bytes: flooringImage.bytes,
+      mimeType: flooringImage.mimeType,
+      model: flooringImage.model,
+      note:
+        'A flooring plan drawn as a presentation sheet. Room sizes and dimensions are illustrative; ask for the dimensioned drawing, or verify on site, before ordering.',
+      plan: true,
+    };
+    mode = 'generate';
+  } else if (drawnFlooring) {
+    picture = {
+      bytes: Buffer.from(drawnFlooring.svg, 'utf8'),
+      mimeType: 'image/svg+xml',
+      model: 'Claude design · vector drawing',
+      note:
+        'A flooring plan drawn from the design: each material laid at its own size and direction, brass strips where one flooring meets another, and dimensions from the drawn walls. Verify on site before ordering.',
+      plan: true,
+    };
+  }
 
   // The brief first, then how to treat the attachment, then the one rule
   // every render wants. Built once so every provider is told the same.
@@ -269,6 +390,25 @@ export async function makePicture(input: {
       // The edit endpoint takes exactly one picture, so the first wins and
       // the rest are named in the reply rather than dropped quietly.
       const drawn = await generateImage(
+        { prompt: instructions, source: input.sources[0] ?? null, aspectRatio: editing ? undefined : aspect, resolution, timeoutMs: left },
+        ctx,
+      );
+      ignored.push(...input.sources.slice(1).map((r) => r.label ?? 'an attachment'));
+      mode = drawn.mode;
+      return drawn;
+    },
+  };
+  // OpenAI GPT Image: draws from words, or edits one attached photo. A floor
+  // plan is left to the plan renderer below (it lays the drawing's own
+  // lettering back over the result, which an edit here would not).
+  const viaOpenAi: Attempt = {
+    name: 'OpenAI',
+    minMs: 8_000,
+    run: async (left) => {
+      if (editing && cloudflare && (await isFloorPlan(brief, input.sources[0], ctx))) {
+        throw new Error('a floor plan is furnished by the plan renderer');
+      }
+      const drawn = await generateOpenAiImage(
         { prompt: instructions, source: input.sources[0] ?? null, aspectRatio: editing ? undefined : aspect, resolution, timeoutMs: left },
         ctx,
       );
@@ -340,16 +480,19 @@ export async function makePicture(input: {
     // Cloudflare first when chosen, or whenever Gemini cannot photograph —
     // it edits an attached photo as well as drawing from words.
     const cloudflareFirst = cloudflare && (engine === 'cloudflare' || !geminiPhotographs);
+    // Chosen in Settings → it draws first; otherwise it is a fallback, before the sketch.
+    if (openai && engine === 'openai') chain.push(viaOpenAi);
     if (cloudflareFirst) chain.push(viaCloudflare);
     if (grok) chain.push(viaGrok);
     if (geminiPhotographs) chain.push(viaGemini);
     if (cloudflare && !cloudflareFirst) chain.push(viaCloudflare);
     // Flash Lite draws rather than photographs: after every photo source.
     if (gemini && !geminiPhotographs) chain.push(viaGemini);
+    if (openai && engine !== 'openai') chain.push(viaOpenAi);
     if (claude) chain.push(viaClaude());
   }
 
-  if (!chain.length) {
+  if (!chain.length && !picture) {
     return {
       ok: false,
       reason:
@@ -360,7 +503,7 @@ export async function makePicture(input: {
   // The board's words, pulled from the brief while the picture renders —
   // in parallel, so the board costs no extra wall-clock. A failure here
   // only means the picture comes back bare.
-  const wantBoard = input.board !== false && !editing && claude;
+  const wantBoard = input.board !== false && !editing && claude && !drawnFlooring && !flooringImage;
   const specsPending = wantBoard
     ? Promise.all([boardSpecs(brief, ctx, Math.min(20_000, budgetMs)), studioName(actor.orgId)]).catch((err) => {
         console.warn('[imagine] board specs unavailable:', (err as Error).message);
@@ -370,7 +513,7 @@ export async function makePicture(input: {
 
   const failures: string[] = [];
   let timedOut = false;
-  for (const attempt of chain) {
+  for (const attempt of picture ? [] : chain) {
     const left = budgetMs - (Date.now() - started);
     if (left < attempt.minMs) {
       timedOut = true;
@@ -433,7 +576,7 @@ export async function makePicture(input: {
       ? 'jpg'
       : 'png';
   const stem =
-    (picture.plan ? 'Furnished Floor Plan' : '') ||
+    (picture.plan ? (drawnFlooring || flooringImage ? 'Flooring Plan' : 'Furnished Floor Plan') : '') ||
     (board && specs?.[0]?.title ? `${specs[0].title} Board` : '') ||
     brief.replace(/[^\w\s-]+/g, ' ').replace(/\s+/g, ' ').trim().split(' ').slice(0, 6).join(' ') ||
     'Rendering';

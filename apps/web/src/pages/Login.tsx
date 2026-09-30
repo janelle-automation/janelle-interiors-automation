@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react';
+import { BrandLogo } from '../components/BrandLogo';
 import { supabase } from '../lib/supabase';
 import { SIGNED_OUT_REASON } from '../lib/api';
 import { PasswordInput } from '../components/ui';
@@ -76,12 +77,9 @@ export default function Login() {
   return (
     <div className="grid min-h-screen place-items-center px-6">
       <div className="w-full max-w-sm">
-        <div className="mb-8 flex items-center gap-3">
-          <div className="grid h-11 w-11 place-items-center rounded-xl bg-brass text-xl font-bold text-white">J</div>
-          <div>
-            <div className="text-[16px] font-semibold text-ink">Janelle Interiors</div>
-            <div className="text-[12px] text-ink-faint">Workflow System</div>
-          </div>
+        <div className="mb-8 flex flex-col items-center gap-1">
+          <BrandLogo className="h-24 text-ink" />
+          <div className="text-center text-[12px] text-ink-faint">Workflow System</div>
         </div>
 
         <div className="card p-7">

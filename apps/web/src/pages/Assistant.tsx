@@ -36,8 +36,16 @@ function useFillsViewport<T extends HTMLElement>() {
     if (!el) return;
 
     const measure = () => {
-      const { top } = el.getBoundingClientRect();
-      const next = Math.max(MIN_CHAT_PX, Math.round(window.innerHeight - top - BOTTOM_GAP_PX));
+      // Where it starts on the PAGE, not in the window. getBoundingClientRect
+      // is window-relative, so once the page had scrolled even slightly the
+      // top read smaller and the card grew by exactly the scroll distance;
+      // that overflowed the window, kept the page scrolled, and left the
+      // composer below the fold — and it stayed that way until a reload.
+      // The two pixels of slack stop rounding from tipping the page into
+      // overflow, whose scrollbar narrows the page and re-wraps the heading
+      // above, which moves the top and starts the measuring over.
+      const top = el.getBoundingClientRect().top + window.scrollY;
+      const next = Math.max(MIN_CHAT_PX, Math.floor(window.innerHeight - top - BOTTOM_GAP_PX - 2));
       setHeight((prev) => (prev !== null && Math.abs(prev - next) < 2 ? prev : next));
     };
 

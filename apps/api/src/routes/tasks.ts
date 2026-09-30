@@ -4,6 +4,7 @@ import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { hasEmailOwner, hasSubtasks, hasTaskAssignment, hasTaskCompletion } from '../lib/columns.js';
 import { supabaseAdmin } from '../lib/supabase.js';
+import { markTaskChecked } from '../services/tasks.js';
 
 export const tasksRouter = Router();
 tasksRouter.use(requireAuth);
@@ -319,6 +320,11 @@ tasksRouter.delete(
 
     const { error } = await db.from('tasks').delete().eq('id', req.params.id);
     if (error) throw new Error(error.message);
+
+    // Deleted on purpose: the email it came from must not raise it again the
+    // next time the mail is scanned.
+    const sourceEmail = (task as { source_email_id: string | null }).source_email_id;
+    if (sourceEmail) await markTaskChecked(sourceEmail);
 
     await db.from('activity_log').insert({
       org_id: orgId,

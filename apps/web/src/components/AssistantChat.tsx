@@ -5,7 +5,7 @@ import { useAssistant, type AttachedFile, type ChatMessage } from '../context/As
 import { api } from '../lib/api';
 import { useConfirmAction } from '../lib/queries';
 import { bestHearing, listen, speak, type MicLevel, type StopListening } from '../lib/speech';
-import { AssistantAnswerView, AttachedFiles, answerIsWide, sizeLabel } from './AssistantAnswer';
+import { AssistantAnswerView, AttachedFiles, answerIsPictures, answerIsWide, sizeLabel } from './AssistantAnswer';
 import { useImagineOptions } from '../lib/queries';
 import { readableAttachment } from '../lib/attachments';
 import { AssistantGuide } from './AssistantGuide';
@@ -382,7 +382,13 @@ function MessageView({ message, compact }: { message: ChatMessage; compact: bool
   }
 
   const briefing = message.kind === 'briefing';
-  const width = compact || answerIsWide(message.answer) ? 'w-full' : message.answer?.items.length ? 'w-full max-w-[40rem]' : 'max-w-[85%]';
+  const width = compact || answerIsWide(message.answer)
+    ? 'w-full'
+    : answerIsPictures(message.answer)
+      ? 'w-full max-w-[38rem]'
+      : message.answer?.items.length
+        ? 'w-full max-w-[40rem]'
+        : 'max-w-[85%]';
 
   return (
     <div className="group flex gap-2.5">

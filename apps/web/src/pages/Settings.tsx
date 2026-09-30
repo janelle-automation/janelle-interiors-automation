@@ -34,6 +34,10 @@ import {
   useClearGeminiKey,
   useSetGeminiModel,
   useSetPictureEngine,
+  useOpenAiConfig,
+  useSetOpenAiKey,
+  useClearOpenAiKey,
+  useSetOpenAiModel,
   useCloudflareConfig,
   useSetCloudflareKey,
   useClearCloudflareKey,
@@ -585,36 +589,34 @@ function AiSetupCard() {
 }
 
 /**
- * Renderings and boards: who draws them, and the Gemini account.
+ * Which provider draws pictures.
  *
- * The key and model were only settable in the server environment, so a
- * studio stuck on a model that cannot photograph had no way out without a
- * deploy. When Gemini fails or has no key, Claude draws a sketch instead.
+ * One choice, with every provider's state beside it, so nobody has to open
+ * four cards to learn why a render came from somewhere they did not expect.
+ * The chosen provider draws first; the others that are connected step in, in
+ * a fixed order, if it fails or has run out. Claude sketches when none can.
  */
-function GeminiSetupCard() {
-  const config = useGeminiConfig();
-  const setKey = useSetGeminiKey();
-  const clearKey = useClearGeminiKey();
-  const setModel = useSetGeminiModel();
+function PictureProviderCard() {
+  const gemini = useGeminiConfig();
+  const openai = useOpenAiConfig();
+  const cloudflare = useCloudflareConfig();
+  const media = useMediaConfig();
   const setEngine = useSetPictureEngine();
 
-  if (config.isError) return null;
-  const data = config.data;
+  if (gemini.isError) return null;
+  const data = gemini.data;
+  const providers: { name: string; on: boolean | undefined }[] = [
+    { name: 'OpenAI', on: openai.data?.configured },
+    { name: 'Cloudflare (free)', on: cloudflare.data?.configured },
+    { name: 'Gemini', on: gemini.data?.configured },
+    { name: 'Grok', on: media.data?.configured },
+  ];
 
   return (
     <SettingsCard
-      icon={<IconPrompt width={18} height={18} />}
-      title="Renderings & boards"
-      description={
-        <>
-          Who draws the picture on a board, and the Gemini key. Keys from{' '}
-          <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="font-medium text-brass hover:underline">
-            aistudio.google.com
-          </a>
-          .
-        </>
-      }
-      status={data && <Pill tone={data.configured ? 'good' : 'warn'}>{data.configured ? 'Gemini connected' : 'No Gemini key'}</Pill>}
+      icon={<IconBoard width={18} height={18} />}
+      title="Who draws pictures"
+      description="Renderings, boards and Jenny's Image mode. The one you pick draws first; the others that are connected step in if it fails."
     >
       {!data ? (
         <p className="text-[13px] text-ink-faint">Loading…</p>
@@ -629,6 +631,126 @@ function GeminiSetupCard() {
             pending={setEngine.isPending}
             onChange={(e) => setEngine.mutate(e)}
           />
+          <div className="flex flex-wrap gap-2">
+            {providers.map((p) => (
+              <Pill key={p.name} tone={p.on ? 'good' : 'neutral'}>
+                {p.name}: {p.on === undefined ? '…' : p.on ? 'connected' : 'no key'}
+              </Pill>
+            ))}
+          </div>
+        </div>
+      )}
+      <ErrorLine error={setEngine.error as Error | null} />
+    </SettingsCard>
+  );
+}
+
+/**
+ * OpenAI GPT Image — renderings, billed per image on the studio's OpenAI
+ * account. Model and quality are chosen here because quality moves the price
+ * more than anything else.
+ */
+function OpenAiSetupCard() {
+  const config = useOpenAiConfig();
+  const setKey = useSetOpenAiKey();
+  const clearKey = useClearOpenAiKey();
+  const setModel = useSetOpenAiModel();
+
+  if (config.isError) return null;
+  const data = config.data;
+  const model = data?.models.find((m) => m.id === data.imageModel);
+
+  return (
+    <SettingsCard
+      icon={<IconPrompt width={18} height={18} />}
+      title="Photos — OpenAI"
+      description={
+        <>
+          Photoreal renderings with GPT Image, billed per image. Keys from{' '}
+          <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer" className="font-medium text-brass hover:underline">
+            platform.openai.com
+          </a>
+          .
+        </>
+      }
+      status={data && <Connected on={data.configured} />}
+    >
+      {!data ? (
+        <p className="text-[13px] text-ink-faint">Loading…</p>
+      ) : (
+        <div className="space-y-4">
+          <KeyField
+            id="openai-key"
+            placeholder="sk-…"
+            view={data}
+            saving={setKey.isPending}
+            clearing={clearKey.isPending}
+            onSave={(key, done) => setKey.mutate(key, { onSuccess: done })}
+            onClear={() => clearKey.mutate(undefined)}
+          />
+          {data.source === 'environment' && (
+            <Hint>Using OPENAI_API_KEY from the server. A key saved here replaces it.</Hint>
+          )}
+          <ModelSelect
+            id="openai-model"
+            label="Image model"
+            value={data.imageModel}
+            options={data.models.map((m) => ({ id: m.id, label: `${m.label} — ${m.approx ? "≈" : ""}${usdEach(m.usd[data.quality])} each` }))}
+            note={model?.note}
+            pending={setModel.isPending}
+            onChange={(m) => setModel.mutate({ model: m })}
+          />
+          <ModelSelect
+            id="openai-quality"
+            label="Quality"
+            value={data.quality}
+            options={data.qualities}
+            note="Price is per image at this quality; a wide or tall picture costs about half as much again."
+            pending={setModel.isPending}
+            onChange={(q) => setModel.mutate({ quality: q })}
+          />
+        </div>
+      )}
+      <ErrorLine error={(setKey.error ?? clearKey.error ?? setModel.error) as Error | null} />
+    </SettingsCard>
+  );
+}
+
+/**
+ * Renderings and boards: who draws them, and the Gemini account.
+ *
+ * The key and model were only settable in the server environment, so a
+ * studio stuck on a model that cannot photograph had no way out without a
+ * deploy. When Gemini fails or has no key, Claude draws a sketch instead.
+ */
+function GeminiSetupCard() {
+  const config = useGeminiConfig();
+  const setKey = useSetGeminiKey();
+  const clearKey = useClearGeminiKey();
+  const setModel = useSetGeminiModel();
+
+  if (config.isError) return null;
+  const data = config.data;
+
+  return (
+    <SettingsCard
+      icon={<IconPrompt width={18} height={18} />}
+      title="Renderings & boards — Gemini"
+      description={
+        <>
+          The Gemini key and model. Keys from{' '}
+          <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="font-medium text-brass hover:underline">
+            aistudio.google.com
+          </a>
+          .
+        </>
+      }
+      status={data && <Pill tone={data.configured ? 'good' : 'warn'}>{data.configured ? 'Gemini connected' : 'No Gemini key'}</Pill>}
+    >
+      {!data ? (
+        <p className="text-[13px] text-ink-faint">Loading…</p>
+      ) : (
+        <div className="space-y-4">
           <KeyField
             id="gemini-key"
             placeholder="AIza…"
@@ -652,7 +774,7 @@ function GeminiSetupCard() {
           />
         </div>
       )}
-      <ErrorLine error={(setKey.error ?? clearKey.error ?? setModel.error ?? setEngine.error) as Error | null} />
+      <ErrorLine error={(setKey.error ?? clearKey.error ?? setModel.error) as Error | null} />
     </SettingsCard>
   );
 }
@@ -1418,6 +1540,8 @@ export default function Settings() {
         {tab === 'ai' && (
           <>
             <AiSetupCard />
+            <PictureProviderCard />
+            <OpenAiSetupCard />
             <GeminiSetupCard />
             <CloudflareSetupCard />
             <MediaSetupCard />

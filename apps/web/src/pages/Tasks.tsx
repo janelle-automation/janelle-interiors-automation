@@ -691,11 +691,11 @@ function Board({
               e.preventDefault();
               drop(col.status);
             }}
-            className={`rounded-2xl border p-3 transition-colors ${
+            className={`flex flex-col rounded-2xl border p-3 transition-colors sm:h-[calc(100vh-16rem)] sm:min-h-[20rem] ${
               over === col.status ? 'border-brass bg-brass/5' : 'border-line-soft bg-sunk/40'
             }`}
           >
-            <header className="mb-3 flex items-center gap-2 px-1">
+            <header className="mb-3 flex shrink-0 items-center gap-2 px-1">
               <span
                 className={`h-2 w-2 shrink-0 rounded-full ${COLUMN_DOT[col.status] ?? 'bg-ink-faint'}`}
                 aria-hidden="true"
@@ -708,7 +708,8 @@ function Board({
               </span>
             </header>
 
-            <ul className="flex flex-col gap-2.5">
+            {/* The column is as tall as the screen allows and its cards scroll inside it, so the page itself does not scroll. */}
+            <ul className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto overscroll-contain pr-1 [&>li]:shrink-0">
               {items.map((t) => (
                 <BoardCard
                   key={t.id}
