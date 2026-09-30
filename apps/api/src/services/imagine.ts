@@ -15,6 +15,7 @@ import { createJob, jobsTableReady } from './mediaJobs.js';
 import { boardSpecs, composeBoard, studioName } from './board.js';
 import { resolveImageAi, resolvePictureEngine } from '../lib/aiSettings.js';
 import { brandSheet } from '../lib/brandSheet.js';
+import { compactImage } from '../lib/compactImage.js';
 import { generateOpenAiImage, isOpenAiReady } from './openaiImage.js';
 import { editWithCloudflare, isCloudflareReady, renderWithCloudflare } from './cloudflare.js';
 import { isFloorPlan, NAMED_A_PLAN, readPlanRooms, renderFloorPlan, renderPlanRooms, type RoomRender } from './floorPlan.js';
@@ -559,6 +560,9 @@ ${FLOORING_POSTER}`,
 
   // Into the studio's board format: the picture large, the specifications
   // beside it, the materials beneath, the studio at the foot.
+  // Any provider's big PNG becomes a compact JPEG before it is embedded in a
+  // board: an 8 MB board could be shown but not downloaded.
+  if (picture && !picture.mimeType.includes('svg')) picture = { ...picture, ...(await compactImage(picture)) };
   const specs = await specsPending;
   let board = false;
   if (specs?.[0]) {

@@ -2,6 +2,7 @@ import { openAiImageCostUsd, type OpenAiQuality } from '@janelle/shared';
 import { resolveOpenAi } from '../lib/aiSettings.js';
 import { resolveOrgId } from '../lib/org.js';
 import { supabaseAdmin } from '../lib/supabase.js';
+import { compactImage } from '../lib/compactImage.js';
 import { AI_USAGE_ACTION, type CallContext } from './anthropic.js';
 import { RenderTimeout, type GeneratedImage, type ImageRequest } from './grok.js';
 
@@ -192,9 +193,10 @@ export async function generateOpenAiImage(
     if (!bytes?.length) throw new Error('No image came back from OpenAI.');
 
     await record(ctx, model, Date.now() - started, null, openAiImageCostUsd(model, quality, wide && !req.source));
+    const compact = await compactImage({ bytes, mimeType: 'image/png' });
     return {
-      bytes,
-      mimeType: 'image/png',
+      bytes: compact.bytes,
+      mimeType: compact.mimeType,
       model,
       mode,
       note: typeof item?.revised_prompt === 'string' && item.revised_prompt.trim() ? item.revised_prompt.trim() : null,
