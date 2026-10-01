@@ -1,17 +1,21 @@
-import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Fragment, memo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
+  TASK_CATEGORIES,
+  TASK_CATEGORY_LABELS,
   TASK_KIND_LABELS,
   TASK_STATUS_LABELS,
   TASK_STATUSES,
   canManageTasks,
+  defaultTaskCategory,
   type FollowUpType,
+  type TaskCategory,
   type TaskKind,
   type TaskStatus,
 } from '@janelle/shared';
 import { Page, PageHeading, Card, Pill, shortDate, ConfirmDialog } from '../components/ui';
 import { ScopeToggle, useScope } from '../components/ScopeToggle';
-import { IconBoard, IconEye, IconEyeOff, IconList, IconMailScan } from '../components/icons';
+import { IconBoard, IconEye, IconSearch, IconEyeOff, IconList, IconMailScan } from '../components/icons';
 import { useAuth } from '../context/AuthContext';
 import {
   daysEarly, useAddSubtask, useBackfillTasks, useDeleteTask, useTaskDetail, useTasks, useTeam, useUpdateTask,
@@ -130,6 +134,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 function TaskPanel({ id, onClose }: { id: string; onClose: () => void }) {
   const { data, isLoading, isError, error } = useTaskDetail(id);
   const addSubtask = useAddSubtask(id);
+  const updateTask = useUpdateTask();
   const [draft, setDraft] = useState('');
 
   // Escape closes it, like every other overlay the studio uses.
@@ -211,6 +216,22 @@ function TaskPanel({ id, onClose }: { id: string; onClose: () => void }) {
                 {t.due_date ? shortDate(t.due_date) : <span className="text-warn">No due date</span>}
               </Field>
               <Field label="Project">{t.projects?.name ?? t.vendors?.name ?? '—'}</Field>
+              <Field label="Category">
+                <select
+                  aria-label="Task category"
+                  className="focusable -ml-1 rounded-md border border-line bg-surface px-1.5 py-0.5 text-[13.5px] text-ink"
+                  value={t.category ?? defaultTaskCategory(t.kind, t.seat)}
+                  disabled={updateTask.isPending}
+                  onChange={(e) => updateTask.mutate({ id, category: e.target.value as TaskCategory })}
+                >
+                  {TASK_CATEGORIES.map((c) => (
+                    <option key={c} value={c}>{TASK_CATEGORY_LABELS[c]}</option>
+                  ))}
+                </select>
+                {updateTask.isError && (
+                  <span className="mt-1 block text-[12px] text-crit">{(updateTask.error as Error).message}</span>
+                )}
+              </Field>
               <Field label="Raised">{shortDate(t.created_at)}</Field>
             </dl>
 
@@ -475,7 +496,7 @@ const BoardCard = memo(function BoardCard({
         <span className="flex min-w-0 items-center gap-1.5">
           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${KIND_DOT[t.kind]}`} aria-hidden="true" />
           <span className="truncate text-[10px] font-bold uppercase tracking-[0.07em] text-ink-faint">
-            {TASK_KIND_LABELS[t.kind]}
+            {TASK_CATEGORY_LABELS[t.category]} · {TASK_KIND_LABELS[t.kind]}
           </span>
         </span>
         {t.overdue && <Tag tone="crit">Overdue</Tag>}
@@ -691,11 +712,11 @@ function Board({
               e.preventDefault();
               drop(col.status);
             }}
-            className={`flex flex-col rounded-2xl border p-3 transition-colors sm:h-[calc(100vh-16rem)] sm:min-h-[20rem] ${
+            className={`rounded-2xl border p-3 transition-colors ${
               over === col.status ? 'border-brass bg-brass/5' : 'border-line-soft bg-sunk/40'
             }`}
           >
-            <header className="mb-3 flex shrink-0 items-center gap-2 px-1">
+            <header className="mb-3 flex items-center gap-2 px-1">
               <span
                 className={`h-2 w-2 shrink-0 rounded-full ${COLUMN_DOT[col.status] ?? 'bg-ink-faint'}`}
                 aria-hidden="true"
@@ -709,7 +730,7 @@ function Board({
             </header>
 
             {/* The column is as tall as the screen allows and its cards scroll inside it, so the page itself does not scroll. */}
-            <ul className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto overscroll-contain pr-1 [&>li]:shrink-0">
+            <ul className="flex flex-col gap-2.5">
               {items.map((t) => (
                 <BoardCard
                   key={t.id}
@@ -790,16 +811,18 @@ interface TaskFilters {
   person: string;
   /** Empty means every status. */
   statuses: TaskStatus[];
+  /** Empty means every category. */
+  categories: TaskCategory[];
   due: DueFilter;
   from: string;
   to: string;
 }
 
-const NO_FILTERS: TaskFilters = { person: '', statuses: [], due: 'any', from: '', to: '' };
+const NO_FILTERS: TaskFilters = { person: '', statuses: [], categories: [], due: 'any', from: '', to: '' };
 
 /** How many filters are switched on — the number on the button. */
 function activeFilterCount(f: TaskFilters): number {
-  return (f.person ? 1 : 0) + (f.statuses.length ? 1 : 0) + (f.due !== 'any' ? 1 : 0);
+  return (f.person ? 1 : 0) + (f.statuses.length ? 1 : 0) + (f.categories.length ? 1 : 0) + (f.due !== 'any' ? 1 : 0);
 }
 
 /** A local calendar date as YYYY-MM-DD — what `due_date` is stored as. */
@@ -968,6 +991,30 @@ function TaskFilterMenu({
             </div>
 
             <div>
+              <span className={label}>Category</span>
+              <div className="flex flex-wrap gap-1.5">
+                {TASK_CATEGORIES.map((c) => {
+                  const on = filters.categories.includes(c);
+                  return (
+                    <button
+                      key={c}
+                      type="button"
+                      aria-pressed={on}
+                      onClick={() =>
+                        set({ categories: on ? filters.categories.filter((x) => x !== c) : [...filters.categories, c] })
+                      }
+                      className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                        on ? 'border-brass bg-brass/15 text-ink' : 'border-line text-ink-soft hover:border-ink-faint hover:text-ink'
+                      }`}
+                    >
+                      {TASK_CATEGORY_LABELS[c]}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div>
               <label className={label} htmlFor="filter-due">Due</label>
               <select
                 id="filter-due"
@@ -1118,9 +1165,22 @@ export default function Tasks() {
     (filters.person === 'unassigned' ? !t.assignedTo : t.assignedTo === filters.person);
   const base = filters.person ? tasks : scope === 'mine' ? tasks.filter(isMine) : tasks;
   const byStatus = (t: TaskView) => !filters.statuses.length || filters.statuses.includes(t.status);
-  const scoped = base.filter((t) => byPerson(t) && byStatus(t) && dueMatches(t, filters));
+  const byCategory = (t: TaskView) => !filters.categories.length || filters.categories.includes(t.category);
+  // Every word typed has to appear somewhere on the task, in any order, so
+  // "lemon tile" finds "Chase Home Depot for delayed tile … Lemon Residence".
+  const [search, setSearch] = useState('');
+  const words = search.toLowerCase().split(/\s+/).filter(Boolean);
+  const bySearch = (t: TaskView) => {
+    if (!words.length) return true;
+    const hay = [
+      t.title, t.detail, t.nextStep, t.project, t.assignee,
+      TASK_CATEGORY_LABELS[t.category], TASK_KIND_LABELS[t.kind], TASK_STATUS_LABELS[t.status],
+    ].join(' ').toLowerCase();
+    return words.every((w) => hay.includes(w));
+  };
+  const scoped = base.filter((t) => byPerson(t) && byStatus(t) && byCategory(t) && bySearch(t) && dueMatches(t, filters));
   const unfilteredCount = base.length;
-  const filtering = activeFilterCount(filters) > 0;
+  const filtering = activeFilterCount(filters) > 0 || words.length > 0;
   const mineCount = tasks.filter((t) => isMine(t) && OPEN_STATUSES.includes(t.status)).length;
   const allCount = tasks.filter((t) => OPEN_STATUSES.includes(t.status)).length;
 
@@ -1173,6 +1233,22 @@ export default function Tasks() {
         sub={view === 'board' ? 'Drag a card to Done, or use its ✓✓ button, to complete it.' : undefined}
         action={
           <div className="flex items-center gap-2">
+            <div className="relative">
+              <IconSearch
+                width={15}
+                height={15}
+                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-faint"
+              />
+              <input
+                type="search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                onKeyDown={(e) => e.key === 'Escape' && setSearch('')}
+                placeholder="Search tasks"
+                aria-label="Search tasks"
+                className="focusable h-8 w-36 rounded-lg border border-line bg-surface pl-8 pr-2 text-[13px] text-ink placeholder:text-ink-faint focus:border-brass sm:w-56"
+              />
+            </div>
             <ScopeToggle mine={mineCount} all={allCount} />
             <TaskFilterMenu
               filters={filters}
@@ -1311,80 +1387,94 @@ export default function Tasks() {
                 : 'No open tasks. They appear here as the system reads email and spots work that needs doing.'}
             </li>
           )}
-          {visible.map((t) => (
-            <li key={t.id} className="flex flex-col gap-3 px-5 py-5 sm:flex-row sm:items-center">
-              <div className="flex items-center gap-3 sm:w-40">
-                <Pill tone={tone[t.kind]}>{TASK_KIND_LABELS[t.kind]}</Pill>
-              </div>
+          {TASK_CATEGORIES.map((c) => {
+            const group = visible.filter((t) => t.category === c);
+            if (!group.length) return null;
+            return (
+              <Fragment key={c}>
+                <li className="flex items-center justify-between bg-sunk px-5 py-2">
+                  <h3 className="text-[11.5px] font-bold uppercase tracking-[0.07em] text-ink-soft">
+                    {TASK_CATEGORY_LABELS[c]}
+                  </h3>
+                  <span className="text-[11.5px] text-ink-faint">{group.length}</span>
+                </li>
+                {group.map((t) => (
+                <li key={t.id} className="flex flex-col gap-3 px-5 py-5 sm:flex-row sm:items-center">
+                  <div className="flex items-center gap-3 sm:w-40">
+                    <Pill tone={tone[t.kind]}>{TASK_KIND_LABELS[t.kind]}</Pill>
+                  </div>
 
-              <div className="min-w-0 flex-1">
-                <div className="text-[14px] font-medium text-ink">{t.title}</div>
-                {t.detail && <div className="text-[13px] text-ink-soft">{t.detail}</div>}
-                <div className="mt-0.5 text-[11px] text-ink-faint">
-                  {t.project} · raised {t.age}
-                  {t.due && <> · due {shortDate(t.due)}</>}
-                  {t.status === 'done' && t.completedAt ? (
-                    <>
-                      {' '}· done {shortDate(t.completedAt)}
-                      {finishedLabel(t.daysEarly) && <>, {finishedLabel(t.daysEarly)}</>}
-                      {t.closedNote && <span title={t.closedNote}> · closed automatically</span>}
-                    </>
-                  ) : (
-                    t.status !== 'open' && <> · {TASK_STATUS_LABELS[t.status]}</>
-                  )}
-                </div>
-              </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[14px] font-medium text-ink">{t.title}</div>
+                    {t.detail && <div className="text-[13px] text-ink-soft">{t.detail}</div>}
+                    <div className="mt-0.5 text-[11px] text-ink-faint">
+                      {t.project} · raised {t.age}
+                      {t.due && <> · due {shortDate(t.due)}</>}
+                      {t.status === 'done' && t.completedAt ? (
+                        <>
+                          {' '}· done {shortDate(t.completedAt)}
+                          {finishedLabel(t.daysEarly) && <>, {finishedLabel(t.daysEarly)}</>}
+                          {t.closedNote && <span title={t.closedNote}> · closed automatically</span>}
+                        </>
+                      ) : (
+                        t.status !== 'open' && <> · {TASK_STATUS_LABELS[t.status]}</>
+                      )}
+                    </div>
+                  </div>
 
-              <div className="flex items-center gap-2 self-start sm:self-auto">
-                <span
-                  className={`grid h-7 w-7 shrink-0 place-items-center rounded-full text-[12px] font-bold ${
-                    t.assignedTo ? 'bg-brass/10 text-brass-deep' : 'bg-sunk text-ink-faint'
-                  }`}
-                  title={t.assignee}
-                >
-                  {t.assignedTo ? t.assignee.slice(0, 1).toUpperCase() : '?'}
-                </span>
+                  <div className="flex items-center gap-2 self-start sm:self-auto">
+                    <span
+                      className={`grid h-7 w-7 shrink-0 place-items-center rounded-full text-[12px] font-bold ${
+                        t.assignedTo ? 'bg-brass/10 text-brass-deep' : 'bg-sunk text-ink-faint'
+                      }`}
+                      title={t.assignee}
+                    >
+                      {t.assignedTo ? t.assignee.slice(0, 1).toUpperCase() : '?'}
+                    </span>
 
-                {supervisor ? (
-                  <select
-                    className="input"
-                    value={t.assignedTo ?? ''}
-                    onChange={(e) => update.mutate({ id: t.id, assigned_to: e.target.value || null })}
-                  >
-                    <option value="">Unassigned</option>
-                    {team.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.full_name ?? m.email ?? 'Teammate'}
-                      </option>
-                    ))}
-                  </select>
-                ) : !t.assignedTo ? (
-                  <button
-                    onClick={() => update.mutate({ id: t.id, assigned_to: user?.id ?? null })}
-                    className="btn-secondary btn-sm"
-                  >
-                    Claim
-                  </button>
-                ) : (
-                  <span className="text-[12.5px] text-ink-faint">{t.assignee}</span>
-                )}
+                    {supervisor ? (
+                      <select
+                        className="input"
+                        value={t.assignedTo ?? ''}
+                        onChange={(e) => update.mutate({ id: t.id, assigned_to: e.target.value || null })}
+                      >
+                        <option value="">Unassigned</option>
+                        {team.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.full_name ?? m.email ?? 'Teammate'}
+                          </option>
+                        ))}
+                      </select>
+                    ) : !t.assignedTo ? (
+                      <button
+                        onClick={() => update.mutate({ id: t.id, assigned_to: user?.id ?? null })}
+                        className="btn-secondary btn-sm"
+                      >
+                        Claim
+                      </button>
+                    ) : (
+                      <span className="text-[12.5px] text-ink-faint">{t.assignee}</span>
+                    )}
 
-                <select
-                  className="input"
-                  value={t.status}
-                  disabled={!mayEdit(t.assignedTo)}
-                  title={mayEdit(t.assignedTo) ? undefined : "Only a principal or coordinator can change someone else's task"}
-                  onChange={(e) => update.mutate({ id: t.id, status: e.target.value as TaskStatus })}
-                >
-                  {TASK_STATUSES.map((s) => (
-                    <option key={s} value={s}>
-                      {TASK_STATUS_LABELS[s]}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </li>
-          ))}
+                    <select
+                      className="input"
+                      value={t.status}
+                      disabled={!mayEdit(t.assignedTo)}
+                      title={mayEdit(t.assignedTo) ? undefined : "Only a principal or coordinator can change someone else's task"}
+                      onChange={(e) => update.mutate({ id: t.id, status: e.target.value as TaskStatus })}
+                    >
+                      {TASK_STATUSES.map((s) => (
+                        <option key={s} value={s}>
+                          {TASK_STATUS_LABELS[s]}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </li>
+                ))}
+              </Fragment>
+            );
+          })}
         </ul>
         {backfill.isSuccess && (
           <div className="border-t border-line-soft px-5 py-3 text-[12.5px] text-ink-soft">

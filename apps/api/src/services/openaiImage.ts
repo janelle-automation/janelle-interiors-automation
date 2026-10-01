@@ -36,6 +36,37 @@ export class OpenAiNotConfigured extends Error {
   }
 }
 
+/**
+ * What OpenAI may cost in one UTC day, in dollars. Past it, pictures fall
+ * through to the free engines instead of spending more. A day of iterating on
+ * the same plan once used the studio's whole $1 credit; 0 turns the cap off.
+ */
+const DAILY_BUDGET_USD = Number(process.env.OPENAI_DAILY_BUDGET_USD ?? 0.6);
+
+export class OpenAiDailyBudget extends Error {
+  constructor(spent: number) {
+    super(
+      `Today's OpenAI picture budget ($${DAILY_BUDGET_USD.toFixed(2)}) is used up ($${spent.toFixed(2)} spent), so this was drawn by the free engine instead. It resets at midnight UTC.`,
+    );
+    this.name = 'OpenAiDailyBudget';
+  }
+}
+
+async function spentTodayUsd(orgId: string): Promise<number> {
+  if (!supabaseAdmin) return 0;
+  const since = new Date();
+  since.setUTCHours(0, 0, 0, 0);
+  const { data } = await supabaseAdmin
+    .from('activity_log')
+    .select('meta')
+    .eq('org_id', orgId)
+    .eq('action', AI_USAGE_ACTION)
+    .gte('created_at', since.toISOString())
+    .ilike('meta->>model', 'gpt-image%')
+    .limit(500);
+  return (data ?? []).reduce((sum, r) => sum + Number((r as { meta?: { cost_usd?: number } }).meta?.cost_usd ?? 0), 0);
+}
+
 export async function isOpenAiReady(orgId?: string | null): Promise<boolean> {
   const ai = await resolveOpenAi(orgId);
   return Boolean(ai.apiKey);
@@ -140,6 +171,11 @@ export async function generateOpenAiImage(
 ): Promise<GeneratedImage> {
   const ai = await resolveOpenAi(ctx.orgId);
   if (!ai.apiKey) throw new OpenAiNotConfigured();
+  if (DAILY_BUDGET_USD > 0) {
+    const orgId = await resolveOrgId(ctx.orgId).catch(() => null);
+    const spent = orgId ? await spentTodayUsd(orgId).catch(() => 0) : 0;
+    if (spent >= DAILY_BUDGET_USD) throw new OpenAiDailyBudget(spent);
+  }
   const model = ai.imageModel;
   const mode: 'edit' | 'generate' = req.source ? 'edit' : 'generate';
   const { size, wide } = sizeFor(req.aspectRatio);

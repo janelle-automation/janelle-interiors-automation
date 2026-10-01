@@ -54,6 +54,7 @@ Rules:
 - Use only what the brief says. Never add a material, colour, finish, upholstery, frame, brand or size the brief does not name — a shorter line is better than an invented one.
 - Where a detail a designer would need is missing, write "TBD — Confirm" rather than inventing a product, brand or size.
 - Never include photography, camera, lens or rendering-style words — only the room, its materials and fixtures.
+- A brief for a single object or a quick sketch (a lamp, a chair, a logo) is not a room: return "sections": [] and "swatches": [] rather than padding a spec sheet with material guesses.
 - Title Case for names, no markdown.`;
 
 /** Shorten at a word boundary — a cut mid-word reads as a typo on a client board. */
@@ -69,21 +70,33 @@ function clip(value: unknown, max: number): string {
 export async function boardSpecs(brief: string, ctx: CallContext, timeoutMs: number): Promise<BoardSpecs | null> {
   const specs = await extractJson<BoardSpecs>(SPEC_SYSTEM, brief, ctx, timeoutMs);
   if (!specs || !Array.isArray(specs.sections) || !Array.isArray(specs.swatches)) return null;
-  return {
-    title: clip(specs.title, 60),
-    width_label: specs.width_label ? clip(specs.width_label, 12) : null,
-    height_label: specs.height_label ? clip(specs.height_label, 12) : null,
-    sections: specs.sections.slice(0, 8).map((s) => ({
+  const sections = specs.sections
+    .slice(0, 8)
+    .map((s) => ({
       heading: clip(s.heading, 28).toUpperCase(),
       lines: (Array.isArray(s.lines) ? s.lines : []).slice(0, 3).map((l) => clip(l, 40)).filter(Boolean),
-    })),
-    swatches: specs.swatches.slice(0, 6).map((s) => ({
+    }))
+    .filter((s) => s.heading && s.lines.length);
+  const swatches = specs.swatches
+    .slice(0, 6)
+    .map((s) => ({
       label: clip(s.label, 24).toUpperCase(),
       name: clip(s.name, 30),
       detail: s.detail ? clip(s.detail, 30) : null,
       color: /^#[0-9a-f]{6}$/i.test(String(s.color)) ? String(s.color) : '#d9d4cc',
       texture: (['paint', 'wood', 'stone', 'tile', 'metal', 'fabric'] as const).includes(s.texture) ? s.texture : 'paint',
-    })),
+    }))
+    .filter((s) => s.name);
+  // A board with an empty specification column and an empty materials row is
+  // a picture in a frame, not a board — it came back for a one-line "sketch a
+  // lamp" request. Hand the picture over bare instead.
+  if (!sections.length || swatches.length < 2) return null;
+  return {
+    title: clip(specs.title, 60),
+    width_label: specs.width_label ? clip(specs.width_label, 12) : null,
+    height_label: specs.height_label ? clip(specs.height_label, 12) : null,
+    sections,
+    swatches,
     notes: (Array.isArray(specs.notes) ? specs.notes : []).slice(0, 4).map((n) => clip(n, 60)).filter(Boolean),
   };
 }

@@ -1,10 +1,10 @@
 import { Router } from 'express';
-import { TASK_KINDS, TASK_STATUSES, canManageTasks } from '@janelle/shared';
+import { TASK_CATEGORIES, TASK_KINDS, TASK_STATUSES, canManageTasks } from '@janelle/shared';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
-import { hasEmailOwner, hasSubtasks, hasTaskAssignment, hasTaskCompletion } from '../lib/columns.js';
+import { hasEmailOwner, hasSubtasks, hasTaskAssignment, hasTaskCategory, hasTaskCompletion } from '../lib/columns.js';
 import { supabaseAdmin } from '../lib/supabase.js';
-import { markTaskChecked } from '../services/tasks.js';
+import { closeCopiesOfFinishedTasks, markTaskChecked } from '../services/tasks.js';
 
 export const tasksRouter = Router();
 tasksRouter.use(requireAuth);
@@ -26,6 +26,12 @@ async function assignmentColumns(): Promise<string> {
   return (await hasTaskAssignment()) ? ', assigned_at' : '';
 }
 
+// Which part of the studio a task belongs to — migration 0026. Absent before
+// it applies, and the app then works the category out from seat and kind.
+async function categoryColumns(): Promise<string> {
+  return (await hasTaskCategory()) ? ', category' : '';
+}
+
 // List tasks, newest first, with the names needed to render a row.
 tasksRouter.get(
   '/',
@@ -33,7 +39,7 @@ tasksRouter.get(
     const { data, error } = await req.auth!.db
       .from('tasks')
       .select(
-        `id, title, detail, kind, status, assigned_to, assigned_role, seat, next_step, project_id, vendor_id, source_email_id, due_date, created_at, updated_at${await completionColumns()}${await assignmentColumns()}, projects(name), vendors(name), profiles(full_name)`,
+        `id, title, detail, kind, status, assigned_to, assigned_role, seat, next_step, project_id, vendor_id, source_email_id, due_date, created_at, updated_at${await completionColumns()}${await assignmentColumns()}${await categoryColumns()}, projects(name), vendors(name), profiles(full_name)`,
       )
       .order('created_at', { ascending: false });
     if (error) throw new Error(error.message);
@@ -60,7 +66,7 @@ tasksRouter.get(
       .select(
         `id, title, detail, kind, status, assigned_to, assigned_role, seat, next_step,
          project_id, vendor_id, source_email_id, due_date, created_at, updated_at,
-         reminded_at, reminder_count${await completionColumns()},
+         reminded_at, reminder_count${await completionColumns()}${await categoryColumns()},
          projects(name), vendors(name), profiles(full_name, email)`,
       )
       .eq('id', req.params.id)
@@ -225,6 +231,14 @@ tasksRouter.patch(
       patch.next_step = step ? step.slice(0, 500) : null;
     }
 
+    if ('category' in b) {
+      if (!TASK_CATEGORIES.includes(b.category)) return res.status(400).json({ error: 'Invalid category' });
+      if (!(await hasTaskCategory())) {
+        return res.status(409).json({ error: 'Categories need migration 0026_task_category.sql applied first.' });
+      }
+      patch.category = b.category;
+    }
+
     if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'No fields to update' });
 
     // Anyone may work their own queue; handing work to someone else — or
@@ -261,6 +275,13 @@ tasksRouter.patch(
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ error: 'Task not found' });
+    // Done by anyone: every other copy of the same task is done too, so none
+    // is left in the open queue — whoever it was handed to.
+    if (patch.status === 'done' && req.auth!.orgId) {
+      await closeCopiesOfFinishedTasks(req.auth!.orgId).catch((err) =>
+        console.error('[tasks] closing copies failed:', (err as Error).message),
+      );
+    }
     res.json({ data });
   }),
 );
@@ -282,6 +303,7 @@ tasksRouter.post(
         title: title.slice(0, 200),
         detail: req.body?.detail ? String(req.body.detail) : null,
         kind,
+        ...((await hasTaskCategory()) && TASK_CATEGORIES.includes(req.body?.category) ? { category: req.body.category } : {}),
         assigned_to: req.body?.assigned_to ? String(req.body.assigned_to) : null,
         project_id: req.body?.project_id ? String(req.body.project_id) : null,
         due_date: req.body?.due_date || null,

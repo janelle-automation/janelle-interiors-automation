@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import { SEATS, SEAT_KEYS, type EmailClass, type DocumentType, type TaskKind, type Seat } from '@janelle/shared';
+import { SEATS, SEAT_KEYS, type EmailClass, type DocumentType, type TaskKind, type TaskCategory, type Seat } from '@janelle/shared';
 import { deleteDocument, extractJson, uploadDocument, type CallContext } from './anthropic.js';
 import type { ParsedEmail } from './gmail.js';
 import { studioNamesBlock, type StudioNames } from '../lib/studioNames.js';
@@ -239,6 +239,8 @@ export interface TaskExtraction {
   title: string;
   detail: string | null;
   kind: TaskKind;
+  /** Which part of the studio the work belongs to. */
+  category?: TaskCategory | null;
   /** ISO date, only when the email states or clearly implies a deadline. */
   due_date: string | null;
   /** The supplier the work concerns, as listed when known. */
@@ -295,6 +297,12 @@ Return JSON with exactly these keys:
   producing or reviewing),
   "scheduling" (a delivery, install or meeting must be booked or moved),
   "admin" (anything else genuinely actionable)
+- "category": which part of the studio the work belongs to, one of
+  "design" (concepts, renderings, drawings, boards, finish and material selections, client presentations),
+  "ffe" (furniture, fixtures and equipment: sourcing, quoting and ordering the pieces themselves, hotel/OVI orders),
+  "procurement" (vendor chasing after an order, deliveries, freight, receiving, install coordination),
+  "admin" (billing, scheduling internal meetings, accounts, housekeeping, anything else).
+  Decide it from what the work IS, not from the kind: a spec review can be design or ffe.
 - "due_date": ISO date (YYYY-MM-DD) if the email states or clearly implies a deadline, else null.
   Resolve relative wording ("Friday the 19th", "next week", "end of month") against the
   current date given below, and never return a date in the past.

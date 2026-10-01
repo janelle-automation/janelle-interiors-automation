@@ -110,6 +110,44 @@ export type TaskKind =
   | 'scheduling'
   | 'admin';
 
+/**
+ * The department a task belongs to, which is a different question from its
+ * kind: a "spec review" can be Design (a drawing) or FF&E (a furniture
+ * schedule). Picked by the ingest AI from the email and editable on the card.
+ */
+export type TaskCategory = 'design' | 'ffe' | 'procurement' | 'admin';
+
+export const TASK_CATEGORIES: TaskCategory[] = ['design', 'ffe', 'procurement', 'admin'];
+
+export const TASK_CATEGORY_LABELS: Record<TaskCategory, string> = {
+  design: 'Design',
+  ffe: 'FF&E',
+  procurement: 'Procurement & shipping',
+  admin: 'Admin & operations',
+};
+
+/**
+ * A category for a task nobody has categorised: every task raised before the
+ * column existed, and any the AI left blank. Worked out from the seat that
+ * owns it where there is one, then from its kind.
+ */
+export function defaultTaskCategory(kind: TaskKind, seat?: string | null): TaskCategory {
+  if (seat === 'design') return 'design';
+  if (seat === 'hotel_ffe') return 'ffe';
+  switch (kind) {
+    case 'spec_review':
+    case 'client_approval':
+      return 'design';
+    case 'quote_request':
+      return 'ffe';
+    case 'order_followup':
+    case 'scheduling':
+      return 'procurement';
+    default:
+      return 'admin';
+  }
+}
+
 export type TaskStatus = 'open' | 'in_progress' | 'blocked' | 'done' | 'cancelled';
 
 export const TASK_KINDS: TaskKind[] = [
@@ -544,6 +582,8 @@ export interface Task {
   title: string;
   detail: string | null;
   kind: TaskKind;
+  /** Migration 0026; null on tasks raised before it. */
+  category?: TaskCategory | null;
   status: TaskStatus;
   assigned_to: string | null;
   assigned_role: UserRole | null;

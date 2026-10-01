@@ -1,10 +1,10 @@
 import {
   DEFAULT_SLA, SEATS, SEAT_KEYS, TASK_HYGIENE_SEAT, TASK_KIND_LABELS, TASK_KIND_ROLE, TASK_KINDS,
-  dueDateFor, seatPeople,
+  TASK_CATEGORIES, defaultTaskCategory, dueDateFor, seatPeople,
   type Seat, type SlaSettings, type TaskKind, type UserRole,
 } from '@janelle/shared';
 import { supabaseAdmin } from '../lib/supabase.js';
-import { hasSeatColumn, hasSubtasks, hasTaskCompletion } from '../lib/columns.js';
+import { hasSeatColumn, hasSubtasks, hasTaskCategory, hasTaskCompletion } from '../lib/columns.js';
 import { extractTask, type TaskExtraction } from './extract.js';
 import { loadStudioNames } from '../lib/studioNames.js';
 import { STUDIO_TEAM, isAutomatedAddress, isStudioAddress, isStudioMailbox } from '../lib/studioTeam.js';
@@ -390,6 +390,7 @@ export async function mergeDuplicateTasks(orgId: string): Promise<TaskDedupe> {
   }
 
   const result: TaskDedupe = { ok: true, removed: 0, merged: [] };
+  const deleted = new Set<string>();
 
   for (const group of groups.values()) {
     if (group.length < 2) continue;
@@ -421,6 +422,7 @@ export async function mergeDuplicateTasks(orgId: string): Promise<TaskDedupe> {
         .eq('org_id', orgId)
         .in('id', losers.map((l) => l.id));
       if (error) throw new Error(error.message);
+      for (const l of losers) deleted.add(l.id);
 
       // The emails the removed copies came from must not raise them again on the next scan.
       for (const l of losers) {
@@ -433,6 +435,49 @@ export async function mergeDuplicateTasks(orgId: string): Promise<TaskDedupe> {
     } catch (err) {
       // Leave this group alone rather than half-merged; the rest still run.
       console.error('[tasks] dedupe failed for', keep.title, (err as Error).message);
+    }
+  }
+
+  // A live task raised in the same moment the SAME work was closed. The email
+  // that finished a task can also ask for it, and before creation checked for
+  // recently finished work one pass closed a copy and opened another — a done
+  // card beside an identical open one. Only the same title on the same job,
+  // created within minutes of the close: a job that genuinely comes round
+  // again arrives days later, not seconds.
+  const { data: finishedRows } = await supabaseAdmin
+    .from('tasks')
+    .select('title, project_id, completed_at')
+    .eq('org_id', orgId)
+    .eq('status', 'done')
+    .not('completed_at', 'is', null);
+  const closedAt = new Map<string, number[]>();
+  for (const f of (finishedRows ?? []) as { title: string; project_id: string | null; completed_at: string }[]) {
+    const key = `${f.project_id ?? 'none'}::${titleKey(f.title)}`;
+    closedAt.set(key, [...(closedAt.get(key) ?? []), new Date(f.completed_at).getTime()]);
+  }
+  const SAME_MOMENT_MS = 10 * 60_000;
+  const copies = tasks.filter((t) => {
+    if (deleted.has(t.id)) return false;
+    const stamps = closedAt.get(`${t.project_id ?? 'none'}::${titleKey(t.title)}`) ?? [];
+    const made = new Date(t.created_at).getTime();
+    return stamps.some((c) => Math.abs(made - c) <= SAME_MOMENT_MS);
+  });
+  if (copies.length) {
+    const { error } = await supabaseAdmin
+      .from('tasks')
+      .delete()
+      .eq('org_id', orgId)
+      .in('status', LIVE_STATUSES)
+      .in('id', copies.map((t) => t.id));
+    if (error) {
+      console.error('[tasks] could not drop copies of finished work:', error.message);
+    } else {
+      for (const t of copies) {
+        const src = (t as DuplicateTaskRow & { source_email_id?: string | null }).source_email_id;
+        if (src) await markTaskChecked(src);
+      }
+      result.removed += copies.length;
+      result.merged.push(...copies.map((t) => ({ kept: `${t.title} (already finished)`, removed: 1 })));
     }
   }
 
@@ -541,6 +586,71 @@ export async function closeRepeatsOfFinishedQuotes(orgId: string): Promise<numbe
 }
 
 /**
+ * Close live copies of work somebody has already finished.
+ *
+ * The same task can sit on the board more than once — raised from two emails,
+ * or handed to two people — and when ONE copy is done the others are no longer
+ * work. Same job and same wording, and the finished copy was completed after
+ * the live one was raised: the live copy was waiting while the other got done.
+ * A copy raised AFTER the finish is the job coming round again and is left
+ * alone (a few minutes of slack covers the pass that closes one and raises the
+ * next). Closed with a note saying who did it, so the board explains itself.
+ * Returns how many were closed.
+ */
+export async function closeCopiesOfFinishedTasks(orgId: string): Promise<number> {
+  if (!supabaseAdmin) return 0;
+  const withCompletion = await hasTaskCompletion();
+  const cols = `id, title, project_id, created_at, assigned_to, updated_at${withCompletion ? ', completed_at' : ''}`;
+  const [{ data: liveRows }, { data: doneRows }] = await Promise.all([
+    supabaseAdmin.from('tasks').select(cols).eq('org_id', orgId).in('status', LIVE_STATUSES),
+    supabaseAdmin.from('tasks').select(`${cols}, profiles(full_name)`).eq('org_id', orgId).eq('status', 'done'),
+  ]);
+  type Row = {
+    id: string; title: string; project_id: string | null; created_at: string; assigned_to: string | null;
+    updated_at: string | null; completed_at?: string | null; profiles?: { full_name: string | null } | null;
+  };
+  const live = (liveRows ?? []) as unknown as Row[];
+  const done = (doneRows ?? []) as unknown as Row[];
+  if (!live.length || !done.length) return 0;
+
+  const SLACK_MS = 10 * 60_000;
+  let closed = 0;
+  for (const t of live) {
+    const key = titleKey(t.title);
+    const made = new Date(t.created_at).getTime();
+    const twin = done.find((d) => {
+      if (d.id === t.id || titleKey(d.title) !== key) return false;
+      if (d.project_id !== t.project_id) return false;
+      const finished = new Date(d.completed_at ?? d.updated_at ?? 0).getTime();
+      return finished >= made - SLACK_MS;
+    });
+    if (!twin) continue;
+
+    const who = twin.profiles?.full_name || 'a teammate';
+    const day = new Date(twin.completed_at ?? twin.updated_at ?? Date.now()).toISOString().slice(0, 10);
+    const patch: Record<string, unknown> = { status: 'done' };
+    if (withCompletion) patch.completion_note = `Closed automatically — the same task was already completed by ${who} on ${day}.`;
+    const { data } = await supabaseAdmin
+      .from('tasks')
+      .update(patch)
+      .eq('id', t.id)
+      .eq('org_id', orgId)
+      .in('status', LIVE_STATUSES)
+      .select('id');
+    if (!data?.length) continue;
+    closed++;
+    await supabaseAdmin.from('activity_log').insert({
+      org_id: orgId,
+      action: 'task.auto_complete',
+      entity: 'tasks',
+      entity_id: t.id,
+      meta: { title: t.title, evidence: `same task already completed by ${who}`, repeat_of: twin.id },
+    });
+  }
+  return closed;
+}
+
+/**
  * Give a live task with no project the job its own wording names.
  *
  * Deliberately narrow: a project counts only when its whole name appears in
@@ -593,6 +703,12 @@ export async function advanceActiveTasks(orgId: string): Promise<number> {
     await closeRepeatsOfFinishedQuotes(orgId);
   } catch (err) {
     console.error('[tasks] closing repeats of finished quotes failed:', (err as Error).message);
+  }
+
+  try {
+    await closeCopiesOfFinishedTasks(orgId);
+  } catch (err) {
+    console.error('[tasks] closing copies of finished tasks failed:', (err as Error).message);
   }
 
   try {
@@ -1558,6 +1674,10 @@ export async function createTaskFromEmail(
     title,
     detail,
     kind,
+    // The AI's call, or the seat/kind fallback; only once migration 0026 is in.
+    ...((await hasTaskCategory())
+      ? { category: extracted.category && TASK_CATEGORIES.includes(extracted.category) ? extracted.category : defaultTaskCategory(kind, seat) }
+      : {}),
     assigned_to: assignedTo,
     assigned_role: seat ? SEATS[seat].role : role,
     seat,
