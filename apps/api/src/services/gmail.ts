@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { google, type gmail_v1 } from 'googleapis';
 import { googleClientForUser, orgSourceUserId } from '../lib/tokens.js';
+import { STUDIO_DOMAINS, isStudioAddress } from '../lib/studioTeam.js';
 
 export interface PdfAttachment {
   filename: string;
@@ -36,6 +37,11 @@ export interface ParsedEmail {
    * the studio never does. See `isBulkMail`.
    */
   bulk: boolean;
+  /** Bcc header. Only present on a copy the sender kept; a recipient never sees it. */
+  bcc: string;
+  /** Delivered-To / List-Id / X-Original-To, the headers that show who a group relayed this to. */
+  deliveredTo: string;
+  listId: string;
 }
 
 /** Extract the bare address from a "Name <a@b.com>" header value. */
@@ -263,7 +269,23 @@ export function studioOnlyQuery(domains: string[], addresses: string[]): string 
  * point. The caller also spares known vendors outright.
  */
 export function isBulkMail(email: ParsedEmail): boolean {
-  return email.bulk && (email.files?.length ?? 0) === 0 && email.attachments.length === 0;
+  if (!email.bulk) return false;
+  if ((email.files?.length ?? 0) > 0 || email.attachments.length > 0) return false;
+  return !isStudioCorrespondence(email);
+}
+
+/**
+ * Mail a person wrote to the studio, even though a list relayed it.
+ *
+ * Google Groups (team@) set List-Unsubscribe on everything they relay, so an
+ * architect writing to the Team group looked exactly like a mailer. Two things
+ * no advertiser does tell them apart: the list is the studio's OWN (List-Id on
+ * the studio domain), or a teammate is copied by name on Cc or Bcc.
+ */
+export function isStudioCorrespondence(email: ParsedEmail): boolean {
+  const listDomain = (email.listId.match(/<([^>]+)>/)?.[1] ?? email.listId).trim().toLowerCase();
+  if (listDomain && STUDIO_DOMAINS.some((d) => listDomain.endsWith(d))) return true;
+  return [...addressesOf(email.cc), ...addressesOf(email.bcc)].some((a) => isStudioAddress(a));
 }
 
 /**
@@ -453,6 +475,9 @@ export async function getEmail(gmail: gmail_v1.Gmail, id: string): Promise<Parse
     receivedAt: dateMs ? new Date(dateMs).toISOString() : null,
     body: decodeBody(payload).slice(0, 12000),
     bulk: Boolean(header(payload, 'List-Unsubscribe')),
+    bcc: header(payload, 'Bcc'),
+    deliveredTo: header(payload, 'Delivered-To') || header(payload, 'X-Original-To'),
+    listId: header(payload, 'List-Id'),
     attachments: collectPdfAttachments(payload),
     files: attachmentsOf(payload),
     messageIdHeader: header(payload, 'Message-ID') || header(payload, 'Message-Id'),

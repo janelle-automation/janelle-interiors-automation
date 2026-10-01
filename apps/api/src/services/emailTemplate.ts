@@ -99,8 +99,8 @@ function shell(preheader: string, body: string): string {
     <td align="center" style="padding:32px 16px;">
       <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;">
         <tr>
-          <td style="padding:0 4px 20px 4px;">
-            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+          <td align="center" style="padding:0 4px 20px 4px;">
+            <table role="presentation" align="center" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
               <tr>
                 ${logoCell()}
               </tr>
@@ -231,6 +231,8 @@ const TONE_COLOR: Record<DueTone, string> = {
 
 export interface MiddayTaskRow {
   title: string;
+  /** Design, FF&E, Procurement & shipping or Admin & operations. */
+  category: string;
   /** Project or vendor context, when there is one. */
   project: string | null;
   /** Already phrased for reading, e.g. "overdue, was due Sep 20" or "due today". */
@@ -248,6 +250,7 @@ export interface MiddayGroup {
 function taskRowHtml(t: MiddayTaskRow): string {
   const color = TONE_COLOR[t.tone];
   const meta = [t.project, t.dueText].filter((s): s is string => !!s).map(escape).join(' · ');
+  const category = `<span style="font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:${C.brassDeep};">${escape(t.category)}</span>`;
   return `<tr>
   <td style="padding:9px 0;border-bottom:1px solid ${C.line};">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
@@ -259,7 +262,8 @@ function taskRowHtml(t: MiddayTaskRow): string {
           <div style="font-size:13.5px;font-weight:600;color:${C.ink};line-height:1.4;">${escape(t.title)}${
     t.blocked ? ` <span style="color:${C.crit};font-weight:700;">· blocked</span>` : ''
   }</div>
-          <div style="margin-top:1px;font-size:12px;color:${color};line-height:1.5;">${meta}</div>
+          <div style="margin-top:1px;font-size:11px;color:${C.inkFaint};line-height:1.5;">${category}</div>
+          <div style="font-size:12px;color:${color};line-height:1.5;">${meta}</div>
         </td>
       </tr>
     </table>
@@ -268,7 +272,7 @@ function taskRowHtml(t: MiddayTaskRow): string {
 }
 
 function taskRowText(t: MiddayTaskRow): string {
-  const meta = [t.project, t.dueText].filter(Boolean).join(' — ');
+  const meta = [t.category, t.project, t.dueText].filter(Boolean).join(' — ');
   return `  - ${t.title}${meta ? ` (${meta})` : ''}${t.blocked ? ' [blocked]' : ''}`;
 }
 

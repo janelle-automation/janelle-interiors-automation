@@ -80,6 +80,11 @@ export function hasTaskAssignment(): Promise<boolean> {
   return hasColumn('tasks', 'assigned_at');
 }
 
+/** Whether tasks carry a category (Design, FF&E…) — migration 0026. */
+export function hasTaskCategory(): Promise<boolean> {
+  return hasColumn('tasks', 'category');
+}
+
 /** Whether mail can belong to one person rather than the studio — 0018. */
 export function hasEmailOwner(): Promise<boolean> {
   return hasColumn('emails', 'owner_id');

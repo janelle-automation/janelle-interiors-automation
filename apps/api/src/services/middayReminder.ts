@@ -1,3 +1,5 @@
+import { TASK_CATEGORIES, TASK_CATEGORY_LABELS, defaultTaskCategory, type TaskCategory } from '@janelle/shared';
+import { hasTaskCategory } from '../lib/columns.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { orgSourceUserId } from '../lib/tokens.js';
 import { isStudioMailbox } from '../lib/studioTeam.js';
@@ -17,6 +19,7 @@ interface Task {
   status: string;
   project: string | null;
   updated_at: string;
+  category: TaskCategory;
 }
 
 function todayIso(): string {
@@ -30,6 +33,7 @@ function toRow(t: Task, today: string): MiddayTaskRow {
   return {
     title: t.title,
     project: t.project,
+    category: TASK_CATEGORY_LABELS[t.category],
     dueText: !t.due_date
       ? 'no due date'
       : overdue
@@ -49,7 +53,13 @@ function toGroups(rows: Task[], today: string): MiddayGroup[] {
     { label: 'DUE TODAY', rows: rows.filter((t) => t.due_date === today) },
     { label: 'COMING UP', rows: rows.filter((t) => t.due_date !== null && t.due_date > today) },
     { label: 'NO DUE DATE', rows: rows.filter((t) => t.due_date === null) },
-  ].map((g) => ({ label: g.label, rows: g.rows.map((t) => toRow(t, today)) }));
+  ].map((g) => ({
+    label: g.label,
+    // Same category together inside a group; the order within one is unchanged.
+    rows: [...g.rows]
+      .sort((a, b) => TASK_CATEGORIES.indexOf(a.category) - TASK_CATEGORIES.indexOf(b.category))
+      .map((t) => toRow(t, today)),
+  }));
 }
 
 /**
@@ -91,14 +101,18 @@ export interface MiddayReminderResult {
 export async function runMiddayReminder(orgId: string): Promise<MiddayReminderResult> {
   if (!supabaseAdmin) return { ok: false, reason: 'supabase_not_configured', personal: 0, ownerSent: false };
 
+  // Category exists only once migration 0026 is applied; until then it is
+  // worked out from the kind and the seat, so the email reads the same.
+  const categorised = await hasTaskCategory();
   const { data } = await supabaseAdmin
     .from('tasks')
-    .select('title, due_date, status, assigned_to, updated_at, projects(name), profiles(full_name, email)')
+    .select(`title, due_date, status, assigned_to, updated_at, kind, seat${categorised ? ', category' : ''}, projects(name), profiles(full_name, email)`)
     .eq('org_id', orgId)
     .in('status', LIVE_STATUSES);
 
   type Raw = {
     title: string; due_date: string | null; status: string; assigned_to: string | null; updated_at: string;
+    kind: Parameters<typeof defaultTaskCategory>[0]; seat: string | null; category?: TaskCategory | null;
     projects: { name: string } | null;
     profiles: { full_name: string | null; email: string | null } | null;
   };
@@ -107,6 +121,7 @@ export async function runMiddayReminder(orgId: string): Promise<MiddayReminderRe
     due_date: t.due_date,
     status: t.status,
     updated_at: t.updated_at,
+    category: t.category ?? defaultTaskCategory(t.kind, t.seat),
     project: t.projects?.name ?? null,
     assignedTo: t.assigned_to,
     assigneeName: t.profiles?.full_name ?? null,

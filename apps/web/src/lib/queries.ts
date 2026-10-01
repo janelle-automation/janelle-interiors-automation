@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, apiBlob, apiUpload, NetworkError } from './api';
 import { readImpersonation } from './impersonate';
+import { defaultTaskCategory, type TaskCategory } from '@janelle/shared';
 import type {
   Action, AiSettingsView, AiUsageReport, AssistantAnswer, DashboardSummary, IngestSettingsView,
   Prompt, ProjectStage, PoStatus,
@@ -277,6 +278,8 @@ export interface TaskView {
   id: string; title: string; detail: string; kind: TaskKind; status: TaskStatus;
   assignedTo: string | null; assignee: string; project: string; due: string | null;
   age: string;
+  /** Design, FF&E, Procurement or Admin — the stored one, else worked out from seat and kind. */
+  category: TaskCategory;
   /** The single concrete action. The studio's SOP fails a task without one. */
   nextStep: string | null;
   seat: Seat | null;
@@ -311,6 +314,8 @@ interface TaskRow {
   assigned_at?: string | null;
   source_email_id?: string | null;
   next_step?: string | null; seat?: Seat | null;
+  /** Migration 0026; absent before it is applied. */
+  category?: TaskCategory | null;
   projects: { name: string } | null; vendors: { name: string } | null;
   profiles: { full_name: string | null } | null;
 }
@@ -346,6 +351,7 @@ export function useTasks() {
           due: r.due_date, age: ageFrom(r.created_at),
           nextStep: r.next_step ?? null,
           seat: r.seat ?? null,
+          category: r.category ?? defaultTaskCategory(r.kind, r.seat),
           overdue:
             !!r.due_date &&
             r.due_date < new Date().toISOString().slice(0, 10) &&
@@ -1202,7 +1208,7 @@ export function useImportHouzz() {
 export function useUpdateTask() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (v: { id: string; status?: TaskStatus; assigned_to?: string | null; due_date?: string | null; next_step?: string | null }) => {
+    mutationFn: (v: { id: string; status?: TaskStatus; assigned_to?: string | null; due_date?: string | null; next_step?: string | null; category?: TaskCategory }) => {
       const { id, ...patch } = v;
       return api(`/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
     },
@@ -1241,6 +1247,7 @@ export function useUpdateTask() {
           next.daysEarly = daysEarly(next.due, next.completedAt);
 
           if (v.next_step !== undefined) next.nextStep = v.next_step;
+          if (v.category !== undefined) next.category = v.category;
 
           if (v.assigned_to !== undefined) {
             next.assignedTo = v.assigned_to;
@@ -1269,6 +1276,7 @@ export function useUpdateTask() {
     // at what it stored, not a replacement for it.
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['tasks'] });
+      qc.invalidateQueries({ queryKey: ['task'] });
       qc.invalidateQueries({ queryKey: ['dashboard'] });
     },
   });
@@ -1337,6 +1345,7 @@ export interface TaskDetail {
     id: string; title: string; detail: string | null; kind: TaskKind; status: TaskStatus;
     assigned_to: string | null; assigned_role: UserRole | null; seat: Seat | null;
     next_step: string | null; due_date: string | null;
+    category?: TaskCategory | null;
     created_at: string; updated_at: string | null;
     reminded_at: string | null; reminder_count: number;
     /** Migration 0015; absent before it is applied. */
