@@ -5,6 +5,7 @@ import { UserFacingError } from '../middleware/error.js';
 import { resolveAi } from '../lib/aiSettings.js';
 import { resolveOrgId } from '../lib/org.js';
 import { supabaseAdmin } from '../lib/supabase.js';
+import { tryRouted } from './llm.js';
 
 /** The activity_log action that marks one Claude call. */
 export const AI_USAGE_ACTION = 'ai.usage';
@@ -403,6 +404,20 @@ export async function extractJson<T>(
    */
   timeoutMs?: number,
 ): Promise<T | null> {
+  const instruction = `${system}
+
+Respond with ONLY a single JSON object. No prose, no code fences.`;
+
+  // An action the studio moved to another AI runs there. Only plain text can
+  // move: an attached PDF is Claude's to read, so a call that carries one
+  // stays here whatever the action is set to.
+  if (typeof user === 'string') {
+    const routed = await tryRouted(ctx, {
+      system: instruction, user, maxTokens: 4096, temperature: 0, json: true, timeoutMs: timeoutMs ?? CALL_TIMEOUT_MS,
+    });
+    if (routed !== null) return firstJson<T>(routed);
+  }
+
   const message = await recorded(
     ctx,
     {
@@ -427,6 +442,9 @@ export async function generate(
   maxTokens = 8000,
   timeoutMs = LONG_CALL_TIMEOUT_MS,
 ): Promise<string> {
+  const routed = await tryRouted(ctx, { system, user, maxTokens, json: false, timeoutMs });
+  if (routed !== null) return routed;
+
   const message = await recorded(
     ctx,
     {

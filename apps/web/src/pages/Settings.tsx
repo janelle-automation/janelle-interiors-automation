@@ -1,6 +1,6 @@
-import { useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { ASSISTANT_NAME } from '@janelle/shared';
+import { ASSISTANT_NAME, type AiRoutingFeatureView, type AiRoutingView, type LlmProvider } from '@janelle/shared';
 import { Page, PageHeading, Card, Pill, PasswordInput, Switch } from '../components/ui';
 import {
   IconActivity,
@@ -25,23 +25,25 @@ import {
   useConnectGoogle,
   useDisconnectGoogle,
   useAiConfig,
-  useMediaConfig,
-  useSetMediaKey,
-  useClearMediaKey,
-  useSetMediaModel,
-  useGeminiConfig,
-  useSetGeminiKey,
-  useClearGeminiKey,
-  useSetGeminiModel,
+  usePictureConfig,
   useSetPictureEngine,
   useOpenAiConfig,
   useSetOpenAiKey,
   useClearOpenAiKey,
   useSetOpenAiModel,
-  useCloudflareConfig,
-  useSetCloudflareKey,
-  useClearCloudflareKey,
-  useSetCloudflareModel,
+  useAiRouting,
+  useSetAiRoute,
+  useSetGeminiTextKey,
+  useClearGeminiTextKey,
+  useTestAiRoute,
+  useSlackConfig,
+  useSetSlackToken,
+  useClearSlackToken,
+  useSetSlackConfig,
+  useSlackTest,
+  useSlackSync,
+  useSlackProjects,
+  useSetProjectChannel,
   useClearAiKey,
   useDisconnectGoogleService,
   useSetAiKey,
@@ -527,6 +529,33 @@ function ErrorLine({ error }: { error?: Error | null }) {
 }
 
 /**
+ * A confirmation that goes away by itself — "saved", "switched", "sent".
+ *
+ * Saving used to finish silently: the button stopped saying "Saving…" and
+ * nothing said it had worked, so people pressed it twice or doubted it. This
+ * says what happened, in the words of what they asked for, then clears.
+ */
+function useFlash(ms = 5000) {
+  const [message, setMessage] = useState<string | null>(null);
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const say = (text: string) => {
+    setMessage(text);
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setMessage(null), ms);
+  };
+  return [message, say] as const;
+}
+
+function Flash({ message, className = '' }: { message: string | null; className?: string }) {
+  return message ? (
+    <p role="status" className={`text-[12.5px] font-medium text-good ${className}`}>
+      ✓ {message}
+    </p>
+  ) : null;
+}
+
+/**
  * The studio's Claude credentials. Kept here rather than in a deploy so the
  * key can be rotated by the person who owns the Anthropic account, not by
  * whoever has access to the server.
@@ -589,34 +618,271 @@ function AiSetupCard() {
 }
 
 /**
+ * Who does the work — which AI handles each action.
+ *
+ * Every action starts on Claude. Moving one to OpenAI or Gemini is a choice
+ * made here, per action, and is judged before it is made: Test runs a sample
+ * email through the candidate and shows what it understood and what it cost.
+ * Jenny's tool loop and anything that reads a PDF stay on Claude, and the
+ * card says so rather than offering a switch that would not do anything.
+ *
+ * Laid out as a table — an action per line, with the AI and the model beside
+ * it — so seven actions read at a glance instead of as seven forms. The three
+ * providers sit above it as a status strip: which are ready, and the one key
+ * that still has to be pasted.
+ */
+function AiRoutingCard() {
+  const [flash, say] = useFlash();
+  const routing = useAiRouting();
+  const setGeminiKey = useSetGeminiTextKey();
+  const clearGeminiKey = useClearGeminiTextKey();
+
+  if (routing.isError) return null;
+  const data = routing.data;
+  const openai = data?.providers.find((p) => p.id === 'openai');
+  const gemini = data?.providers.find((p) => p.id === 'gemini');
+  const columns = 'lg:grid-cols-[minmax(0,1.5fr)_9rem_minmax(0,1.3fr)_11rem]';
+
+  return (
+    <SettingsCard
+      icon={<IconAssistant width={18} height={18} />}
+      title="Who does the work"
+      description="Choose which AI handles each action. Everything runs on Claude until you change it — test a model on a sample email first, then switch."
+      className="lg:col-span-2"
+    >
+      {!data ? (
+        <p className="text-[13px] text-ink-faint">Loading…</p>
+      ) : (
+        <div className="space-y-4">
+          <div className="grid gap-3 md:grid-cols-3">
+            <div className="rounded-lg border border-line p-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[13px] font-medium text-ink">Claude</p>
+                <Pill tone="good">Default</Pill>
+              </div>
+              <p className="mt-1 text-[12px] text-ink-soft">Uses the key and model under “Jenny’s brain” above.</p>
+            </div>
+            <div className="rounded-lg border border-line p-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[13px] font-medium text-ink">OpenAI</p>
+                <Pill tone={openai?.configured ? 'good' : 'warn'}>{openai?.configured ? 'Ready' : 'Needs a key'}</Pill>
+              </div>
+              <p className="mt-1 text-[12px] text-ink-soft">
+                {openai?.configured
+                  ? `Uses the key under “Photos — OpenAI” (•••• ${openai.keyHint}).`
+                  : 'Add the key under “Photos — OpenAI” below — one key does both.'}
+              </p>
+            </div>
+            <div className="rounded-lg border border-line p-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[13px] font-medium text-ink">Gemini</p>
+                <Pill tone={gemini?.configured ? 'good' : 'warn'}>{gemini?.configured ? 'Ready' : 'Needs a key'}</Pill>
+              </div>
+              <div className="mt-2">
+                <KeyField
+                  id="gemini-text-key"
+                  placeholder="AIza…"
+                  view={{ configured: Boolean(gemini?.configured), source: gemini?.configured ? 'studio' : 'none', keyHint: gemini?.keyHint ?? null }}
+                  saving={setGeminiKey.isPending}
+                  clearing={clearGeminiKey.isPending}
+                  onSave={(key, done) => setGeminiKey.mutate(key, { onSuccess: () => { done(); say('Gemini key saved'); } })}
+                  onClear={() => clearGeminiKey.mutate(undefined, { onSuccess: () => say('Gemini key removed — actions set to Gemini are back on Claude') })}
+                />
+              </div>
+            </div>
+          </div>
+          <Flash message={flash} />
+
+          <div className="overflow-hidden rounded-lg border border-line">
+            <div className={`hidden gap-x-4 border-b border-line bg-sunk/40 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-ink-faint lg:grid ${columns}`}>
+              <span>Action</span>
+              <span>AI</span>
+              <span>Model</span>
+              <span />
+            </div>
+            <div className="divide-y divide-line">
+              {data.features.map((f) => (
+                <RoutingRow key={f.id} feature={f} data={data} columns={columns} />
+              ))}
+            </div>
+          </div>
+          <p className="text-[12px] text-ink-faint">
+            Always Claude: Jenny’s answers (they use Claude’s tools) and reading PDFs and pictures (Claude takes the file itself).
+          </p>
+        </div>
+      )}
+      <ErrorLine error={(setGeminiKey.error ?? clearGeminiKey.error) as Error | null} />
+    </SettingsCard>
+  );
+}
+
+const CUSTOM_MODEL = '__custom__';
+
+function RoutingRow({ feature, data, columns }: { feature: AiRoutingFeatureView; data: AiRoutingView; columns: string }) {
+  const [flash, say] = useFlash(8000);
+  const setRoute = useSetAiRoute();
+  const test = useTestAiRoute();
+  const saved = feature.route;
+  const savedKnown = saved ? data.presets.some((p) => p.provider === saved.provider && p.id === saved.model) : true;
+
+  const [provider, setProvider] = useState<LlmProvider>(saved?.provider ?? 'anthropic');
+  const [model, setModel] = useState<string>(saved ? (savedKnown ? saved.model : CUSTOM_MODEL) : '');
+  const [custom, setCustom] = useState(saved && !savedKnown ? saved.model : '');
+  const [inPrice, setInPrice] = useState(saved && !savedKnown ? String(saved.inputPer1M ?? '') : '');
+  const [outPrice, setOutPrice] = useState(saved && !savedKnown ? String(saved.outputPer1M ?? '') : '');
+
+  const presets = data.presets.filter((p) => p.provider === provider);
+  const modelId = model === CUSTOM_MODEL ? custom.trim() : model;
+  const prices = model === CUSTOM_MODEL ? { inputPer1M: Number(inPrice), outputPer1M: Number(outPrice) } : {};
+  const ready = provider === 'anthropic' || (modelId.length > 0 && (model !== CUSTOM_MODEL || (inPrice !== '' && outPrice !== '')));
+  const dirty = provider !== (saved?.provider ?? 'anthropic') || (provider !== 'anthropic' && modelId !== (saved?.model ?? ''));
+  const savedLabel = saved ? data.providers.find((p) => p.id === saved.provider)?.label : null;
+
+  const changeProvider = (next: LlmProvider) => {
+    setProvider(next);
+    setModel(next === 'anthropic' ? '' : (data.presets.find((p) => p.provider === next)?.id ?? ''));
+    test.reset();
+  };
+
+  return (
+    <div className="px-3 py-3">
+      <div className={`grid items-center gap-x-4 gap-y-2 ${columns}`}>
+        <div className="min-w-0">
+          <p className="flex flex-wrap items-center gap-2 text-[13px] font-medium text-ink">
+            {feature.label}
+            {saved && <Pill tone="neutral">{savedLabel} · {saved.model}</Pill>}
+          </p>
+          <p className="mt-0.5 text-[12px] leading-snug text-ink-soft">{feature.note}</p>
+        </div>
+
+        <select
+          aria-label={`AI for ${feature.label}`}
+          className="input w-full"
+          value={provider}
+          disabled={setRoute.isPending}
+          onChange={(e) => changeProvider(e.target.value as LlmProvider)}
+        >
+          {data.providers.map((p) => (
+            <option key={p.id} value={p.id} disabled={!p.configured && p.id !== provider}>
+              {p.label}
+              {p.configured ? '' : ' (add key)'}
+            </option>
+          ))}
+        </select>
+
+        {provider === 'anthropic' ? (
+          <span className="text-[12px] text-ink-faint">Model set under “Jenny’s brain”</span>
+        ) : (
+          <select
+            aria-label={`Model for ${feature.label}`}
+            className="input w-full min-w-0"
+            value={model}
+            onChange={(e) => {
+              setModel(e.target.value);
+              test.reset();
+            }}
+          >
+            {presets.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+            <option value={CUSTOM_MODEL}>Other model…</option>
+          </select>
+        )}
+
+        <div className="flex items-center gap-2 lg:justify-end">
+          {provider !== 'anthropic' && (
+            <button className="btn-ghost btn-sm" disabled={!ready || test.isPending} onClick={() => test.mutate({ provider, model: modelId, ...prices })}>
+              {test.isPending ? 'Testing…' : 'Test'}
+            </button>
+          )}
+          {dirty && (
+            <button
+              className="btn-primary btn-sm"
+              disabled={!ready || setRoute.isPending}
+              onClick={() =>
+                setRoute.mutate(
+                  { feature: feature.id, provider, model: modelId, ...prices },
+                  {
+                    onSuccess: () =>
+                      say(
+                        provider === 'anthropic'
+                          ? `${feature.label} now runs on Claude`
+                          : `${feature.label} now runs on ${data.providers.find((p) => p.id === provider)?.label} · ${modelId}`,
+                      ),
+                  },
+                )
+              }
+            >
+              {setRoute.isPending ? 'Saving…' : provider === 'anthropic' ? 'Use Claude' : 'Switch'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      <Flash message={flash} className="mt-2" />
+
+      {provider !== 'anthropic' && model === CUSTOM_MODEL && (
+        <div className="mt-2 grid gap-2 sm:grid-cols-3">
+          <input className="input" aria-label="Model name" placeholder="Model name" value={custom} onChange={(e) => setCustom(e.target.value)} autoComplete="off" spellCheck={false} />
+          <input className="input" aria-label="Input price per million tokens" placeholder="$ per 1M tokens in" inputMode="decimal" value={inPrice} onChange={(e) => setInPrice(e.target.value)} />
+          <input className="input" aria-label="Output price per million tokens" placeholder="$ per 1M tokens out" inputMode="decimal" value={outPrice} onChange={(e) => setOutPrice(e.target.value)} />
+        </div>
+      )}
+
+      {provider !== 'anthropic' && model !== CUSTOM_MODEL && presets.find((p) => p.id === model) && (
+        <p className="mt-1.5 text-[11.5px] text-ink-faint">
+          Costs ${presets.find((p) => p.id === model)?.inputPer1M} in / ${presets.find((p) => p.id === model)?.outputPer1M} out per million tokens.
+        </p>
+      )}
+
+      {test.data && (
+        <div className={`mt-2 rounded-md border p-2.5 text-[12px] ${test.data.ok ? 'border-line bg-sunk/40 text-ink-soft' : 'border-crit/40 text-crit'}`}>
+          {test.data.ok ? (
+            <div className="grid gap-2 md:grid-cols-2">
+              <div>
+                <p>
+                  Answered in {(test.data.latencyMs / 1000).toFixed(1)}s · {test.data.inputTokens} in / {test.data.outputTokens} out · about $
+                  {test.data.costUsd.toFixed(5)} for this email
+                </p>
+                <p className="mt-1">
+                  Right answer: class <b>quote_request</b>, vendor <b>Hartwell Fabrics</b>, project <b>Meridian Ranch</b>, action needed <b>true</b>.
+                </p>
+              </div>
+              <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-[11.5px] text-ink">{JSON.stringify(test.data.sample, null, 1)}</pre>
+            </div>
+          ) : (
+            test.data.error
+          )}
+        </div>
+      )}
+      <ErrorLine error={(setRoute.error ?? test.error) as Error | null} />
+    </div>
+  );
+}
+
+/**
  * Which provider draws pictures.
  *
- * One choice, with every provider's state beside it, so nobody has to open
- * four cards to learn why a render came from somewhere they did not expect.
- * The chosen provider draws first; the others that are connected step in, in
- * a fixed order, if it fails or has run out. Claude sketches when none can.
+ * One choice, with the provider's state beside it, so nobody has to open
+ * another card to learn why a render came from somewhere they did not expect.
+ * The chosen engine draws first; Claude sketches when it cannot.
  */
 function PictureProviderCard() {
-  const gemini = useGeminiConfig();
+  const pictures = usePictureConfig();
   const openai = useOpenAiConfig();
-  const cloudflare = useCloudflareConfig();
-  const media = useMediaConfig();
   const setEngine = useSetPictureEngine();
 
-  if (gemini.isError) return null;
-  const data = gemini.data;
-  const providers: { name: string; on: boolean | undefined }[] = [
-    { name: 'OpenAI', on: openai.data?.configured },
-    { name: 'Cloudflare (free)', on: cloudflare.data?.configured },
-    { name: 'Gemini', on: gemini.data?.configured },
-    { name: 'Grok', on: media.data?.configured },
-  ];
+  if (pictures.isError) return null;
+  const data = pictures.data;
+  const providers: { name: string; on: boolean | undefined }[] = [{ name: 'OpenAI', on: openai.data?.configured }];
 
   return (
     <SettingsCard
       icon={<IconBoard width={18} height={18} />}
       title="Who draws pictures"
-      description="Renderings, boards and Jenny's Image mode. The one you pick draws first; the others that are connected step in if it fails."
+      description="Renderings, boards and Jenny's Image mode. The one you pick draws first; Claude sketches if it fails."
     >
       {!data ? (
         <p className="text-[13px] text-ink-faint">Loading…</p>
@@ -717,246 +983,267 @@ function OpenAiSetupCard() {
 }
 
 /**
- * Renderings and boards: who draws them, and the Gemini account.
+ * Which channel each project's updates go to.
  *
- * The key and model were only settable in the server environment, so a
- * studio stuck on a model that cannot photograph had no way out without a
- * deploy. When Gemini fails or has no key, Claude draws a sketch instead.
+ * A table, because it is one: a project, the channel it posts to, and where
+ * that choice came from. A project with a channel of its own posts there; one
+ * without is matched to a channel by name where Slack lets the bot see the
+ * list, and otherwise goes to the default. Folded away until asked for —
+ * thirty rows is a lot to scroll past for something that mostly takes care of
+ * itself.
  */
-function GeminiSetupCard() {
-  const config = useGeminiConfig();
-  const setKey = useSetGeminiKey();
-  const clearKey = useClearGeminiKey();
-  const setModel = useSetGeminiModel();
-
-  if (config.isError) return null;
-  const data = config.data;
+function SlackProjectChannels({ defaultChannel }: { defaultChannel: string }) {
+  const [flash, say] = useFlash();
+  const [open, setOpen] = useState(false);
+  const list = useSlackProjects(open);
+  const save = useSetProjectChannel();
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const data = list.data;
+  const columns = 'sm:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_8.5rem]';
 
   return (
-    <SettingsCard
-      icon={<IconPrompt width={18} height={18} />}
-      title="Renderings & boards — Gemini"
-      description={
-        <>
-          The Gemini key and model. Keys from{' '}
-          <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="font-medium text-brass hover:underline">
-            aistudio.google.com
-          </a>
-          .
-        </>
-      }
-      status={data && <Pill tone={data.configured ? 'good' : 'warn'}>{data.configured ? 'Gemini connected' : 'No Gemini key'}</Pill>}
-    >
-      {!data ? (
-        <p className="text-[13px] text-ink-faint">Loading…</p>
-      ) : (
-        <div className="space-y-4">
-          <KeyField
-            id="gemini-key"
-            placeholder="AIza…"
-            view={data}
-            saving={setKey.isPending}
-            clearing={clearKey.isPending}
-            onSave={(key, done) => setKey.mutate(key, { onSuccess: done })}
-            onClear={() => clearKey.mutate(undefined)}
-          />
-          <ModelSelect
-            id="gemini-model"
-            label="Gemini model"
-            value={data.model}
-            options={data.models.map((m) => ({
-              id: m.id,
-              label: `${m.label} — ${m.usdPerImage ? `${usdEach(m.usdPerImage)} each` : 'free tier'}`,
-            }))}
-            note={data.models.find((m) => m.id === data.model)?.note}
-            pending={setModel.isPending}
-            onChange={(m) => setModel.mutate(m)}
-          />
-        </div>
-      )}
-      <ErrorLine error={(setKey.error ?? clearKey.error ?? setModel.error) as Error | null} />
-    </SettingsCard>
-  );
-}
+    <div className="rounded-lg border border-line">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span>
+          <span className="block text-[13px] font-medium text-ink">Project channels</span>
+          <span className="block text-[12px] text-ink-soft">
+            Each project posts to its own channel; anything without one goes to #{defaultChannel}.
+          </span>
+        </span>
+        <span className="shrink-0 text-[12px] text-brass">{open ? 'Hide' : 'Show'}</span>
+      </button>
 
-/**
- * Cloudflare Workers AI — free photoreal renderings.
- *
- * Two values rather than one: the account the models run in (not secret —
- * it is in every dashboard URL) and a token allowed to run them. The free
- * plan's daily allowance is refused, never billed, once it is used up.
- */
-function CloudflareSetupCard() {
-  const config = useCloudflareConfig();
-  const setKey = useSetCloudflareKey();
-  const clearKey = useClearCloudflareKey();
-  const setModel = useSetCloudflareModel();
-  const [account, setAccount] = useState('');
-  const [token, setToken] = useState('');
-
-  if (config.isError) return null;
-  const data = config.data;
-  const model = data?.models.find((m) => m.id === data.model);
-  const maxSteps = model?.maxSteps ?? 8;
-  const stepChoices = maxSteps <= 8 ? [4, 8] : [10, 20];
-
-  return (
-    <SettingsCard
-      icon={<IconBoard width={18} height={18} />}
-      title="Free photos — Cloudflare"
-      description={
-        <>
-          Photoreal renderings on Cloudflare’s free daily allowance — no card, never billed. Account ID and token from{' '}
-          <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noreferrer" className="font-medium text-brass hover:underline">
-            dash.cloudflare.com
-          </a>
-          .
-        </>
-      }
-      status={data && <Connected on={data.configured} />}
-    >
-      {!data ? (
-        <p className="text-[13px] text-ink-faint">Loading…</p>
-      ) : (
-        <div className="space-y-4">
-          <div>
-            <FieldLabel htmlFor="cf-account">Account ID &amp; API token</FieldLabel>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <input
-                id="cf-account"
-                className="input w-full font-mono text-[12.5px]"
-                autoComplete="off"
-                spellCheck={false}
-                value={account}
-                onChange={(e) => setAccount(e.target.value)}
-                placeholder={data.accountId ? `${data.accountId.slice(0, 6)}… (in use)` : '32-character Account ID'}
-              />
-              <PasswordInput
-                label="token"
-                wrapperClassName="min-w-0"
-                autoComplete="off"
-                spellCheck={false}
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                placeholder={data.configured ? `•••• ${data.keyHint ?? ''} — paste to replace` : 'API token'}
-                className="w-full"
-              />
-            </div>
-            <div className="mt-2 flex items-center gap-2">
-              <button
-                className="btn-primary btn-sm"
-                disabled={setKey.isPending || !account.trim() || !token.trim()}
-                onClick={() =>
-                  setKey.mutate(
-                    { accountId: account.trim(), apiToken: token.trim() },
-                    { onSuccess: () => { setAccount(''); setToken(''); } },
-                  )
-                }
-              >
-                {setKey.isPending ? 'Saving…' : 'Save'}
-              </button>
-              {data.source === 'studio' && (
-                <button className="btn-ghost btn-sm" disabled={clearKey.isPending} onClick={() => clearKey.mutate(undefined)}>
-                  {clearKey.isPending ? 'Removing…' : 'Remove'}
-                </button>
+      {open && (
+        <div className="border-t border-line">
+          {!data ? (
+            <p className="p-3 text-[13px] text-ink-faint">{list.isError ? 'Could not load projects.' : 'Loading…'}</p>
+          ) : (
+            <>
+              {(data.missingScope || !data.ready) && (
+                <div className="space-y-1 border-b border-line bg-sunk/40 px-3 py-2 text-[12px] text-warn">
+                  {data.missingScope && (
+                    <p>
+                      Matching by name is off: add the channels:read and groups:read permissions to the Slack app and reinstall it.
+                      Channels typed below still work.
+                    </p>
+                  )}
+                  {!data.ready && <p>Choosing a channel needs migration 0029 applied (npm run db:apply).</p>}
+                </div>
               )}
-            </div>
-            <Hint>
-              {data.source === 'environment'
-                ? 'Using CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN from the server. Values saved here replace them.'
-                : 'The token is stored encrypted and never shown again.'}
-            </Hint>
-          </div>
-
-          <div className="grid gap-4 sm:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
-            <ModelSelect
-              id="cf-model"
-              label="Model"
-              value={data.model}
-              options={data.models}
-              note={model?.note}
-              pending={setModel.isPending}
-              onChange={(m) => setModel.mutate({ model: m })}
-            />
-            <ModelSelect
-              id="cf-steps"
-              label="Quality"
-              value={String(data.steps)}
-              options={stepChoices.map((n, i) => ({ id: String(n), label: i === 0 ? `Fast — ${n} steps` : `Best — ${n} steps` }))}
-              note="More steps: finer detail, fewer free images a day."
-              pending={setModel.isPending}
-              onChange={(n) => setModel.mutate({ model: data.model, steps: Number(n) })}
-            />
-          </div>
+              <div className={`hidden gap-3 border-b border-line px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-faint sm:grid ${columns}`}>
+                <span>Project</span>
+                <span>Channel</span>
+                <span>Status</span>
+              </div>
+              <ul className="max-h-[26rem] divide-y divide-line overflow-y-auto">
+                {data.projects.map((p) => {
+                  const value = drafts[p.id] ?? p.channel;
+                  const dirty = value.trim().replace(/^#/, '') !== p.channel;
+                  const status = p.botIn === false
+                    ? { text: 'Invite the bot', tone: 'text-warn' }
+                    : p.channel
+                      ? { text: 'Assigned', tone: 'text-ink-soft' }
+                      : p.auto
+                        ? { text: 'Matched by name', tone: 'text-good' }
+                        : { text: 'Default', tone: 'text-ink-faint' };
+                  return (
+                    <li key={p.id} className={`grid items-center gap-x-3 gap-y-1.5 px-3 py-2 ${columns}`}>
+                      <span className="truncate text-[13px] font-medium text-ink" title={p.name}>{p.name}</span>
+                      <input
+                        className="input w-full text-[12.5px]"
+                        aria-label={`Slack channel for ${p.name}`}
+                        autoComplete="off"
+                        spellCheck={false}
+                        disabled={!data.ready}
+                        value={value}
+                        onChange={(e) => setDrafts((d) => ({ ...d, [p.id]: e.target.value }))}
+                        placeholder={p.auto ? p.auto : defaultChannel}
+                      />
+                      {dirty ? (
+                        <button
+                          className="btn-primary btn-sm justify-self-start"
+                          disabled={save.isPending}
+                          onClick={() =>
+                            save.mutate(
+                              { id: p.id, channel: value.trim() },
+                              { onSuccess: () => { setDrafts((d) => { const { [p.id]: _gone, ...rest } = d; return rest; }); say(`${p.name} will post to #${value.trim().replace(/^#/, '') || defaultChannel}`); } },
+                            )
+                          }
+                        >
+                          Save
+                        </button>
+                      ) : (
+                        <span className={`text-[12px] ${status.tone}`}>{status.text}</span>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+              <div className="px-3 py-2">
+                <Flash message={flash} />
+                <ErrorLine error={save.error as Error | null} />
+              </div>
+            </>
+          )}
         </div>
       )}
-      <ErrorLine error={(setKey.error ?? clearKey.error ?? setModel.error) as Error | null} />
-    </SettingsCard>
+    </div>
   );
 }
 
 /**
- * Pictures and video through Grok (xAI). Without a key the video button
- * does not appear and Jenny says so plainly when asked for a clip.
+ * Slack — task and follow-up updates, posted to a channel.
+ *
+ * Two columns: how the bot connects on the left, what it sends on the right,
+ * then the per-project channels and the sync status across the bottom. The
+ * token is checked against Slack before it is saved and is never shown again;
+ * what the card keeps showing is the last thing the sync did, so a revoked
+ * token or a channel the bot was removed from is visible here rather than
+ * only as silence in Slack.
  */
-function MediaSetupCard() {
-  const config = useMediaConfig();
-  const setKey = useSetMediaKey();
-  const clearKey = useClearMediaKey();
-  const setModel = useSetMediaModel();
+function SlackSetupCard() {
+  const [flash, say] = useFlash();
+  const config = useSlackConfig();
+  const setToken = useSetSlackToken();
+  const clearToken = useClearSlackToken();
+  const setConfig = useSetSlackConfig();
+  const test = useSlackTest();
+  const sync = useSlackSync();
+  const [token, setTokenText] = useState('');
+  const [channel, setChannel] = useState<string | null>(null);
 
   if (config.isError) return null;
   const data = config.data;
+  const channelValue = channel ?? data?.channel ?? '';
+  const channelDirty = data !== undefined && channelValue.trim().replace(/^#/, '') !== data.channel;
+
+  const switches = data
+    ? ([
+        { key: 'enabled', label: 'Send updates to Slack', note: 'Switch off to pause without losing the setup.', on: data.enabled },
+        { key: 'tasks', label: 'Tasks', note: 'New tasks, status, owner and date changes, and tasks the system closes.', on: data.tasks },
+        { key: 'followUps', label: 'Follow-ups', note: 'Vendor and client chasers, drafted or sent.', on: data.followUps },
+        { key: 'dailyDigest', label: 'Daily reminder', note: 'Every morning at 9am Pacific: overdue, due today, blocked, and follow-ups waiting.', on: data.dailyDigest },
+      ] as const)
+    : [];
 
   return (
     <SettingsCard
-      icon={<IconBoard width={18} height={18} />}
-      title="Photos & video — Grok"
-      description={
-        <>
-          Photoreal renderings and short clips. Keys from{' '}
-          <a href="https://console.x.ai" target="_blank" rel="noreferrer" className="font-medium text-brass hover:underline">
-            console.x.ai
-          </a>
-          .
-        </>
-      }
-      status={data && <Connected on={data.configured} />}
+      icon={<IconBell width={18} height={18} />}
+      title="Slack"
+      description="Post new tasks, changes to them and the follow-ups Jenny raises into Slack. Each task is one message that updates as the work does."
+      status={data && <Pill tone={data.connected ? 'good' : 'crit'}>{data.connected ? 'Connected' : 'Not set up'}</Pill>}
+      className="lg:col-span-2"
     >
       {!data ? (
         <p className="text-[13px] text-ink-faint">Loading…</p>
       ) : (
-        <div className="space-y-4">
-          <KeyField
-            id="media-key"
-            placeholder="xai-…"
-            view={data}
-            saving={setKey.isPending}
-            clearing={clearKey.isPending}
-            onSave={(key, done) => setKey.mutate(key, { onSuccess: done })}
-            onClear={() => clearKey.mutate(undefined)}
-          />
-          <ModelSelect
-            id="media-image-model"
-            label="Image model"
-            value={data.imageModel}
-            options={data.imageModels.map((m) => ({ id: m.id, label: `${m.label} — ${usdEach(m.usdPerImage)} each` }))}
-            note={data.imageModels.find((m) => m.id === data.imageModel)?.note}
-            pending={setModel.isPending}
-            onChange={(m) => setModel.mutate({ kind: 'image', model: m })}
-          />
-          <ModelSelect
-            id="media-video-model"
-            label="Video model"
-            value={data.videoModel}
-            options={data.videoModels.map((m) => ({ id: m.id, label: `${m.label} — ${usdEach(m.usdPerSecond)} a second` }))}
-            note="Clips are capped per day and per length on the server."
-            pending={setModel.isPending}
-            onChange={(m) => setModel.mutate({ kind: 'video', model: m })}
-          />
+        <div className="space-y-5">
+          <div className="grid gap-6 lg:grid-cols-2">
+            <div className="space-y-4">
+              <div>
+                <FieldLabel htmlFor="slack-token">Bot token</FieldLabel>
+                <div className="flex flex-wrap items-center gap-2">
+                  <PasswordInput
+                    id="slack-token"
+                    label="Slack bot token"
+                    wrapperClassName="min-w-0 flex-1"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={token}
+                    onChange={(e) => setTokenText(e.target.value)}
+                    placeholder={data.keyHint ? `•••• ${data.keyHint} — paste to replace` : 'xoxb-…'}
+                    className="w-full"
+                  />
+                  <button
+                    className="btn-primary btn-sm"
+                    disabled={setToken.isPending || !token.trim()}
+                    onClick={() => setToken.mutate(token.trim(), { onSuccess: () => { setTokenText(''); say('Token saved and checked with Slack'); } })}
+                  >
+                    {setToken.isPending ? 'Checking…' : 'Save'}
+                  </button>
+                  {data.source === 'studio' && (
+                    <button className="btn-ghost btn-sm" disabled={clearToken.isPending} onClick={() => clearToken.mutate(undefined, { onSuccess: () => say('Token removed') })}>
+                      {clearToken.isPending ? 'Removing…' : 'Remove'}
+                    </button>
+                  )}
+                </div>
+                <Hint>
+                  {data.source === 'environment'
+                    ? 'Using SLACK_BOT_TOKEN from the server. A token saved here replaces it.'
+                    : 'The Bot User OAuth Token (xoxb-…) of a Slack app with chat:write, chat:write.public, channels:read and groups:read. Stored encrypted.'}
+                </Hint>
+              </div>
+
+              <div>
+                <FieldLabel htmlFor="slack-channel">Default channel</FieldLabel>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    id="slack-channel"
+                    className="input min-w-0 flex-1"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={channelValue}
+                    onChange={(e) => setChannel(e.target.value)}
+                    placeholder="project-updates"
+                  />
+                  <button
+                    className="btn-primary btn-sm"
+                    disabled={setConfig.isPending || !channelDirty || !channelValue.trim()}
+                    onClick={() => setConfig.mutate({ channel: channelValue.trim() }, { onSuccess: () => { setChannel(null); say('Default channel saved'); } })}
+                  >
+                    {setConfig.isPending ? 'Saving…' : 'Save'}
+                  </button>
+                  <button className="btn-ghost btn-sm" disabled={test.isPending || !data.connected} onClick={() => test.mutate(undefined, { onSuccess: () => say(`Test message sent to #${data.channel}`) })}>
+                    {test.isPending ? 'Sending…' : 'Send a test'}
+                  </button>
+                </div>
+                <Hint>Where the daily reminder goes, and any project without a channel of its own. Invite the bot first: /invite @your-bot.</Hint>
+              </div>
+            </div>
+
+            <div>
+              <FieldLabel>What to send</FieldLabel>
+              <div className="divide-y divide-line rounded-lg border border-line">
+                {switches.map((row) => (
+                  <div key={row.key} className="flex items-start gap-3 p-3">
+                    <Switch
+                      checked={row.on}
+                      disabled={setConfig.isPending}
+                      label={row.label}
+                      onChange={(next) => setConfig.mutate({ [row.key]: next }, { onSuccess: () => say(`${row.label} turned ${next ? 'on' : 'off'}`) })}
+                    />
+                    <div className="min-w-0">
+                      <p className="text-[13px] font-medium leading-tight text-ink">{row.label}</p>
+                      <p className="mt-0.5 text-[12px] leading-snug text-ink-soft">{row.note}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {data.connected && <SlackProjectChannels defaultChannel={data.channel} />}
+
+          <div className="flex flex-wrap items-center gap-3 border-t border-line pt-4">
+            <button className="btn-ghost btn-sm" disabled={sync.isPending || !data.connected} onClick={() => sync.mutate(undefined, { onSuccess: (r) => say(`Sync finished — ${r.result.posted + r.result.updated} update${r.result.posted + r.result.updated === 1 ? '' : 's'} sent`) })}>
+              {sync.isPending ? 'Syncing…' : 'Sync now'}
+            </button>
+            <p className="text-[12px] text-ink-faint">
+              {data.lastRunAt
+                ? `Last checked ${new Date(data.lastRunAt).toLocaleString()} — ${data.lastPosted} update${data.lastPosted === 1 ? '' : 's'} sent.`
+                : 'Checked every five minutes once connected.'}
+            </p>
+            <Flash message={flash} className="sm:ml-auto" />
+          </div>
+          {data.lastError && <p className="text-[12.5px] text-crit">{data.lastError}</p>}
         </div>
       )}
-      <ErrorLine error={(setKey.error ?? clearKey.error ?? setModel.error) as Error | null} />
+      <ErrorLine error={(setToken.error ?? clearToken.error ?? setConfig.error ?? test.error ?? sync.error) as Error | null} />
     </SettingsCard>
   );
 }
@@ -1470,7 +1757,7 @@ type SettingsTab = 'connections' | 'ai' | 'studio' | 'account';
 
 const TABS: { id: SettingsTab; label: string; Icon: (p: { width?: number; height?: number }) => JSX.Element; principal: boolean }[] = [
   { id: 'connections', label: 'Connections', Icon: IconInbox, principal: false },
-  { id: 'ai', label: 'AI & media', Icon: IconAssistant, principal: true },
+  { id: 'ai', label: 'AI', Icon: IconAssistant, principal: true },
   { id: 'studio', label: 'Studio', Icon: IconBell, principal: true },
   { id: 'account', label: 'Account', Icon: IconPerson, principal: false },
 ];
@@ -1534,17 +1821,16 @@ export default function Settings() {
             <GoogleCard />
             <MailSyncCard />
             <EmailReadingCard />
+            <SlackSetupCard />
           </>
         )}
 
         {tab === 'ai' && (
           <>
             <AiSetupCard />
+            <AiRoutingCard />
             <PictureProviderCard />
             <OpenAiSetupCard />
-            <GeminiSetupCard />
-            <CloudflareSetupCard />
-            <MediaSetupCard />
           </>
         )}
 

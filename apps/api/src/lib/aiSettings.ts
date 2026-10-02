@@ -42,18 +42,6 @@ import { supabaseAdmin } from './supabase.js';
 const KEY_FIELD = 'anthropic_api_key_encrypted';
 const MODEL_FIELD = 'anthropic_model';
 
-// Rendering boards is a second provider with a second key. Same JSON blob,
-// same encryption, its own cache — so a studio can have Claude without
-// renders, which is the normal state until someone pays for image credit.
-const IMAGE_KEY_FIELD = 'image_api_key_encrypted';
-const IMAGE_MODEL_FIELD = 'image_model';
-
-// Grok: a third key, and two models rather than one, because a still and a
-// clip are priced and chosen separately.
-const XAI_KEY_FIELD = 'xai_api_key_encrypted';
-const XAI_IMAGE_MODEL_FIELD = 'xai_image_model';
-const XAI_VIDEO_MODEL_FIELD = 'xai_video_model';
-
 // OpenAI: a fourth key, one image model and a quality dial (quality is what
 // moves the price most, so it is the studio's to choose).
 const OPENAI_KEY_FIELD = 'openai_api_key_encrypted';
@@ -142,318 +130,9 @@ export async function resolveAi(given?: string | null): Promise<ResolvedAi> {
   return value;
 }
 
-const imageCache = new Map<string, { at: number; value: ResolvedAi }>();
-
-export function invalidateImageSettings(orgId?: string | null): void {
-  if (orgId) imageCache.delete(orgId);
-  else imageCache.clear();
-}
-
-function imageFromEnvironment(): ResolvedAi {
-  return {
-    apiKey: env.images.apiKey || null,
-    model: env.images.model || DEFAULT_IMAGE_MODEL,
-    source: env.images.apiKey ? 'environment' : 'none',
-  };
-}
-
-/** The image key and model this org should use, resolved like the Claude one. */
-export async function resolveImageAi(given?: string | null): Promise<ResolvedAi> {
-  if (!supabaseAdmin) return imageFromEnvironment();
-
-  const orgId = await resolveOrgId(given);
-  if (!orgId) return imageFromEnvironment();
-
-  const hit = imageCache.get(orgId);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.value;
-
-  let value = imageFromEnvironment();
-  try {
-    const settings = await readSettings(orgId);
-
-    const stored = settings[IMAGE_KEY_FIELD];
-    if (typeof stored === 'string' && stored) {
-      try {
-        const apiKey = decrypt(stored);
-        if (apiKey) value = { ...value, apiKey, source: 'studio' };
-      } catch {
-        console.error('[images] stored API key could not be decrypted — using the environment key');
-      }
-    }
-
-    const model = settings[IMAGE_MODEL_FIELD];
-    if (typeof model === 'string' && IMAGE_MODELS.some((m) => m.id === model)) {
-      value = { ...value, model };
-    }
-  } catch (err) {
-    console.error('[images] settings unreadable, using the environment:', (err as Error).message);
-    return imageFromEnvironment();
-  }
-
-  imageCache.set(orgId, { at: Date.now(), value });
-  return value;
-}
-
-// ── Grok (xAI): renderings and video ────────────────────────
-
-export interface ResolvedXai {
-  apiKey: string | null;
-  /** Two models rather than one: a still and a clip are chosen separately. */
-  imageModel: string;
-  videoModel: string;
-  source: 'studio' | 'environment' | 'none';
-}
-
-export interface XaiSettingsView {
-  configured: boolean;
-  source: ResolvedXai['source'];
-  keyHint: string | null;
-  imageModel: string;
-  videoModel: string;
-}
-
-const xaiCache = new Map<string, { at: number; value: ResolvedXai }>();
-
-export function invalidateXaiSettings(orgId?: string | null): void {
-  if (orgId) xaiCache.delete(orgId);
-  else xaiCache.clear();
-}
-
-function xaiFromEnvironment(): ResolvedXai {
-  return {
-    apiKey: env.xai.apiKey || null,
-    imageModel: env.xai.imageModel || DEFAULT_GROK_IMAGE_MODEL,
-    videoModel: env.xai.videoModel || DEFAULT_VIDEO_MODEL,
-    source: env.xai.apiKey ? 'environment' : 'none',
-  };
-}
-
-/** The Grok key and models this org should use, resolved like the others. */
-export async function resolveXai(given?: string | null): Promise<ResolvedXai> {
-  if (!supabaseAdmin) return xaiFromEnvironment();
-
-  const orgId = await resolveOrgId(given);
-  if (!orgId) return xaiFromEnvironment();
-
-  const hit = xaiCache.get(orgId);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.value;
-
-  let value = xaiFromEnvironment();
-  try {
-    const settings = await readSettings(orgId);
-
-    const stored = settings[XAI_KEY_FIELD];
-    if (typeof stored === 'string' && stored) {
-      try {
-        const apiKey = decrypt(stored);
-        if (apiKey) value = { ...value, apiKey, source: 'studio' };
-      } catch {
-        console.error('[grok] stored API key could not be decrypted — using the environment key');
-      }
-    }
-
-    // An unknown id is ignored rather than passed on: a typo in the
-    // settings row should not become a 404 on every render.
-    const imageModel = settings[XAI_IMAGE_MODEL_FIELD];
-    if (typeof imageModel === 'string' && GROK_IMAGE_MODELS.some((m) => m.id === imageModel)) {
-      value = { ...value, imageModel };
-    }
-    const videoModel = settings[XAI_VIDEO_MODEL_FIELD];
-    if (typeof videoModel === 'string' && VIDEO_MODELS.some((m) => m.id === videoModel)) {
-      value = { ...value, videoModel };
-    }
-  } catch (err) {
-    console.error('[grok] settings unreadable, using the environment:', (err as Error).message);
-    return xaiFromEnvironment();
-  }
-
-  xaiCache.set(orgId, { at: Date.now(), value });
-  return value;
-}
-
-export async function saveXaiApiKey(orgId: string, apiKey: string): Promise<void> {
-  if (!supabaseAdmin) throw new Error('Backend not configured');
-  const settings = await readSettings(orgId);
-  const { error } = await supabaseAdmin
-    .from('organizations')
-    .update({ settings: { ...settings, [XAI_KEY_FIELD]: encrypt(apiKey.trim()) } })
-    .eq('id', orgId);
-  if (error) throw new Error(error.message);
-  invalidateXaiSettings(orgId);
-}
-
-export async function clearXaiApiKey(orgId: string): Promise<void> {
-  if (!supabaseAdmin) throw new Error('Backend not configured');
-  const settings = await readSettings(orgId);
-  delete settings[XAI_KEY_FIELD];
-  const { error } = await supabaseAdmin.from('organizations').update({ settings }).eq('id', orgId);
-  if (error) throw new Error(error.message);
-  invalidateXaiSettings(orgId);
-}
-
-export async function saveXaiModel(orgId: string, kind: 'image' | 'video', model: string): Promise<void> {
-  if (!supabaseAdmin) throw new Error('Backend not configured');
-  const known =
-    kind === 'image'
-      ? GROK_IMAGE_MODELS.some((m) => m.id === model)
-      : VIDEO_MODELS.some((m) => m.id === model);
-  if (!known) throw new Error('Unknown model');
-  const field = kind === 'image' ? XAI_IMAGE_MODEL_FIELD : XAI_VIDEO_MODEL_FIELD;
-  const settings = await readSettings(orgId);
-  const { error } = await supabaseAdmin
-    .from('organizations')
-    .update({ settings: { ...settings, [field]: model } })
-    .eq('id', orgId);
-  if (error) throw new Error(error.message);
-  invalidateXaiSettings(orgId);
-}
-
-/** What the settings screen may see. Never the key itself. */
-export async function xaiSettingsView(orgId: string): Promise<XaiSettingsView> {
-  const resolved = await resolveXai(orgId);
-  return {
-    configured: Boolean(resolved.apiKey),
-    source: resolved.source,
-    keyHint: resolved.apiKey ? resolved.apiKey.slice(-4) : null,
-    imageModel: resolved.imageModel,
-    videoModel: resolved.videoModel,
-  };
-}
-
-/** Basic shape check — a typo should fail here, not on the first render. */
-export function looksLikeXaiKey(key: string): boolean {
-  return /^xai-[A-Za-z0-9_-]{20,}$/.test(key.trim());
-}
-
-export async function saveImageApiKey(orgId: string, apiKey: string): Promise<void> {
-  if (!supabaseAdmin) throw new Error('Backend not configured');
-  const settings = await readSettings(orgId);
-  const { error } = await supabaseAdmin
-    .from('organizations')
-    .update({ settings: { ...settings, [IMAGE_KEY_FIELD]: encrypt(apiKey.trim()) } })
-    .eq('id', orgId);
-  if (error) throw new Error(error.message);
-  invalidateImageSettings(orgId);
-}
-
-// ── Cloudflare Workers AI: free photoreal renderings ────────
-//
-// Two credentials rather than one — the account the models run in, and a
-// token allowed to run them — plus which model and how many steps. The
-// token is encrypted like every other key; the account id is not secret
-// on its own (it appears in every dashboard URL) and is kept readable so
-// the settings screen can show which account is in use.
-
-const CF_ACCOUNT_FIELD = 'cloudflare_account_id';
-const CF_TOKEN_FIELD = 'cloudflare_api_token_encrypted';
-const CF_MODEL_FIELD = 'cloudflare_model';
-const CF_STEPS_FIELD = 'cloudflare_steps';
-
-export interface ResolvedCloudflare {
-  accountId: string | null;
-  apiToken: string | null;
-  model: string;
-  steps: number;
-  source: 'studio' | 'environment' | 'none';
-}
-
-export interface CloudflareSettingsView {
-  configured: boolean;
-  source: ResolvedCloudflare['source'];
-  keyHint: string | null;
-  accountId: string | null;
-  model: string;
-  steps: number;
-}
-
-function clampSteps(model: string, steps: unknown): number {
-  const max = CLOUDFLARE_IMAGE_MODELS.find((m) => m.id === model)?.maxSteps ?? 8;
-  const n = Math.round(Number(steps));
-  return Number.isFinite(n) && n >= 1 ? Math.min(n, max) : Math.min(DEFAULT_CLOUDFLARE_STEPS, max);
-}
-
-export async function resolveCloudflare(given?: string | null): Promise<ResolvedCloudflare> {
-  const fromEnv: ResolvedCloudflare = {
-    accountId: env.cloudflare.accountId || null,
-    apiToken: env.cloudflare.apiToken || null,
-    model: DEFAULT_CLOUDFLARE_MODEL,
-    steps: DEFAULT_CLOUDFLARE_STEPS,
-    source: env.cloudflare.accountId && env.cloudflare.apiToken ? 'environment' : 'none',
-  };
-  const orgId = await resolveOrgId(given);
-  if (!orgId || !supabaseAdmin) return fromEnv;
-  try {
-    const settings = await readSettings(orgId);
-    let value = { ...fromEnv };
-    const account = settings[CF_ACCOUNT_FIELD];
-    const stored = settings[CF_TOKEN_FIELD];
-    if (typeof account === 'string' && account && typeof stored === 'string' && stored) {
-      try {
-        value = { ...value, accountId: account, apiToken: decrypt(stored), source: 'studio' };
-      } catch {
-        console.error('[cloudflare] stored token could not be decrypted — using the environment');
-      }
-    }
-    const model = settings[CF_MODEL_FIELD];
-    if (typeof model === 'string' && CLOUDFLARE_IMAGE_MODELS.some((m) => m.id === model)) value.model = model;
-    value.steps = clampSteps(value.model, settings[CF_STEPS_FIELD] ?? value.steps);
-    return value;
-  } catch (err) {
-    console.error('[cloudflare] settings unreadable, using the environment:', (err as Error).message);
-    return fromEnv;
-  }
-}
-
-export async function cloudflareSettingsView(orgId: string): Promise<CloudflareSettingsView> {
-  const r = await resolveCloudflare(orgId);
-  return {
-    configured: Boolean(r.accountId && r.apiToken),
-    source: r.source,
-    keyHint: r.apiToken ? r.apiToken.slice(-4) : null,
-    accountId: r.accountId,
-    model: r.model,
-    steps: r.steps,
-  };
-}
-
-export function looksLikeCloudflareAccount(id: string): boolean {
-  return /^[0-9a-f]{32}$/i.test(id.trim());
-}
-
-export async function saveCloudflareCredentials(orgId: string, accountId: string, apiToken: string): Promise<void> {
-  if (!supabaseAdmin) throw new Error('Backend not configured');
-  const settings = await readSettings(orgId);
-  const { error } = await supabaseAdmin
-    .from('organizations')
-    .update({
-      settings: { ...settings, [CF_ACCOUNT_FIELD]: accountId.trim(), [CF_TOKEN_FIELD]: encrypt(apiToken.trim()) },
-    })
-    .eq('id', orgId);
-  if (error) throw new Error(error.message);
-}
-
-export async function clearCloudflareCredentials(orgId: string): Promise<void> {
-  if (!supabaseAdmin) throw new Error('Backend not configured');
-  const settings = await readSettings(orgId);
-  delete settings[CF_ACCOUNT_FIELD];
-  delete settings[CF_TOKEN_FIELD];
-  const { error } = await supabaseAdmin.from('organizations').update({ settings }).eq('id', orgId);
-  if (error) throw new Error(error.message);
-}
-
-export async function saveCloudflareModel(orgId: string, model: string, steps?: number): Promise<void> {
-  if (!supabaseAdmin) throw new Error('Backend not configured');
-  if (!CLOUDFLARE_IMAGE_MODELS.some((m) => m.id === model)) throw new Error('Unknown model');
-  const settings = await readSettings(orgId);
-  const next: Record<string, unknown> = { ...settings, [CF_MODEL_FIELD]: model };
-  if (steps !== undefined) next[CF_STEPS_FIELD] = clampSteps(model, steps);
-  const { error } = await supabaseAdmin.from('organizations').update({ settings: next }).eq('id', orgId);
-  if (error) throw new Error(error.message);
-}
-
 const PICTURE_ENGINE_FIELD = 'picture_engine';
 
-/** Who makes the picture on a board: `gemini`, or a Claude model id. */
+/** Who makes the picture on a board: `openai`, or a Claude model id. */
 export async function resolvePictureEngine(given?: string | null): Promise<string> {
   const orgId = await resolveOrgId(given);
   if (!orgId) return DEFAULT_PICTURE_ENGINE;
@@ -476,47 +155,40 @@ export async function savePictureEngine(orgId: string, engine: string): Promise<
   if (error) throw new Error(error.message);
 }
 
-/** Basic shape check — Google API keys begin AIza. */
-export function looksLikeGeminiKey(key: string): boolean {
-  return /^AIza[A-Za-z0-9_-]{30,}$/.test(key.trim());
+// ── Providers the studio no longer uses ────────────────────
+//
+// Gemini (boards and renderings), Grok (renderings and video) and Cloudflare
+// (free photos) were removed from Settings: their keys can no longer be saved
+// or read from the server's environment, and nothing here looks at what an
+// older install still has stored. The code that calls these resolvers is
+// still in the tree and treats "no key" as "this provider is not set up", so
+// it goes quiet instead of failing. Migration 0030 deletes the stored keys.
+
+export async function resolveImageAi(_given?: string | null): Promise<ResolvedAi> {
+  return { apiKey: null, model: DEFAULT_IMAGE_MODEL, source: 'none' };
 }
 
-export async function saveImageModel(orgId: string, model: string): Promise<void> {
-  if (!supabaseAdmin) throw new Error('Backend not configured');
-  if (!IMAGE_MODELS.some((m) => m.id === model)) throw new Error('Unknown model');
-  const settings = await readSettings(orgId);
-  const { error } = await supabaseAdmin
-    .from('organizations')
-    .update({ settings: { ...settings, [IMAGE_MODEL_FIELD]: model } })
-    .eq('id', orgId);
-  if (error) throw new Error(error.message);
-  invalidateImageSettings(orgId);
+export interface ResolvedXai {
+  apiKey: string | null;
+  imageModel: string;
+  videoModel: string;
+  source: 'studio' | 'environment' | 'none';
 }
 
-export async function clearImageApiKey(orgId: string): Promise<void> {
-  if (!supabaseAdmin) throw new Error('Backend not configured');
-  const settings = await readSettings(orgId);
-  delete settings[IMAGE_KEY_FIELD];
-  const { error } = await supabaseAdmin
-    .from('organizations')
-    .update({ settings })
-    .eq('id', orgId);
-  if (error) throw new Error(error.message);
-  invalidateImageSettings(orgId);
+export async function resolveXai(_given?: string | null): Promise<ResolvedXai> {
+  return { apiKey: null, imageModel: DEFAULT_GROK_IMAGE_MODEL, videoModel: DEFAULT_VIDEO_MODEL, source: 'none' };
 }
 
-/** The board renderer's state, for the settings screen. Never the key itself. */
-export async function imageSettingsView(orgId: string): Promise<AiSettingsView> {
-  const settings = await readSettings(orgId).catch(() => ({}) as Record<string, unknown>);
-  const resolved = await resolveImageAi(orgId);
+export interface ResolvedCloudflare {
+  accountId: string | null;
+  apiToken: string | null;
+  model: string;
+  steps: number;
+  source: 'studio' | 'environment' | 'none';
+}
 
-  return {
-    configured: Boolean(resolved.apiKey),
-    source: resolved.source,
-    keyHint: resolved.apiKey ? resolved.apiKey.slice(-4) : null,
-    model: resolved.model,
-    modelIsDefault: typeof settings[IMAGE_MODEL_FIELD] !== 'string',
-  };
+export async function resolveCloudflare(_given?: string | null): Promise<ResolvedCloudflare> {
+  return { accountId: null, apiToken: null, model: DEFAULT_CLOUDFLARE_MODEL, steps: DEFAULT_CLOUDFLARE_STEPS, source: 'none' };
 }
 
 /** What the settings screen may see. Never includes the key. */

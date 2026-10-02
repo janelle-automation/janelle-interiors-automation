@@ -409,7 +409,7 @@ assistantRouter.post(
         } Furniture and finishes are illustrative.`
       : picture.board
       ? picture.sketch
-        ? `Here is the board. The picture on it is an illustrated sketch — enable billing on the Gemini key (or add an xAI key) for a photoreal rendering.`
+        ? `Here is the board. The picture on it is an illustrated sketch — add an OpenAI key in Settings for a photoreal rendering.`
         : 'Here is the board. The rendering is generated, not a photograph — check every specification before it goes to a client.'
       : picture.sketch
         ? `Here is a sketch of it. ${picture.note ?? ''}`.trim()
