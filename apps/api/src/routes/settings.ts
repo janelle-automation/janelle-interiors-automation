@@ -11,44 +11,35 @@ import {
   saveModel,
 } from '../lib/aiSettings.js';
 import {
-  clearXaiApiKey,
   clearOpenAiApiKey,
   looksLikeOpenAiKey,
   openAiSettingsView,
   saveOpenAiApiKey,
   saveOpenAiModel,
-  looksLikeXaiKey,
-  saveXaiApiKey,
-  saveXaiModel,
-  xaiSettingsView,
-} from '../lib/aiSettings.js';
-import {
-  clearImageApiKey,
-  imageSettingsView,
-  looksLikeGeminiKey,
-  saveImageApiKey,
-  saveImageModel,
   resolvePictureEngine,
   savePictureEngine,
-  cloudflareSettingsView,
-  clearCloudflareCredentials,
-  looksLikeCloudflareAccount,
-  saveCloudflareCredentials,
-  saveCloudflareModel,
 } from '../lib/aiSettings.js';
-import {
-  CLOUDFLARE_IMAGE_MODELS,
-  GROK_IMAGE_MODELS,
-  IMAGE_MODELS,
-  OPENAI_IMAGE_MODELS,
-  OPENAI_QUALITIES,
-  PICTURE_ENGINES,
-  VIDEO_MODELS,
-} from '@janelle/shared';
+import { OPENAI_IMAGE_MODELS, OPENAI_QUALITIES, PICTURE_ENGINES } from '@janelle/shared';
 import { readIngestSettings, saveIngestSettings } from '../lib/ingestSettings.js';
 import { runIngest } from '../services/ingest.js';
 import { gmailFor } from '../services/gmail.js';
 import { isGoogleAuthFailure } from '../lib/tokens.js';
+import {
+  clearSlackToken,
+  looksLikeSlackBotToken,
+  resolveSlack,
+  saveSlackConfig,
+  saveSlackToken,
+  slackSettingsView,
+} from '../lib/slackSettings.js';
+import { SlackError, authTest, normalizeChannelName, postMessage, tokenScopes } from '../services/slack.js';
+import { loadDirectory, matchChannel } from '../services/slackRouting.js';
+import { hasColumn } from '../lib/columns.js';
+import { runSlackSync } from '../services/slackSync.js';
+import { clearGeminiKey, keyFor, looksLikeGeminiKey, routingView, saveGeminiKey, saveRoute } from '../lib/llmSettings.js';
+import { complete as completeWith, costOf } from '../services/llm.js';
+import { firstJson } from '../services/anthropic.js';
+import type { AiFeature, AiRoutingTestResult, LlmProvider, LlmRoute } from '@janelle/shared';
 
 /**
  * Studio settings that used to require a deploy.
@@ -125,112 +116,6 @@ settingsRouter.get(
     const orgId = req.auth!.orgId;
     if (!orgId) return res.status(400).json({ error: 'No organization for user' });
     res.json({ data: { ...(await aiSettingsView(orgId)), models: SELECTABLE_MODELS } });
-  }),
-);
-
-/**
- * The Grok account — renderings and video.
- *
- * A third provider with a third key, on the same terms as the Claude one:
- * the key is encrypted at rest, never travels back to the browser, and the
- * screen sees only its last four characters and which models are in use.
- */
-settingsRouter.get(
-  '/media',
-  requirePermission('settings', 'update'),
-  asyncHandler(async (req, res) => {
-    const orgId = req.auth!.orgId;
-    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
-    res.json({
-      data: {
-        ...(await xaiSettingsView(orgId)),
-        imageModels: GROK_IMAGE_MODELS,
-        videoModels: VIDEO_MODELS,
-      },
-    });
-  }),
-);
-
-settingsRouter.put(
-  '/media/key',
-  requirePermission('settings', 'update'),
-  asyncHandler(async (req, res) => {
-    const orgId = req.auth!.orgId;
-    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
-
-    const apiKey = String(req.body?.apiKey ?? '').trim();
-    if (!looksLikeXaiKey(apiKey)) {
-      return res.status(400).json({
-        error: 'That does not look like an xAI API key',
-        detail: 'Keys begin with xai- and come from console.x.ai.',
-      });
-    }
-
-    await saveXaiApiKey(orgId, apiKey);
-
-    // The key itself never reaches the log — the last four is enough to
-    // tell afterwards which key was put in place.
-    await supabaseAdmin?.from('activity_log').insert({
-      org_id: orgId,
-      actor: req.auth!.userId,
-      action: 'settings.media_key_set',
-      entity: 'organizations',
-      entity_id: orgId,
-      meta: { hint: apiKey.slice(-4) },
-    });
-
-    res.json({ data: { ...(await xaiSettingsView(orgId)), imageModels: GROK_IMAGE_MODELS, videoModels: VIDEO_MODELS } });
-  }),
-);
-
-settingsRouter.delete(
-  '/media/key',
-  requirePermission('settings', 'update'),
-  asyncHandler(async (req, res) => {
-    const orgId = req.auth!.orgId;
-    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
-
-    await clearXaiApiKey(orgId);
-
-    await supabaseAdmin?.from('activity_log').insert({
-      org_id: orgId,
-      actor: req.auth!.userId,
-      action: 'settings.media_key_cleared',
-      entity: 'organizations',
-      entity_id: orgId,
-      meta: {},
-    });
-
-    res.json({ data: { ...(await xaiSettingsView(orgId)), imageModels: GROK_IMAGE_MODELS, videoModels: VIDEO_MODELS } });
-  }),
-);
-
-/** Which Grok model draws stills, and which one makes clips. */
-settingsRouter.put(
-  '/media/model',
-  requirePermission('settings', 'update'),
-  asyncHandler(async (req, res) => {
-    const orgId = req.auth!.orgId;
-    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
-
-    const kind = req.body?.kind === 'video' ? 'video' : 'image';
-    const model = String(req.body?.model ?? '');
-    try {
-      await saveXaiModel(orgId, kind, model);
-    } catch {
-      return res.status(400).json({ error: 'Unknown model' });
-    }
-
-    await supabaseAdmin?.from('activity_log').insert({
-      org_id: orgId,
-      actor: req.auth!.userId,
-      action: 'settings.media_model_set',
-      entity: 'organizations',
-      entity_id: orgId,
-      meta: { kind, model },
-    });
-
-    res.json({ data: { ...(await xaiSettingsView(orgId)), imageModels: GROK_IMAGE_MODELS, videoModels: VIDEO_MODELS } });
   }),
 );
 
@@ -333,16 +218,11 @@ settingsRouter.put(
 );
 
 /**
- * The Gemini account — renderings and presentation boards.
- *
- * Stored and resolved since the boards were built, but only ever settable
- * from the environment, so changing the key or the model meant a deploy.
- * Same terms as the other two keys: encrypted at rest, never sent back.
+ * Which engine draws the studio's pictures, and the engines to choose from.
+ * The keys behind each engine have their own routes (Claude, OpenAI).
  */
-async function geminiView(orgId: string) {
+async function pictureView(orgId: string) {
   return {
-    ...(await imageSettingsView(orgId)),
-    models: IMAGE_MODELS,
     engine: await resolvePictureEngine(orgId),
     engines: PICTURE_ENGINES,
   };
@@ -354,176 +234,11 @@ settingsRouter.get(
   asyncHandler(async (req, res) => {
     const orgId = req.auth!.orgId;
     if (!orgId) return res.status(400).json({ error: 'No organization for user' });
-    res.json({ data: await geminiView(orgId) });
+    res.json({ data: await pictureView(orgId) });
   }),
 );
 
-settingsRouter.put(
-  '/images/key',
-  requirePermission('settings', 'update'),
-  asyncHandler(async (req, res) => {
-    const orgId = req.auth!.orgId;
-    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
-
-    const apiKey = String(req.body?.apiKey ?? '').trim();
-    if (!looksLikeGeminiKey(apiKey)) {
-      return res.status(400).json({
-        error: 'That does not look like a Gemini API key',
-        detail: 'Keys begin with AIza and come from aistudio.google.com.',
-      });
-    }
-
-    await saveImageApiKey(orgId, apiKey);
-
-    await supabaseAdmin?.from('activity_log').insert({
-      org_id: orgId,
-      actor: req.auth!.userId,
-      action: 'settings.image_key_set',
-      entity: 'organizations',
-      entity_id: orgId,
-      meta: { hint: apiKey.slice(-4) },
-    });
-
-    res.json({ data: await geminiView(orgId) });
-  }),
-);
-
-settingsRouter.delete(
-  '/images/key',
-  requirePermission('settings', 'update'),
-  asyncHandler(async (req, res) => {
-    const orgId = req.auth!.orgId;
-    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
-
-    await clearImageApiKey(orgId);
-
-    await supabaseAdmin?.from('activity_log').insert({
-      org_id: orgId,
-      actor: req.auth!.userId,
-      action: 'settings.image_key_cleared',
-      entity: 'organizations',
-      entity_id: orgId,
-      meta: {},
-    });
-
-    res.json({ data: await geminiView(orgId) });
-  }),
-);
-
-settingsRouter.put(
-  '/images/model',
-  requirePermission('settings', 'update'),
-  asyncHandler(async (req, res) => {
-    const orgId = req.auth!.orgId;
-    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
-
-    const model = String(req.body?.model ?? '');
-    try {
-      await saveImageModel(orgId, model);
-    } catch {
-      return res.status(400).json({ error: 'Unknown model' });
-    }
-
-    await supabaseAdmin?.from('activity_log').insert({
-      org_id: orgId,
-      actor: req.auth!.userId,
-      action: 'settings.image_model_set',
-      entity: 'organizations',
-      entity_id: orgId,
-      meta: { model },
-    });
-
-    res.json({ data: await geminiView(orgId) });
-  }),
-);
-
-/**
- * Cloudflare Workers AI — free photoreal renderings.
- *
- * An Account ID and a token, like the other keys encrypted at rest and
- * never sent back; the environment's CLOUDFLARE_ACCOUNT_ID and
- * CLOUDFLARE_API_TOKEN stand in until the studio sets its own.
- */
-async function cloudflareView(orgId: string) {
-  return { ...(await cloudflareSettingsView(orgId)), models: CLOUDFLARE_IMAGE_MODELS };
-}
-
-settingsRouter.get(
-  '/cloudflare',
-  requirePermission('settings', 'update'),
-  asyncHandler(async (req, res) => {
-    const orgId = req.auth!.orgId;
-    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
-    res.json({ data: await cloudflareView(orgId) });
-  }),
-);
-
-settingsRouter.put(
-  '/cloudflare/key',
-  requirePermission('settings', 'update'),
-  asyncHandler(async (req, res) => {
-    const orgId = req.auth!.orgId;
-    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
-
-    const accountId = String(req.body?.accountId ?? '').trim();
-    const apiToken = String(req.body?.apiToken ?? '').trim();
-    if (!looksLikeCloudflareAccount(accountId)) {
-      return res.status(400).json({ error: 'That does not look like a Cloudflare Account ID — it is 32 letters and digits, shown under Workers & Pages.' });
-    }
-    if (apiToken.length < 20) return res.status(400).json({ error: 'Paste the API token as well.' });
-
-    await saveCloudflareCredentials(orgId, accountId, apiToken);
-
-    await supabaseAdmin?.from('activity_log').insert({
-      org_id: orgId,
-      actor: req.auth!.userId,
-      action: 'settings.cloudflare_key_set',
-      entity: 'organizations',
-      entity_id: orgId,
-      meta: { hint: apiToken.slice(-4) },
-    });
-
-    res.json({ data: await cloudflareView(orgId) });
-  }),
-);
-
-settingsRouter.delete(
-  '/cloudflare/key',
-  requirePermission('settings', 'update'),
-  asyncHandler(async (req, res) => {
-    const orgId = req.auth!.orgId;
-    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
-    await clearCloudflareCredentials(orgId);
-    await supabaseAdmin?.from('activity_log').insert({
-      org_id: orgId,
-      actor: req.auth!.userId,
-      action: 'settings.cloudflare_key_cleared',
-      entity: 'organizations',
-      entity_id: orgId,
-      meta: {},
-    });
-    res.json({ data: await cloudflareView(orgId) });
-  }),
-);
-
-settingsRouter.put(
-  '/cloudflare/model',
-  requirePermission('settings', 'update'),
-  asyncHandler(async (req, res) => {
-    const orgId = req.auth!.orgId;
-    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
-    const model = String(req.body?.model ?? '');
-    const steps = req.body?.steps === undefined ? undefined : Number(req.body.steps);
-    try {
-      await saveCloudflareModel(orgId, model, steps);
-    } catch {
-      return res.status(400).json({ error: 'Unknown model' });
-    }
-    res.json({ data: await cloudflareView(orgId) });
-  }),
-);
-
-/** Who makes the picture on a board: Gemini, or a Claude model drawing it. */
+/** Who makes the picture on a board: OpenAI, or a Claude model drawing it. */
 settingsRouter.put(
   '/images/engine',
   requirePermission('settings', 'update'),
@@ -547,7 +262,7 @@ settingsRouter.put(
       meta: { engine },
     });
 
-    res.json({ data: await geminiView(orgId) });
+    res.json({ data: await pictureView(orgId) });
   }),
 );
 
@@ -773,5 +488,363 @@ settingsRouter.put(
     });
 
     res.json({ data: await aiSettingsView(orgId) });
+  }),
+);
+
+/**
+ * Slack — task and follow-up updates posted to a channel.
+ *
+ * A bot token (xoxb-…), encrypted at rest and never sent back, plus the
+ * channel to post in. The token is checked against Slack before it is saved,
+ * so a wrong paste fails here with a reason rather than silently later.
+ */
+const CHANNEL = /^(?:#?[a-z0-9][a-z0-9._-]{0,79}|[CG][A-Z0-9]{8,})$/;
+
+settingsRouter.get(
+  '/slack',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await slackSettingsView(orgId) });
+  }),
+);
+
+settingsRouter.put(
+  '/slack/token',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const token = String(req.body?.token ?? '').trim();
+    if (!looksLikeSlackBotToken(token)) {
+      return res.status(400).json({ error: 'That does not look like a Slack bot token — it starts with xoxb- (OAuth & Permissions → Bot User OAuth Token).' });
+    }
+    let workspace: string;
+    try {
+      workspace = (await authTest(token)).team;
+    } catch (err) {
+      return res.status(400).json({ error: (err as Error).message });
+    }
+
+    await saveSlackToken(orgId, token);
+    // Stamps the moment Slack was switched on, so the backlog is not announced.
+    await saveSlackConfig(orgId, {});
+
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.slack_token_set',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: { workspace, hint: token.slice(-4) },
+    });
+    res.json({ data: await slackSettingsView(orgId) });
+  }),
+);
+
+settingsRouter.delete(
+  '/slack/token',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    await clearSlackToken(orgId);
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.slack_token_cleared',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: {},
+    });
+    res.json({ data: await slackSettingsView(orgId) });
+  }),
+);
+
+settingsRouter.put(
+  '/slack/config',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const b = req.body ?? {};
+    const patch: { channel?: string; enabled?: boolean; tasks?: boolean; followUps?: boolean; dailyDigest?: boolean } = {};
+    if ('channel' in b) {
+      const channel = String(b.channel ?? '').trim();
+      if (!CHANNEL.test(channel)) {
+        return res.status(400).json({ error: 'A channel name looks like project-updates (lowercase, no spaces), or paste the channel ID.' });
+      }
+      patch.channel = channel;
+    }
+    for (const key of ['enabled', 'tasks', 'followUps', 'dailyDigest'] as const) {
+      if (key in b) patch[key] = Boolean(b[key]);
+    }
+    if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to change' });
+
+    await saveSlackConfig(orgId, patch);
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.slack_config_set',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: patch,
+    });
+    res.json({ data: await slackSettingsView(orgId) });
+  }),
+);
+
+// A message into the channel now, to prove the token, the channel and the
+// bot's membership all work before anyone relies on them.
+settingsRouter.post(
+  '/slack/test',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    const slack = await resolveSlack(orgId);
+    if (!slack.connected || !slack.token) return res.status(400).json({ error: 'Add the bot token and a channel first.' });
+    try {
+      await postMessage(slack.token, slack.config.channel, {
+        text: ':wave: Slack is connected. Task and follow-up updates from Janelle will appear here.',
+      });
+    } catch (err) {
+      return res.status(400).json({ error: err instanceof SlackError ? err.message : 'Could not reach Slack.' });
+    }
+    res.json({ data: await slackSettingsView(orgId) });
+  }),
+);
+
+// Run the sync now instead of waiting for the next five-minute pass.
+settingsRouter.post(
+  '/slack/sync',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    const result = await runSlackSync(orgId, { budgetMs: 20_000 });
+    res.json({ data: { result, settings: await slackSettingsView(orgId) } });
+  }),
+);
+
+/**
+ * Which Slack channel each project's updates go to.
+ *
+ * Shows, per project, the channel an admin assigned and the one the system
+ * would pick by name, so the screen can say what is happening without anyone
+ * having to test it. The automatic match only exists when the bot may read
+ * the channel list; `missingScope` tells the screen to say what to add.
+ */
+settingsRouter.get(
+  '/slack/projects',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const ready = await hasColumn('projects', 'slack_channel');
+    const { data } = await supabaseAdmin!
+      .from('projects')
+      .select(ready ? 'id, name, slack_channel' : 'id, name')
+      .eq('org_id', orgId)
+      .order('name');
+    const projects = (data ?? []) as unknown as { id: string; name: string; slack_channel?: string | null }[];
+
+    const slack = await resolveSlack(orgId);
+    const dir = slack.token ? await loadDirectory(slack.token) : { channels: [], missingScope: false };
+    // With chat:write.public the bot posts in any public channel without joining it,
+    // so "not a member" is only a problem for private ones.
+    const canPostPublic = slack.token ? (await tokenScopes(slack.token)).includes('chat:write.public') : false;
+
+    res.json({
+      data: {
+        ready,
+        missingScope: dir.missingScope,
+        projects: projects.map((p) => {
+          const assigned = (p.slack_channel ?? '').trim().replace(/^#/, '');
+          const auto = matchChannel(p.name, dir);
+          const shown = assigned
+            ? dir.channels.find((c) => c.id === assigned || normalizeChannelName(c.name) === normalizeChannelName(assigned))
+            : auto;
+          return {
+            id: p.id,
+            name: p.name,
+            channel: assigned,
+            auto: auto?.name ?? null,
+            // False only when the list could be read and the bot is not in it.
+            botIn: shown ? shown.isMember || (!shown.isPrivate && canPostPublic) : null,
+          };
+        }),
+      },
+    });
+  }),
+);
+
+settingsRouter.put(
+  '/slack/projects/:id',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    if (!(await hasColumn('projects', 'slack_channel'))) {
+      return res.status(409).json({ error: 'Project channels need migration 0029_project_slack_channel.sql applied first.' });
+    }
+
+    const channel = String(req.body?.channel ?? '').trim();
+    if (channel && !CHANNEL.test(channel)) {
+      return res.status(400).json({ error: 'A channel name looks like coleman (lowercase, no spaces), or paste the channel ID.' });
+    }
+    const { data, error } = await supabaseAdmin!
+      .from('projects')
+      .update({ slack_channel: channel ? channel.replace(/^#/, '') : null })
+      .eq('id', req.params.id)
+      .eq('org_id', orgId)
+      .select('id')
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return res.status(404).json({ error: 'Project not found' });
+    res.json({ data: { ok: true } });
+  }),
+);
+
+/**
+ * Who does the work — which AI handles each action.
+ *
+ * Reading email, raising tasks, drafting and the digest each run on Claude
+ * unless the studio picks OpenAI or Gemini for them here. Keys never travel
+ * back to the browser; `test` runs a sample email through a candidate so the
+ * quality can be judged before any real mail is sent to it.
+ */
+settingsRouter.get(
+  '/ai-routing',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await routingView(orgId) });
+  }),
+);
+
+settingsRouter.put(
+  '/ai-routing',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const b = req.body ?? {};
+    const feature = String(b.feature ?? '') as AiFeature;
+    const provider = String(b.provider ?? '');
+    const price = (v: unknown) => (v === undefined || v === null || v === '' ? undefined : Number(v));
+    try {
+      await saveRoute(
+        orgId,
+        feature,
+        provider === 'anthropic' || !provider
+          ? null
+          : { provider: provider as LlmProvider, model: String(b.model ?? ''), inputPer1M: price(b.inputPer1M), outputPer1M: price(b.outputPer1M) },
+      );
+    } catch (err) {
+      return res.status(400).json({ error: (err as Error).message });
+    }
+
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.ai_routing_set',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: { feature, provider: provider || 'anthropic', model: provider && provider !== 'anthropic' ? String(b.model ?? '') : null },
+    });
+    res.json({ data: await routingView(orgId) });
+  }),
+);
+
+settingsRouter.put(
+  '/ai-routing/gemini-key',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    const apiKey = String(req.body?.apiKey ?? '').trim();
+    if (!looksLikeGeminiKey(apiKey)) {
+      return res.status(400).json({ error: 'That does not look like a Gemini key — it starts with AIza (from aistudio.google.com/apikey).' });
+    }
+    await saveGeminiKey(orgId, apiKey);
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId, actor: req.auth!.userId, action: 'settings.gemini_text_key_set',
+      entity: 'organizations', entity_id: orgId, meta: { hint: apiKey.slice(-4) },
+    });
+    res.json({ data: await routingView(orgId) });
+  }),
+);
+
+settingsRouter.delete(
+  '/ai-routing/gemini-key',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    await clearGeminiKey(orgId);
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId, actor: req.auth!.userId, action: 'settings.gemini_text_key_cleared',
+      entity: 'organizations', entity_id: orgId, meta: {},
+    });
+    res.json({ data: await routingView(orgId) });
+  }),
+);
+
+/** A made-up email with a known right answer, so a candidate AI can be judged on something checkable. */
+const ROUTING_TEST_SYSTEM =
+  'You read email for an interior design studio. Reply with ONLY a JSON object with these keys: ' +
+  '"class" (one of quote_request, order_update, client_message, other), "vendor" (string or null), ' +
+  '"project" (string or null), "summary" (one sentence), "action_needed" (true or false).';
+const ROUTING_TEST_EMAIL =
+  'From: Dana at Hartwell Fabrics <dana@hartwellfabrics.example>\n' +
+  'To: studio@example.com\nSubject: Quote for the Meridian Ranch banquette\n\n' +
+  'Hi — attached is our quote for 14 yards of the Aldine boucle for the Meridian Ranch banquette, $1,260 total, ' +
+  'ships in 3 weeks. Let us know if you would like to go ahead and we will hold the dye lot.';
+
+settingsRouter.post(
+  '/ai-routing/test',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const b = req.body ?? {};
+    const provider = String(b.provider ?? '');
+    const model = String(b.model ?? '').trim();
+    if ((provider !== 'openai' && provider !== 'gemini') || !model) {
+      return res.status(400).json({ error: 'Choose OpenAI or Gemini and a model to test.' });
+    }
+    const key = await keyFor(provider, orgId);
+    if (!key) return res.status(400).json({ error: `Add the ${provider === 'openai' ? 'OpenAI' : 'Gemini'} key first.` });
+
+    const price = (v: unknown) => (v === undefined || v === null || v === '' ? undefined : Number(v));
+    const route: LlmRoute = { provider, model, inputPer1M: price(b.inputPer1M), outputPer1M: price(b.outputPer1M) };
+    const started = Date.now();
+    const result: AiRoutingTestResult = { ok: false, latencyMs: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, sample: null };
+    try {
+      const r = await completeWith(route, key, {
+        system: ROUTING_TEST_SYSTEM, user: ROUTING_TEST_EMAIL, maxTokens: 400, temperature: 0, json: true, timeoutMs: 25_000,
+      });
+      const sample = firstJson<Record<string, unknown>>(r.text);
+      Object.assign(result, {
+        ok: Boolean(sample),
+        sample,
+        inputTokens: r.inputTokens,
+        outputTokens: r.outputTokens,
+        costUsd: costOf(route, r.inputTokens, r.outputTokens),
+        error: sample ? undefined : 'It answered, but not with usable JSON — it would not read mail reliably.',
+      });
+    } catch (err) {
+      result.error = (err as Error).message;
+    }
+    result.latencyMs = Date.now() - started;
+    res.json({ data: result });
   }),
 );

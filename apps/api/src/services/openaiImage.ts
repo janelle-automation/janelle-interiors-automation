@@ -46,7 +46,7 @@ const DAILY_BUDGET_USD = Number(process.env.OPENAI_DAILY_BUDGET_USD ?? 0.6);
 export class OpenAiDailyBudget extends Error {
   constructor(spent: number) {
     super(
-      `Today's OpenAI picture budget ($${DAILY_BUDGET_USD.toFixed(2)}) is used up ($${spent.toFixed(2)} spent), so this was drawn by the free engine instead. It resets at midnight UTC.`,
+      `Today's OpenAI picture budget ($${DAILY_BUDGET_USD.toFixed(2)}) is used up ($${spent.toFixed(2)} spent), so this was drawn as a Claude sketch instead. It resets at midnight UTC.`,
     );
     this.name = 'OpenAiDailyBudget';
   }

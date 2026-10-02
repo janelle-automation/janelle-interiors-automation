@@ -3,7 +3,7 @@ import { api, apiBlob, apiUpload, NetworkError } from './api';
 import { readImpersonation } from './impersonate';
 import { defaultTaskCategory, type TaskCategory } from '@janelle/shared';
 import type {
-  Action, AiSettingsView, AiUsageReport, AssistantAnswer, DashboardSummary, IngestSettingsView,
+  Action, AiRoutingTestResult, AiRoutingView, AiSettingsView, AiUsageReport, AssistantAnswer, DashboardSummary, IngestSettingsView,
   Prompt, ProjectStage, PoStatus,
   SelectableModel,
   FollowUpType, Resource, Seat, TaskKind, TaskStatus, UserRole,
@@ -1598,50 +1598,6 @@ export function useClearAiKey() {
   return useAiMutation(() => api<AiSettingsView>('/settings/ai/key', { method: 'DELETE' }));
 }
 
-// ── Pictures and video (Grok / xAI) ─────────────────────────
-
-export interface MediaConfig {
-  configured: boolean;
-  source: 'studio' | 'environment' | 'none';
-  keyHint: string | null;
-  imageModel: string;
-  videoModel: string;
-  imageModels: { id: string; label: string; usdPerImage: number; note: string }[];
-  videoModels: { id: string; label: string; usdPerSecond: number; maxSeconds: number; note: string }[];
-}
-
-export function useMediaConfig() {
-  return useQuery({ queryKey: ['media-config'], queryFn: () => api<MediaConfig>('/settings/media') });
-}
-
-/** A new key changes what the Create buttons can offer, so both are refreshed. */
-function useMediaMutation<V>(fn: (v: V) => Promise<MediaConfig>) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: fn,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['media-config'] });
-      qc.invalidateQueries({ queryKey: ['imagine-options'] });
-    },
-  });
-}
-
-export function useSetMediaKey() {
-  return useMediaMutation((apiKey: string) =>
-    api<MediaConfig>('/settings/media/key', { method: 'PUT', body: JSON.stringify({ apiKey }) }),
-  );
-}
-
-export function useClearMediaKey() {
-  return useMediaMutation(() => api<MediaConfig>('/settings/media/key', { method: 'DELETE' }));
-}
-
-export function useSetMediaModel() {
-  return useMediaMutation((v: { kind: 'image' | 'video'; model: string }) =>
-    api<MediaConfig>('/settings/media/model', { method: 'PUT', body: JSON.stringify(v) }),
-  );
-}
-
 // ── OpenAI (GPT Image) ──────────────────────────────────────
 
 export interface OpenAiConfig {
@@ -1686,93 +1642,153 @@ export function useSetOpenAiModel() {
   );
 }
 
-// ── Renderings and boards (Gemini) ──────────────────────────
+// ── Who does the work: the AI behind each action ────────────
 
-export interface GeminiConfig extends AiSettingsView {
-  models: { id: string; label: string; usdPerImage: number; note: string; kind: 'raster' | 'vector' }[];
-  /** Who makes the picture on a board: `gemini`, or a Claude model id. */
+export function useAiRouting() {
+  return useQuery({ queryKey: ['ai-routing'], queryFn: () => api<AiRoutingView>('/settings/ai-routing') });
+}
+
+function useRoutingMutation<V>(fn: (v: V) => Promise<AiRoutingView>) {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: fn, onSuccess: (data) => qc.setQueryData(['ai-routing'], data) });
+}
+
+export function useSetAiRoute() {
+  return useRoutingMutation(
+    (v: { feature: string; provider: string; model?: string; inputPer1M?: number; outputPer1M?: number }) =>
+      api<AiRoutingView>('/settings/ai-routing', { method: 'PUT', body: JSON.stringify(v) }),
+  );
+}
+
+export function useSetGeminiTextKey() {
+  return useRoutingMutation((apiKey: string) =>
+    api<AiRoutingView>('/settings/ai-routing/gemini-key', { method: 'PUT', body: JSON.stringify({ apiKey }) }),
+  );
+}
+
+export function useClearGeminiTextKey() {
+  return useRoutingMutation(() => api<AiRoutingView>('/settings/ai-routing/gemini-key', { method: 'DELETE' }));
+}
+
+export function useTestAiRoute() {
+  return useMutation({
+    mutationFn: (v: { provider: string; model: string; inputPer1M?: number; outputPer1M?: number }) =>
+      api<AiRoutingTestResult>('/settings/ai-routing/test', { method: 'POST', body: JSON.stringify(v) }),
+  });
+}
+
+// ── Who draws pictures ──────────────────────────────────────
+
+export interface PictureConfig {
+  /** Who makes the picture on a board: `openai`, or a Claude model id. */
   engine: string;
   engines: { id: string; label: string; note: string }[];
 }
 
-// ── Cloudflare Workers AI (free photos) ─────────────────────
+// ── Slack (task and follow-up updates) ──────────────────────
 
-export interface CloudflareConfig {
-  configured: boolean;
+export interface SlackConfig {
+  connected: boolean;
   source: 'studio' | 'environment' | 'none';
   keyHint: string | null;
-  accountId: string | null;
-  model: string;
-  steps: number;
-  models: { id: string; label: string; note: string; maxSteps: number }[];
+  channel: string;
+  enabled: boolean;
+  tasks: boolean;
+  followUps: boolean;
+  dailyDigest: boolean;
+  lastRunAt: string | null;
+  lastPosted: number;
+  lastError: string | null;
 }
 
-export function useCloudflareConfig() {
-  return useQuery({ queryKey: ['cloudflare-config'], queryFn: () => api<CloudflareConfig>('/settings/cloudflare') });
+export function useSlackConfig() {
+  return useQuery({ queryKey: ['slack-config'], queryFn: () => api<SlackConfig>('/settings/slack') });
 }
 
-function useCloudflareMutation<V>(fn: (v: V) => Promise<CloudflareConfig>) {
+function useSlackMutation<V>(fn: (v: V) => Promise<SlackConfig>) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: fn,
-    onSuccess: (data) => {
-      qc.setQueryData(['cloudflare-config'], data);
-      qc.invalidateQueries({ queryKey: ['imagine-options'] });
-    },
+  return useMutation({ mutationFn: fn, onSuccess: (data) => qc.setQueryData(['slack-config'], data) });
+}
+
+export function useSetSlackToken() {
+  return useSlackMutation((token: string) =>
+    api<SlackConfig>('/settings/slack/token', { method: 'PUT', body: JSON.stringify({ token }) }),
+  );
+}
+
+export function useClearSlackToken() {
+  return useSlackMutation(() => api<SlackConfig>('/settings/slack/token', { method: 'DELETE' }));
+}
+
+export function useSetSlackConfig() {
+  return useSlackMutation((v: { channel?: string; enabled?: boolean; tasks?: boolean; followUps?: boolean; dailyDigest?: boolean }) =>
+    api<SlackConfig>('/settings/slack/config', { method: 'PUT', body: JSON.stringify(v) }),
+  );
+}
+
+export function useSlackTest() {
+  return useSlackMutation(() => api<SlackConfig>('/settings/slack/test', { method: 'POST' }));
+}
+
+export interface SlackProjectChannels {
+  /** Migration 0029 is applied, so a channel can be assigned. */
+  ready: boolean;
+  /** The bot may not read the channel list, so there is no automatic matching. */
+  missingScope: boolean;
+  projects: {
+    id: string;
+    name: string;
+    /** What an admin assigned; empty when left to match by name. */
+    channel: string;
+    /** The channel found by name, if any. */
+    auto: string | null;
+    /** False when the bot is known not to be in the channel it would post to. */
+    botIn: boolean | null;
+  }[];
+}
+
+export function useSlackProjects(enabled: boolean) {
+  return useQuery({
+    queryKey: ['slack-projects'],
+    queryFn: () => api<SlackProjectChannels>('/settings/slack/projects'),
+    enabled,
   });
 }
 
-export function useSetCloudflareKey() {
-  return useCloudflareMutation((v: { accountId: string; apiToken: string }) =>
-    api<CloudflareConfig>('/settings/cloudflare/key', { method: 'PUT', body: JSON.stringify(v) }),
-  );
+export function useSetProjectChannel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { id: string; channel: string }) =>
+      api<{ ok: true }>(`/settings/slack/projects/${v.id}`, { method: 'PUT', body: JSON.stringify({ channel: v.channel }) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['slack-projects'] }),
+  });
 }
 
-export function useClearCloudflareKey() {
-  return useCloudflareMutation(() => api<CloudflareConfig>('/settings/cloudflare/key', { method: 'DELETE' }));
+export function useSlackSync() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      api<{ result: { posted: number; updated: number; error?: string }; settings: SlackConfig }>('/settings/slack/sync', {
+        method: 'POST',
+      }),
+    onSuccess: (data) => qc.setQueryData(['slack-config'], data.settings),
+  });
 }
 
-export function useSetCloudflareModel() {
-  return useCloudflareMutation((v: { model: string; steps?: number }) =>
-    api<CloudflareConfig>('/settings/cloudflare/model', { method: 'PUT', body: JSON.stringify(v) }),
-  );
+export function usePictureConfig() {
+  return useQuery({ queryKey: ['picture-config'], queryFn: () => api<PictureConfig>('/settings/images') });
 }
 
 export function useSetPictureEngine() {
-  return useGeminiMutation((engine: string) =>
-    api<GeminiConfig>('/settings/images/engine', { method: 'PUT', body: JSON.stringify({ engine }) }),
-  );
-}
-
-export function useGeminiConfig() {
-  return useQuery({ queryKey: ['gemini-config'], queryFn: () => api<GeminiConfig>('/settings/images') });
-}
-
-function useGeminiMutation<V>(fn: (v: V) => Promise<GeminiConfig>) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: fn,
+    mutationFn: (engine: string) =>
+      api<PictureConfig>('/settings/images/engine', { method: 'PUT', body: JSON.stringify({ engine }) }),
     onSuccess: (data) => {
-      qc.setQueryData(['gemini-config'], data);
+      qc.setQueryData(['picture-config'], data);
       qc.invalidateQueries({ queryKey: ['imagine-options'] });
     },
   });
-}
-
-export function useSetGeminiKey() {
-  return useGeminiMutation((apiKey: string) =>
-    api<GeminiConfig>('/settings/images/key', { method: 'PUT', body: JSON.stringify({ apiKey }) }),
-  );
-}
-
-export function useClearGeminiKey() {
-  return useGeminiMutation(() => api<GeminiConfig>('/settings/images/key', { method: 'DELETE' }));
-}
-
-export function useSetGeminiModel() {
-  return useGeminiMutation((model: string) =>
-    api<GeminiConfig>('/settings/images/model', { method: 'PUT', body: JSON.stringify({ model }) }),
-  );
 }
 
 /**

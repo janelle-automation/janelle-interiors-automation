@@ -941,7 +941,7 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
                 label: 'Video',
                 hint: `${canMake.video.defaultSeconds}s clip · about ${usdShort(canMake.video.usdPerSecond * canMake.video.defaultSeconds)}`,
                 enabled: canMake.video.ready,
-                unavailable: 'Needs an xAI key in Settings',
+                unavailable: 'Video clips are not available',
               },
             ]}
           />

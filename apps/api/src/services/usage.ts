@@ -116,6 +116,50 @@ function localDayKey(at: Date, offsetMinutes: number): string {
   return new Date(at.getTime() - offsetMinutes * 60_000).toISOString().slice(0, 10);
 }
 
+/**
+ * Every recorded call since `since`, newest first.
+ *
+ * One query returns at most 1,000 rows — PostgREST's default cap — and says
+ * nothing when it stops there. The report used to read a single page, so with
+ * thousands of calls a day it showed the newest 1,000 whatever window was
+ * chosen: the same total for a day, a week and a month, and most of the spend
+ * missing. Pages are read until one comes back short. `id` breaks ties so a
+ * page boundary never repeats or skips a row that shares a timestamp.
+ */
+const PAGE = 1000;
+/** A runaway guard, not a limit anyone should meet: 200,000 calls is a year at 500 a day. */
+const MAX_PAGES = 200;
+
+async function fetchUsageRows(orgId: string, since: Date): Promise<LogRow[]> {
+  const db = supabaseAdmin;
+  if (!db) throw new Error('Backend not configured');
+  const base = () =>
+    db.from('activity_log').select('id, actor, created_at, meta', { count: 'exact' })
+      .eq('org_id', orgId).eq('action', AI_USAGE_ACTION).gte('created_at', since.toISOString())
+      .order('created_at', { ascending: false }).order('id', { ascending: false });
+
+  // The first page also says how many rows there are, so the rest can be read
+  // together instead of one after another — a month of calls is some 16 pages.
+  const first = await base().range(0, PAGE - 1);
+  if (first.error) throw new Error(first.error.message);
+  const rows = ((first.data ?? []) as LogRow[]).slice();
+  const total = first.count ?? rows.length;
+  const pages = Math.min(Math.ceil(total / PAGE), MAX_PAGES);
+  if (Math.ceil(total / PAGE) > MAX_PAGES) console.error(`[usage] ${total} calls is past ${MAX_PAGES * PAGE} — the report is incomplete`);
+
+  const BATCH = 6;
+  for (let start = 1; start < pages; start += BATCH) {
+    const results = await Promise.all(
+      Array.from({ length: Math.min(BATCH, pages - start) }, (_, i) => base().range((start + i) * PAGE, (start + i + 1) * PAGE - 1)),
+    );
+    for (const r of results) {
+      if (r.error) throw new Error(r.error.message);
+      rows.push(...((r.data ?? []) as LogRow[]));
+    }
+  }
+  return rows;
+}
+
 export async function buildUsageReport(
   orgId: string,
   windowDays: number,
@@ -133,20 +177,12 @@ export async function buildUsageReport(
   // Fetch twice the window in one query so the trend needs no second trip.
   const previousStart = new Date(now - days * 2 * 86_400_000);
 
-  const [{ data: org }, { data, error }] = await Promise.all([
+  const [{ data: org }, rows] = await Promise.all([
     supabaseAdmin.from('organizations').select('name').eq('id', orgId).maybeSingle(),
-    supabaseAdmin
-      .from('activity_log')
-      .select('id, actor, created_at, meta')
-      .eq('org_id', orgId)
-      .eq('action', AI_USAGE_ACTION)
-      .gte('created_at', previousStart.toISOString())
-      .order('created_at', { ascending: false }),
+    fetchUsageRows(orgId, previousStart),
   ]);
 
-  if (error) throw new Error(error.message);
-
-  const all = ((data ?? []) as LogRow[]).map(flatten);
+  const all = rows.map(flatten);
   const current = all.filter((c) => new Date(c.created_at) >= windowStart);
   const previous = all.filter((c) => new Date(c.created_at) < windowStart);
 

@@ -11,6 +11,8 @@ import { advanceActiveTasks, backfillTasks, mergeDuplicateTasks, reviewOpenTasks
 import { sweepJobs } from '../services/mediaJobs.js';
 import { keepGoogleAlive } from '../services/googleKeepalive.js';
 import { runMiddayReminder } from '../services/middayReminder.js';
+import { runSlackSync } from '../services/slackSync.js';
+import { runSlackDigest } from '../services/slackDigest.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { readIngestSettings } from '../lib/ingestSettings.js';
 import { claimCronSlot } from '../lib/cronSlot.js';
@@ -31,6 +33,12 @@ const MIDDAY_REMINDER_HOURS = [9, 17];
  * polls (so one hour's window can't claim twice).
  */
 const MIDDAY_REMINDER_COOLDOWN_MS = 4 * 3600_000;
+/** When the Slack daily reminder last went out for each studio. */
+const SLACK_DIGEST_RAN_FIELD = 'slack_digest_ran_at';
+/** The Pacific hour the Slack daily reminder posts in — the start of the working day. */
+const SLACK_DIGEST_HOUR = 9;
+/** Once a day: longer than any hour's window, shorter than the day, so it never skips one. */
+const SLACK_DIGEST_COOLDOWN_MS = 20 * 3600_000;
 
 export const opsRouter = Router();
 
@@ -167,6 +175,32 @@ cronRouter.all(
           }
         }
         return runMiddayReminder(id);
+      }),
+    });
+  }),
+);
+// Bring Slack up to date with the board (migration 0027, every 5 minutes).
+// Does nothing for a studio that has not connected Slack.
+cronRouter.all(
+  '/slack-sync',
+  asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id, budgetMs) => runSlackSync(id, { budgetMs })) })),
+);
+// The daily Slack reminder (migration 0028). Polled every 15 minutes; the
+// Pacific-hour gate and the claim keep it to one post a day, and the hour is
+// wall-clock so it stays at 9am across the PST/PDT change. `?force=1` posts now.
+cronRouter.all(
+  '/slack-digest',
+  asyncHandler(async (req, res) => {
+    const force = req.query.force === '1';
+    res.json({
+      data: await forEachOrg(async (id) => {
+        if (!force) {
+          if (pacificHourNow() !== SLACK_DIGEST_HOUR) return { ok: true, skipped: 'not_digest_hour' };
+          if (!(await claimCronSlot(id, SLACK_DIGEST_RAN_FIELD, SLACK_DIGEST_COOLDOWN_MS))) {
+            return { ok: true, skipped: 'already_sent' };
+          }
+        }
+        return runSlackDigest(id);
       }),
     });
   }),

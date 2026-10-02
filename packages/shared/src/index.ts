@@ -844,17 +844,7 @@ export const PICTURE_ENGINES: PictureEngine[] = [
   {
     id: 'openai',
     label: 'OpenAI GPT Image',
-    note: 'Photoreal renderings, and the best at keeping lettering and layouts accurate. Billed per image on the OpenAI key below; Cloudflare, Gemini and Claude step in if it fails.',
-  },
-  {
-    id: 'cloudflare',
-    label: 'Cloudflare FLUX — free photos',
-    note: 'Photoreal in seconds on Cloudflare’s free daily allowance — FLUX.1 from words (~100–170 a day), FLUX.2 [klein] to transform an attached photo (~80 a day). Blocked, never billed, when used up; Claude sketches until it resets.',
-  },
-  {
-    id: 'gemini',
-    label: 'Gemini (model below)',
-    note: 'Photographs with a billed photo model; draws with Flash Lite. Cloudflare, then Claude, step in if it fails.',
+    note: 'Photoreal renderings, and the best at keeping lettering and layouts accurate. Billed per image on the OpenAI key below; Claude sketches if it fails.',
   },
   {
     id: 'claude-haiku-4-5',
@@ -873,7 +863,7 @@ export const PICTURE_ENGINES: PictureEngine[] = [
   },
 ];
 
-export const DEFAULT_PICTURE_ENGINE = 'gemini';
+export const DEFAULT_PICTURE_ENGINE = 'openai';
 
 /**
  * Cloudflare Workers AI image models. Priced in "neurons" against a free
@@ -1661,4 +1651,89 @@ export interface IngestSettingsView {
   /** How often finished tasks are looked for and closed; 0 = only on request. */
   taskReviewMinutes: number;
   taskReviewIntervals: IngestInterval[];
+}
+
+// ── Who does the work: choosing the AI behind each action ───────────
+
+/**
+ * The companies whose models can read mail, draft replies and write the
+ * digest. Claude is the default and the only one the Assistant's tool loop
+ * and PDF reading run on; the others take over the plain text-in, text-out
+ * actions below.
+ */
+export type LlmProvider = 'anthropic' | 'openai' | 'gemini';
+
+export const LLM_PROVIDERS: { id: LlmProvider; label: string }[] = [
+  { id: 'anthropic', label: 'Claude' },
+  { id: 'openai', label: 'OpenAI' },
+  { id: 'gemini', label: 'Gemini' },
+];
+
+/**
+ * The actions whose AI can be switched. Each reads text and answers in text
+ * or JSON, which every provider can do. Left out on purpose, and always Claude:
+ * the Assistant (a multi-step tool loop built on Claude's tool use and
+ * caching), and anything that reads a PDF or a picture (Claude takes the file
+ * itself; the others would need it converted first).
+ */
+export const SWITCHABLE_FEATURES: { id: AiFeature; label: string; note: string }[] = [
+  { id: 'email.extract', label: 'Reading email', note: 'Classifies each email and pulls out the job, vendor and what is being asked. The biggest spender.' },
+  { id: 'task.extract', label: 'Raising tasks', note: 'Turns an email into a task with an owner and a date.' },
+  { id: 'followup.draft', label: 'Drafting follow-ups', note: 'Writes the chaser to a vendor or client.' },
+  { id: 'reply.draft', label: 'Drafting replies', note: 'Writes a reply when someone asks for one.' },
+  { id: 'digest.summary', label: 'Morning digest', note: 'Summarises the day for the studio.' },
+  { id: 'report.narrative', label: 'Weekly report', note: 'Writes the weekly narrative.' },
+  { id: 'prompt.run', label: 'Prompt Studio', note: 'Runs a saved prompt on request.' },
+];
+
+/** One action's choice. A price is only needed for a model the table below does not know. */
+export interface LlmRoute {
+  provider: LlmProvider;
+  model: string;
+  /** US dollars per million tokens; used to cost a model that is not in LLM_MODEL_PRESETS. */
+  inputPer1M?: number;
+  outputPer1M?: number;
+}
+
+/**
+ * Models to offer, with the price the provider published when this was
+ * written. Prices move: they are a starting point the studio can override
+ * per action, and the usage report uses whatever is saved with the choice.
+ * A model typed in by hand has no entry here and is costed at the price
+ * entered beside it.
+ */
+export const LLM_MODEL_PRESETS: { provider: Exclude<LlmProvider, 'anthropic'>; id: string; label: string; inputPer1M: number; outputPer1M: number }[] = [
+  { provider: 'openai', id: 'gpt-5-nano', label: 'GPT-5 nano — cheapest', inputPer1M: 0.05, outputPer1M: 0.4 },
+  { provider: 'openai', id: 'gpt-4o-mini', label: 'GPT-4o mini — steady for extraction', inputPer1M: 0.15, outputPer1M: 0.6 },
+  { provider: 'openai', id: 'gpt-5-mini', label: 'GPT-5 mini — more careful', inputPer1M: 0.25, outputPer1M: 2 },
+  { provider: 'gemini', id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite — cheapest', inputPer1M: 0.25, outputPer1M: 1.5 },
+  { provider: 'gemini', id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite', inputPer1M: 0.3, outputPer1M: 2.5 },
+  { provider: 'gemini', id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash — more careful', inputPer1M: 1.5, outputPer1M: 9 },
+];
+
+/** What Settings shows for one switchable action. */
+export interface AiRoutingFeatureView {
+  id: AiFeature;
+  label: string;
+  note: string;
+  /** Null means the default: Claude, on the model chosen under "Jenny's brain". */
+  route: LlmRoute | null;
+}
+
+export interface AiRoutingView {
+  features: AiRoutingFeatureView[];
+  providers: { id: LlmProvider; label: string; configured: boolean; keyHint: string | null }[];
+  presets: typeof LLM_MODEL_PRESETS;
+}
+
+/** What a test run of one provider on a sample email sends back. */
+export interface AiRoutingTestResult {
+  ok: boolean;
+  latencyMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  /** The fields that came back, so a person can judge whether it read the sample properly. */
+  sample: Record<string, unknown> | null;
+  error?: string;
 }

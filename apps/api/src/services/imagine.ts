@@ -497,7 +497,7 @@ ${FLOORING_POSTER}`,
     return {
       ok: false,
       reason:
-        'Picture-making needs an image source — Cloudflare (free), Gemini or xAI — or a Claude key for sketches, which the principal adds in Settings.',
+        'Picture-making needs an OpenAI key for photographs, or a Claude key for sketches, which the principal adds in Settings.',
     };
   }
 
@@ -555,7 +555,7 @@ ${FLOORING_POSTER}`,
   // rendering; it is a finished picture, not a sketch.
   const sketch = picture.mimeType.includes('svg') && !picture.plan;
   if (sketch && !picture.note?.includes('sketch')) {
-    picture.note = 'An illustrated sketch, not a photoreal render — choose a raster Gemini model with billing, or add an xAI key, for photographs.';
+    picture.note = 'An illustrated sketch, not a photoreal render — add an OpenAI key in Settings for photographs.';
   }
 
   // Into the studio's board format: the picture large, the specifications
@@ -697,7 +697,7 @@ export async function startClip(input: {
   if (!brief) return { ok: false, reason: 'Say what should happen in the clip.' };
 
   if (!(await isGrokReady(actor.orgId))) {
-    return { ok: false, reason: 'Video needs an xAI key, which the principal adds in Settings.' };
+    return { ok: false, reason: 'Video clips are not available in this system.' };
   }
 
   // Before a penny is spent, not after: a clip that cannot be written down

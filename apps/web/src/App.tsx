@@ -8,6 +8,7 @@ import Dashboard from './pages/Dashboard';
 import Projects from './pages/Projects';
 import ProjectDetail from './pages/ProjectDetail';
 import Vendors from './pages/Vendors';
+import VendorDetail from './pages/VendorDetail';
 import Prompts from './pages/Prompts';
 import FollowUps from './pages/FollowUps';
 import Tasks from './pages/Tasks';
@@ -125,6 +126,7 @@ export default function App() {
         <Route path="/projects" element={<Viewable needs="projects"><Projects /></Viewable>} />
         <Route path="/projects/:id" element={<Viewable needs="projects"><ProjectDetail /></Viewable>} />
         <Route path="/vendors" element={<Viewable needs="vendors"><Vendors /></Viewable>} />
+        <Route path="/vendors/:id" element={<Viewable needs="vendors"><VendorDetail /></Viewable>} />
         <Route path="/inbox" element={<Viewable needs="emails"><Inbox /></Viewable>} />
         <Route path="/documents" element={<Viewable needs="documents"><Documents /></Viewable>} />
         <Route path="/prompts" element={<Viewable needs="prompts"><Prompts /></Viewable>} />

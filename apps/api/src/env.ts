@@ -80,24 +80,6 @@ export const env = {
     model: optional('ANTHROPIC_MODEL', 'claude-opus-5'),
   },
 
-  // Rendering presentation boards. A separate provider because Claude does
-  // not make pictures; left empty until the studio sets a key, and every
-  // render path degrades to "not configured" rather than failing oddly.
-  images: {
-    apiKey: optional('GEMINI_API_KEY'),
-    model: optional('GEMINI_IMAGE_MODEL', 'gemini-3-pro-image'),
-  },
-
-  // Renderings and short video. A third provider with a third key: Claude
-  // writes, Gemini draws the studio's boards, and this draws and animates
-  // everything the house template never covered. Empty until the studio
-  // sets a key, and every path through it degrades to "not configured".
-  xai: {
-    apiKey: optional('XAI_API_KEY'),
-    imageModel: optional('XAI_IMAGE_MODEL', 'grok-imagine-image-2.0'),
-    videoModel: optional('XAI_VIDEO_MODEL', 'grok-imagine-video-1.5'),
-  },
-
   // Renderings from OpenAI's GPT Image models. Empty until a key is set here
   // or in Settings; without one this provider is simply not offered.
   openai: {
@@ -105,12 +87,11 @@ export const env = {
     imageModel: optional('OPENAI_IMAGE_MODEL', 'gpt-image-2'),
   },
 
-  // Free photoreal renderings: Cloudflare Workers AI (FLUX.1 schnell). The
-  // free plan's daily allowance is blocked when used up, never billed.
-  // Settings → AI & media overrides these per studio.
-  cloudflare: {
-    accountId: optional('CLOUDFLARE_ACCOUNT_ID'),
-    apiToken: optional('CLOUDFLARE_API_TOKEN'),
+  // Task and follow-up updates posted to Slack. Settings → Connections
+  // overrides these per studio; empty means Slack is simply not connected.
+  slack: {
+    botToken: optional('SLACK_BOT_TOKEN'),
+    channel: optional('SLACK_CHANNEL').replace(/^#/, ''),
   },
 
   tokenEncryptionKey: optional('TOKEN_ENCRYPTION_KEY'),
@@ -123,8 +104,6 @@ export const isSupabaseConfigured = () =>
   Boolean(env.supabase.url && env.supabase.anonKey && env.supabase.serviceRoleKey);
 
 export const isAnthropicConfigured = () => Boolean(env.anthropic.apiKey);
-
-export const isGrokConfigured = () => Boolean(env.xai.apiKey);
 
 export const isOpenAiConfigured = () => Boolean(env.openai.apiKey);
 
