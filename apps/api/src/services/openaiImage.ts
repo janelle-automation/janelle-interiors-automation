@@ -43,6 +43,9 @@ export class OpenAiNotConfigured extends Error {
  */
 const DAILY_BUDGET_USD = Number(process.env.OPENAI_DAILY_BUDGET_USD ?? 0.6);
 
+/** The least time High quality is given before the picture is drawn at Medium instead. */
+const HIGH_QUALITY_MIN_MS = Number(process.env.OPENAI_HIGH_QUALITY_MIN_MS || 75_000);
+
 export class OpenAiDailyBudget extends Error {
   constructor(spent: number) {
     super(
@@ -179,10 +182,16 @@ export async function generateOpenAiImage(
   const model = ai.imageModel;
   const mode: 'edit' | 'generate' = req.source ? 'edit' : 'generate';
   const { size, wide } = sizeFor(req.aspectRatio);
-  // Quality is the studio's dial; a "1K" ask is the quick draft.
-  const quality: OpenAiQuality = req.quality ?? (req.resolution === '1K' && ai.quality === 'high' ? 'medium' : ai.quality);
-
   const limit = req.timeoutMs && req.timeoutMs > 0 ? req.timeoutMs : IMAGE_TIMEOUT_MS;
+  // Quality is the studio's dial; a "1K" ask is the quick draft.
+  const asked: OpenAiQuality = req.quality ?? (req.resolution === '1K' && ai.quality === 'high' ? 'medium' : ai.quality);
+  // High quality on a long brief takes 40 to 90 seconds, and a request here is
+  // cut off at about 55 — so with High chosen, a rich description reliably came
+  // back as "took longer than the time limit" and nothing was drawn. When the
+  // clock is shorter than High needs, draw at Medium instead: a good picture
+  // now beats the better one that never arrives. Only ever a step DOWN from
+  // High; a studio that chose Medium or Low is never raised.
+  const quality: OpenAiQuality = asked === 'high' && limit < HIGH_QUALITY_MIN_MS ? 'medium' : asked;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), limit);
   const started = Date.now();

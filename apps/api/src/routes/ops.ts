@@ -10,7 +10,7 @@ import { runDigest } from '../services/digest.js';
 import { advanceActiveTasks, backfillTasks, mergeDuplicateTasks, reviewOpenTasks } from '../services/tasks.js';
 import { sweepJobs } from '../services/mediaJobs.js';
 import { keepGoogleAlive } from '../services/googleKeepalive.js';
-import { runMiddayReminder } from '../services/middayReminder.js';
+import { runMiddayReminder, reminderSlotNow, type ReminderSlot } from '../services/middayReminder.js';
 import { runSlackSync } from '../services/slackSync.js';
 import { runSlackDigest } from '../services/slackDigest.js';
 import { supabaseAdmin } from '../lib/supabase.js';
@@ -174,7 +174,11 @@ cronRouter.all(
             return { ok: true, skipped: 'already_sent' };
           }
         }
-        return runMiddayReminder(id);
+        // 9am is the plan for the day, 5pm the wrap-up. `?slot=morning|evening`
+        // picks one by hand — for a test, or to send the other one early.
+        const asked = String(req.query.slot ?? '');
+        const slot: ReminderSlot = asked === 'morning' || asked === 'evening' ? asked : reminderSlotNow();
+        return runMiddayReminder(id, slot);
       }),
     });
   }),

@@ -9,7 +9,7 @@ import { AssistantAnswerView, AttachedFiles, answerIsPictures, answerIsWide, siz
 import { useImagineOptions } from '../lib/queries';
 import { readableAttachment } from '../lib/attachments';
 import { AssistantGuide } from './AssistantGuide';
-import { AgentPicker } from './AgentPicker';
+import { ActiveAgents } from './AgentPicker';
 import { IconMic, IconSend, IconStop } from './icons';
 
 /**
@@ -41,10 +41,6 @@ const IconRetry = (p: IconProps) => (
   <svg {...stroke} {...p}><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /></svg>
 );
 
-/** Money as a composer hint: cents when small, whole dollars when not. */
-function usdShort(n: number): string {
-  return n < 1 ? `${Math.round(n * 100)}c` : `$${n.toFixed(2)}`;
-}
 
 export function JennyAvatar({ size = 28 }: { size?: number }) {
   return (
@@ -515,7 +511,7 @@ const readableType = (f: File) =>
   ACCEPT.includes(f.type) ||
   /\.(pdf|png|jpe?g|gif|webp|avif|heic|heif|bmp|tiff?|svg|xlsx?|docx?|csv|tsv|txt|md)$/i.test(f.name);
 
-type ComposeMode = 'ask' | 'image' | 'video';
+type ComposeMode = 'ask' | 'image';
 
 const IconChevron = (p: IconProps) => <svg {...stroke} {...p}><path d="m6 9 6 6 6-6" /></svg>;
 const IconChat = (p: IconProps) => (
@@ -524,10 +520,7 @@ const IconChat = (p: IconProps) => (
 const IconImage = (p: IconProps) => (
   <svg {...stroke} {...p}><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="9" cy="10" r="1.5" /><path d="m21 16-5-5-9 9" /></svg>
 );
-const IconVideo = (p: IconProps) => (
-  <svg {...stroke} {...p}><rect x="3" y="6" width="13" height="12" rx="2" /><path d="m16 10 5-3v10l-5-3" /></svg>
-);
-const MODE_ICON: Record<ComposeMode, (p: IconProps) => JSX.Element> = { ask: IconChat, image: IconImage, video: IconVideo };
+const MODE_ICON: Record<ComposeMode, (p: IconProps) => JSX.Element> = { ask: IconChat, image: IconImage };
 
 interface ModeOption {
   key: ComposeMode;
@@ -540,9 +533,9 @@ interface ModeOption {
 }
 
 /**
- * Ask, Image or Video — one control in the box, not three buttons over it.
+ * Ask or Image — one control in the box, not buttons over it.
  *
- * The three sat in a bar of their own above the composer, a whole row spent
+ * The choices sat in a bar of their own above the composer, a whole row spent
  * on a choice most messages never change. As a menu it takes the width of a
  * word; what each mode does and costs is said inside it, where the choice
  * is made. It opens upward because the box is at the bottom of the screen.
@@ -582,7 +575,7 @@ function ModeMenu({ mode, options, onChange }: { mode: ComposeMode; options: Mod
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={`Mode: ${current.label}. Change what this message does`}
-        title="Ask, or make an image or a video"
+        title="Ask, or make an image"
         className={`focusable flex h-9 items-center gap-1 rounded-lg px-2 text-[12.5px] font-medium transition-colors ${
           mode === 'ask' ? 'text-ink-soft hover:bg-sunk hover:text-ink' : 'bg-brass/10 text-brass-deep hover:bg-brass/15'
         }`}
@@ -893,13 +886,7 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
           needs no line of its own. */}
       {canMake && mode !== 'ask' && (
         <p className="mb-1.5 px-1 text-[11.5px] text-ink-faint">
-          {mode === 'video'
-            ? `${canMake.video.defaultSeconds}s clip · about ${usdShort(canMake.video.usdPerSecond * canMake.video.defaultSeconds)}${
-                canMake.video.spentTodayUsd > 0
-                  ? ` · ${usdShort(canMake.video.spentTodayUsd)} of ${usdShort(canMake.video.dailyCapUsd)} used today`
-                  : ''
-              }`
-            : `${attachments.length > 0 ? 'Transforms what you attached' : 'Drawn from your words'} · no tokens spent`}
+          {`${attachments.length > 0 ? 'Transforms what you attached' : 'Drawn from your words'} · no tokens spent`}
         </p>
       )}
       <form
@@ -920,7 +907,7 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
             e.target.value = '';
           }}
         />
-        {canMake && (canMake.image.ready || canMake.video.ready) && (
+        {canMake && canMake.image.ready && (
           <ModeMenu
             mode={mode}
             onChange={(next) => {
@@ -936,17 +923,10 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
                 enabled: canMake.image.ready,
                 unavailable: 'Needs an image key in Settings',
               },
-              {
-                key: 'video',
-                label: 'Video',
-                hint: `${canMake.video.defaultSeconds}s clip · about ${usdShort(canMake.video.usdPerSecond * canMake.video.defaultSeconds)}`,
-                enabled: canMake.video.ready,
-                unavailable: 'Video clips are not available',
-              },
             ]}
           />
         )}
-        {mode === 'ask' && <AgentPicker agents={agents} onChange={setAgents} />}
+        {mode === 'ask' && <ActiveAgents agents={agents} onClear={() => setAgents([])} />}
         <button
           type="button"
           onClick={() => picker.current?.click()}
@@ -999,11 +979,9 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
               ? 'Listening…'
               : mode === 'image'
                 ? 'Describe the picture — the room, the materials, the light'
-                : mode === 'video'
-                  ? 'Describe the clip — the room, the move, the light'
-                  : compact
-                    ? `Ask ${ASSISTANT_NAME} anything…`
-                    : `Ask ${ASSISTANT_NAME} anything, or say what you need done`
+                : compact
+                  ? `Ask ${ASSISTANT_NAME} anything…`
+                  : `Ask ${ASSISTANT_NAME} anything, or say what you need done`
           }
           aria-label={`Message ${ASSISTANT_NAME}`}
           className="max-h-36 min-h-[36px] flex-1 resize-none bg-transparent px-1.5 py-2 text-[14px] leading-5 text-ink outline-none placeholder:text-ink-faint"
