@@ -11,7 +11,7 @@ import { ConnectGooglePrompt } from './ConnectGooglePrompt';
 import { endImpersonation, readImpersonation } from '../lib/impersonate';
 import { ASSISTANT_NAME, ROLE_LABELS, canSupervise, type Resource } from '@janelle/shared';
 import {
-  IconDashboard, IconProjects, IconVendors, IconInbox, IconDoc,
+  IconDashboard, IconProjects, IconVendors, IconDoc,
   IconPrompt, IconBell, IconTask, IconAssistant, IconTeam, IconKey, IconReport, IconActivity, IconSettings, IconSun, IconMoon,
   IconLogout, IconArrow,
 } from './icons';
@@ -51,13 +51,15 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     items: [
       { to: '/', label: 'Dashboard', Icon: IconDashboard, end: true },
       { to: '/projects', label: 'Projects', Icon: IconProjects, needs: 'projects' },
-      { to: '/vendors', label: 'Vendors & POs', Icon: IconVendors, needs: 'vendors' },
+      { to: '/vendors', label: 'Vendors & Orders', Icon: IconVendors, needs: 'vendors' },
     ],
   },
   {
     title: 'Intelligence',
     items: [
-      { to: '/inbox', label: 'Inbox', Icon: IconInbox, needs: 'emails' },
+      // Inbox is out of the menu on purpose. The page still works at /inbox and the
+      // Dashboard's "Emails read" card links to it; add the line back to show it:
+      //   { to: '/inbox', label: 'Inbox', Icon: IconInbox, needs: 'emails' },
       { to: '/documents', label: 'Documents', Icon: IconDoc, needs: 'documents' },
       { to: '/prompts', label: 'Prompt Studio', Icon: IconPrompt, needs: 'prompts' },
     ],
@@ -87,7 +89,7 @@ const SETTINGS_ITEM: NavItem = { to: '/settings', label: 'Settings', Icon: IconS
 const PAGE_TITLES: Record<string, string> = {
   '/': 'Dashboard',
   '/projects': 'Projects',
-  '/vendors': 'Vendors & POs',
+  '/vendors': 'Vendors & Orders',
   '/inbox': 'Inbox',
   '/documents': 'Documents',
   '/prompts': 'Prompt Studio',
