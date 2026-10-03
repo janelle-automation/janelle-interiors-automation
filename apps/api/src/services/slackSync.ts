@@ -14,7 +14,7 @@ import {
   type TaskCard,
   type TaskState,
 } from './slack.js';
-import { ROUTE_FALLBACK_CODES, channelFor, loadDirectory, type ChannelDirectory, type ProjectRef } from './slackRouting.js';
+import { ROUTE_FALLBACK_CODES, channelFor, joinIfNeeded, loadDirectory, type ChannelDirectory, type ProjectRef } from './slackRouting.js';
 
 /**
  * Keep Slack in step with the board.
@@ -118,6 +118,10 @@ async function sendRouted(
     return await slackCall(ctx, () => postMessage(ctx.token, channel, message, threadTs));
   } catch (err) {
     if (channel === ctx.channel || threadTs || !(err instanceof SlackError) || !ROUTE_FALLBACK_CODES.includes(err.code)) throw err;
+    // A public channel the bot is not in: join it and try once more before giving up on it.
+    if (err.code === 'not_in_channel' && (await joinIfNeeded(ctx.token, channel, await directoryOf(ctx))) === 'joined') {
+      return slackCall(ctx, () => postMessage(ctx.token, channel, message));
+    }
     ctx.warnings.push(`The bot could not post in the channel for a project (${channel}) — its updates went to the default channel. In Slack, run /invite on that channel.`);
     return slackCall(ctx, () => postMessage(ctx.token, ctx.channel, message));
   }

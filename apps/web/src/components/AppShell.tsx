@@ -12,7 +12,7 @@ import { endImpersonation, readImpersonation } from '../lib/impersonate';
 import { ASSISTANT_NAME, ROLE_LABELS, canSupervise, type Resource } from '@janelle/shared';
 import {
   IconDashboard, IconProjects, IconVendors, IconDoc,
-  IconPrompt, IconBell, IconTask, IconAssistant, IconTeam, IconKey, IconReport, IconActivity, IconSettings, IconSun, IconMoon,
+  IconPrompt, IconBell, IconInbox, IconTask, IconAssistant, IconTeam, IconKey, IconSettings, IconSun, IconMoon,
   IconLogout, IconArrow,
 } from './icons';
 
@@ -57,9 +57,6 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: 'Intelligence',
     items: [
-      // Inbox is out of the menu on purpose. The page still works at /inbox and the
-      // Dashboard's "Emails read" card links to it; add the line back to show it:
-      //   { to: '/inbox', label: 'Inbox', Icon: IconInbox, needs: 'emails' },
       { to: '/documents', label: 'Documents', Icon: IconDoc, needs: 'documents' },
       { to: '/prompts', label: 'Prompt Studio', Icon: IconPrompt, needs: 'prompts' },
     ],
@@ -67,12 +64,17 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: 'Automation',
     items: [
+      { to: '/follow-ups', label: 'Follow-ups', Icon: IconBell, needs: 'follow_ups' },
       { to: '/assistant', label: ASSISTANT_NAME, Icon: IconAssistant },
       { to: '/tasks', label: 'Tasks', Icon: IconTask, needs: 'tasks' },
-      { to: '/follow-ups', label: 'Follow-ups', Icon: IconBell, needs: 'follow_ups' },
+      { to: '/inbox', label: 'Inbox', Icon: IconInbox, needs: 'emails' },
+      // The Slack setup lives on a Settings tab; the menu goes straight to it.
+      { to: '/settings?tab=slack', label: 'Slack', Icon: IconBell, needsWrite: 'settings' },
       { to: '/drafts', label: 'Drafts', Icon: IconDoc, needs: 'drafts' },
-      { to: '/reports', label: 'Reports', Icon: IconReport, needs: 'reports' },
-      { to: '/activity', label: 'Audit Log', Icon: IconActivity, supervisorOnly: true },
+      // Reports and Audit Log are out of the menu on purpose. The pages still work at
+      // /reports and /activity; add the lines back to show them:
+      //   { to: '/reports', label: 'Reports', Icon: IconReport, needs: 'reports' },
+      //   { to: '/activity', label: 'Audit Log', Icon: IconActivity, supervisorOnly: true },
     ],
   },
   {
@@ -134,23 +136,32 @@ function Brand({ collapsed }: { collapsed: boolean }) {
 
 function NavItemLink({ item, collapsed, onNavigate }: { item: NavItem; collapsed: boolean; onNavigate?: () => void }) {
   const { to, label, Icon, end } = item;
+  const { search } = useLocation();
+  // A link into a Settings tab is active only on that tab, and Settings itself
+  // is not active while that tab is open.
+  const toSearch = to.split('?')[1];
+  const onSlackTab = new URLSearchParams(search).get('tab') === 'slack';
+  const tabActive = (path: boolean) => (toSearch ? path && onSlackTab : to === '/settings' ? path && !onSlackTab : path);
   return (
     <NavLink
       to={to}
-      end={end}
+      end={end || !!toSearch}
       onClick={onNavigate}
       title={collapsed ? label : undefined}
-      className={({ isActive }) =>
-        `focusable group relative flex items-center gap-3 rounded-lg text-[14px] transition-colors ${
+      className={({ isActive: a }) => {
+        const isActive = tabActive(a);
+        return `focusable group relative flex items-center gap-3 rounded-lg text-[14px] transition-colors ${
           collapsed ? 'justify-center px-0 py-2.5' : 'px-3 py-[9px]'
         } ${
           isActive
             ? 'bg-nav-hover font-semibold text-nav-text'
             : 'font-medium text-nav-muted hover:bg-nav-hover hover:text-nav-text'
-        }`
-      }
+        }`;
+      }}
     >
-      {({ isActive }) => (
+      {({ isActive: a }) => {
+        const isActive = tabActive(a);
+        return (
         <>
           {isActive && (
             <span className="absolute -left-3 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r bg-brass" aria-hidden="true" />
@@ -158,7 +169,8 @@ function NavItemLink({ item, collapsed, onNavigate }: { item: NavItem; collapsed
           <Icon className={`shrink-0 ${isActive ? 'text-brass' : 'text-nav-muted group-hover:text-nav-text'}`} />
           {!collapsed && <span className="truncate">{label}</span>}
         </>
-      )}
+        );
+      }}
     </NavLink>
   );
 }

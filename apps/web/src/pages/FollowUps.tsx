@@ -71,8 +71,12 @@ const SNOOZE = [
   { days: 14, label: 'Two weeks' },
 ];
 
-function SnoozeMenu({ onPick, busy }: { onPick: (days: number) => void; busy: boolean }) {
+/** Every action lives behind a three-dot button, so a row reads as just the nudge. */
+function ActionsMenu({
+  onComplete, onSnooze, onDismiss, busy,
+}: { onComplete: () => void; onSnooze: (days: number) => void; onDismiss: () => void; busy: boolean }) {
   const [open, setOpen] = useState(false);
+  const item = 'focusable block w-full px-3 py-1.5 text-left text-[13px] text-ink transition-colors hover:bg-sunk';
   return (
     <span className="relative">
       <button
@@ -81,9 +85,15 @@ function SnoozeMenu({ onPick, busy }: { onPick: (days: number) => void; busy: bo
         disabled={busy}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="btn-secondary btn-sm"
+        aria-label="More actions"
+        title="More actions"
+        className="btn-ghost btn-sm px-2"
       >
-        Snooze
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+          <circle cx="8" cy="3" r="1.4" />
+          <circle cx="8" cy="8" r="1.4" />
+          <circle cx="8" cy="13" r="1.4" />
+        </svg>
       </button>
       {open && (
         <>
@@ -92,8 +102,23 @@ function SnoozeMenu({ onPick, busy }: { onPick: (days: number) => void; busy: bo
           <span className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden />
           <span
             role="menu"
-            className="popover absolute right-0 top-full z-20 mt-1 flex w-36 flex-col overflow-hidden rounded-lg border border-line bg-surface py-1 shadow-pop"
+            className="popover absolute right-0 top-full z-20 mt-1 flex w-44 flex-col overflow-hidden rounded-lg border border-line bg-surface py-1 shadow-pop"
           >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onComplete();
+              }}
+              className={`${item} font-semibold`}
+            >
+              Mark as completed
+            </button>
+            <Link to="/drafts" role="menuitem" className={`${item} text-brass-deep`} onClick={() => setOpen(false)}>
+              Draft a reply
+            </Link>
+            <span className="px-3 pb-0.5 pt-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-faint">Snooze</span>
             {SNOOZE.map((s) => (
               <button
                 key={s.days}
@@ -101,13 +126,25 @@ function SnoozeMenu({ onPick, busy }: { onPick: (days: number) => void; busy: bo
                 role="menuitem"
                 onClick={() => {
                   setOpen(false);
-                  onPick(s.days);
+                  onSnooze(s.days);
                 }}
-                className="focusable px-3 py-1.5 text-left text-[13px] text-ink transition-colors hover:bg-sunk"
+                className={item}
               >
                 {s.label}
               </button>
             ))}
+            <span className="my-1 border-t border-line-soft" aria-hidden />
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onDismiss();
+              }}
+              className={item}
+            >
+              Dismiss
+            </button>
           </span>
         </>
       )}
@@ -139,24 +176,12 @@ function Row({ f }: { f: FollowUpView }) {
         </div>
       </div>
       <div className="flex items-center gap-2 self-start sm:self-auto">
-        <button
-          onClick={() => setStatus.mutate({ id: f.id, status: 'done' })}
-          disabled={busy}
-          className="btn-primary btn-sm"
-        >
-          Done
-        </button>
-        <SnoozeMenu busy={busy} onPick={(days) => snooze.mutate({ id: f.id, days })} />
-        <button
-          onClick={() => setStatus.mutate({ id: f.id, status: 'dismissed' })}
-          disabled={busy}
-          className="btn-ghost btn-sm"
-        >
-          Dismiss
-        </button>
-        <Link to="/drafts" className="btn-secondary btn-sm text-brass-deep">
-          Draft
-        </Link>
+        <ActionsMenu
+          busy={busy}
+          onComplete={() => setStatus.mutate({ id: f.id, status: 'done' })}
+          onSnooze={(days) => snooze.mutate({ id: f.id, days })}
+          onDismiss={() => setStatus.mutate({ id: f.id, status: 'dismissed' })}
+        />
       </div>
     </li>
   );

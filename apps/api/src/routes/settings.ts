@@ -34,6 +34,7 @@ import {
 } from '../lib/slackSettings.js';
 import { SlackError, authTest, normalizeChannelName, postMessage, tokenScopes } from '../services/slack.js';
 import { loadDirectory, matchChannel } from '../services/slackRouting.js';
+import { runSlackDigest, type SlackDigestResult } from '../services/slackDigest.js';
 import { hasColumn } from '../lib/columns.js';
 import { runSlackSync } from '../services/slackSync.js';
 import { clearGeminiKey, keyFor, looksLikeGeminiKey, routingView, saveGeminiKey, saveRoute } from '../lib/llmSettings.js';
@@ -615,6 +616,17 @@ settingsRouter.post(
       return res.status(400).json({ error: err instanceof SlackError ? err.message : 'Could not reach Slack.' });
     }
     res.json({ data: await slackSettingsView(orgId) });
+  }),
+);
+
+// Send the daily reminder (studio-wide and per project) now, instead of waiting for 9am Pacific.
+settingsRouter.post(
+  '/slack/digest',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await runSlackDigest(orgId) });
   }),
 );
 

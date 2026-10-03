@@ -303,6 +303,8 @@ export interface TaskView {
    * the day it was raised.
    */
   assignedAt: string | null;
+  /** When the task was raised — what "added in the last 3 days" reads. */
+  createdAt: string;
 }
 interface TaskRow {
   id: string; title: string; detail: string | null; kind: TaskKind; status: TaskStatus;
@@ -361,6 +363,7 @@ export function useTasks() {
           closedNote: r.status === 'done' ? r.completion_note ?? null : null,
           daysEarly: daysEarly(r.due_date, completedAt),
           assignedAt: r.assigned_at ?? null,
+          createdAt: r.created_at,
         };
       });
     },
@@ -1728,6 +1731,20 @@ export function useSetSlackConfig() {
 
 export function useSlackTest() {
   return useSlackMutation(() => api<SlackConfig>('/settings/slack/test', { method: 'POST' }));
+}
+
+export interface SlackDigestSent {
+  ok: boolean;
+  skipped?: string;
+  tasks: number;
+  followUps: number;
+  projectPosts?: number;
+  warnings?: string[];
+  error?: string;
+}
+
+export function useSlackDigestNow() {
+  return useMutation({ mutationFn: () => api<SlackDigestSent>('/settings/slack/digest', { method: 'POST' }) });
 }
 
 export interface SlackProjectChannels {

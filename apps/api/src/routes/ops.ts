@@ -151,7 +151,11 @@ cronRouter.all(
             return { ok: true, skipped: 'not_due' };
           }
         }
-        return reviewOpenTasks(id, { budgetMs });
+        const reviewed = await reviewOpenTasks(id, { budgetMs });
+        // A task this pass just closed takes its follow-ups with it, now rather
+        // than at the next mailbox read.
+        await resolveFollowUps(id).catch((err) => console.error('[tasks] follow-up clean-up failed:', (err as Error).message));
+        return reviewed;
       }),
     });
   }),
