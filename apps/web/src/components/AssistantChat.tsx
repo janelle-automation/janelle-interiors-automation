@@ -10,7 +10,7 @@ import { useImagineOptions } from '../lib/queries';
 import { readableAttachment } from '../lib/attachments';
 import { AssistantGuide } from './AssistantGuide';
 import { ActiveAgents } from './AgentPicker';
-import { IconMic, IconSend, IconStop } from './icons';
+import { IconMic, IconPlus, IconSend, IconStop } from './icons';
 
 /**
  * The conversation with Jenny: what was said, what she is doing now, and
@@ -624,7 +624,7 @@ function ModeMenu({ mode, options, onChange }: { mode: ComposeMode; options: Mod
 function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.MutableRefObject<((files: File[]) => void) | null> }) {
   const {
     send, imagine, pending, stop, canListen, lookingAt, focusRequest, setMicError, vocabulary, uploadFile, prefill, attachRequest,
-    agents, setAgents,
+    agents, setAgents, newConversation, messages,
   } = useAssistant();
   const { data: canMake } = useImagineOptions();
   const [text, setText] = useState('');
@@ -907,6 +907,22 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
             e.target.value = '';
           }}
         />
+        <button
+          type="button"
+          onClick={() => {
+            newConversation();
+            setText('');
+            setAttachments([]);
+            ref.current?.focus();
+          }}
+          disabled={messages.length === 0 || pending}
+          aria-label="Start a new conversation"
+          title={messages.length === 0 ? 'This conversation has not started yet' : 'Start a new conversation'}
+          className="focusable flex h-9 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[12.5px] font-medium text-ink-soft transition-colors hover:bg-sunk hover:text-ink disabled:opacity-40"
+        >
+          <IconPlus width={16} height={16} />
+          {!compact && <span>New</span>}
+        </button>
         {canMake && canMake.image.ready && (
           <ModeMenu
             mode={mode}

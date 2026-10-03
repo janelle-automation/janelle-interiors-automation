@@ -3,6 +3,8 @@ import { supabaseAdmin } from '../lib/supabase.js';
 import { resolveSlack } from '../lib/slackSettings.js';
 import { env } from '../env.js';
 import { SlackError, postMessage, type SlackMessage } from './slack.js';
+import { resolveFollowUps } from './followups.js';
+import { JOIN_SCOPE_HINT, ROUTE_FALLBACK_CODES, channelFor, joinIfNeeded, loadDirectory, type ProjectRef } from './slackRouting.js';
 
 /**
  * The daily reminder, posted to the Slack channel.
@@ -40,6 +42,7 @@ interface DigestTask {
   status: string;
   project: string | null;
   assignee: string | null;
+  channel?: string | null;
 }
 
 interface DigestFollowUp {
@@ -48,6 +51,7 @@ interface DigestFollowUp {
   reason: string | null;
   project: string | null;
   vendor: string | null;
+  channel?: string | null;
 }
 
 const FOLLOW_UP_TYPE: Record<string, string> = {
@@ -70,7 +74,7 @@ function taskLine(t: DigestTask, today: string, withDue: boolean): string {
   return `${esc(clip(t.title, 90))}${due} — ${bits.join(' · ')}`;
 }
 
-export function buildDigest(tasks: DigestTask[], followUps: DigestFollowUp[], today: string, boardUrl: string | null): SlackMessage | null {
+export function buildDigest(tasks: DigestTask[], followUps: DigestFollowUp[], today: string, boardUrl: string | null, heading = 'Daily task & follow-up reminder'): SlackMessage | null {
   if (!tasks.length && !followUps.length) return null;
 
   const overdue = tasks.filter((t) => t.due && t.due < today).sort((a, b) => (a.due as string).localeCompare(b.due as string));
@@ -87,7 +91,7 @@ export function buildDigest(tasks: DigestTask[], followUps: DigestFollowUp[], to
 
   const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
   const blocks: unknown[] = [
-    { type: 'header', text: { type: 'plain_text', text: 'Daily task & follow-up reminder' } },
+    { type: 'header', text: { type: 'plain_text', text: heading } },
     section(
       `:red_circle: *${overdue.length}* overdue   :large_orange_circle: *${dueToday.length}* due today   ` +
         `:no_entry_sign: *${blocked.length}* blocked   :bell: *${followUps.length}* follow-ups waiting   ` +
@@ -119,13 +123,16 @@ export function buildDigest(tasks: DigestTask[], followUps: DigestFollowUp[], to
   }
 
   return {
-    text: `Daily reminder: ${overdue.length} overdue, ${dueToday.length} due today, ${followUps.length} follow-ups waiting`,
+    text: `${heading}: ${overdue.length} overdue, ${dueToday.length} due today, ${followUps.length} follow-ups waiting`,
     blocks,
   };
 }
 
 export interface SlackDigestResult {
   ok: boolean;
+  /** Projects whose own channel also got a reminder. */
+  projectPosts?: number;
+  warnings?: string[];
   skipped?: 'not_connected' | 'paused' | 'off' | 'nothing_to_report';
   tasks: number;
   followUps: number;
@@ -140,12 +147,25 @@ export async function runSlackDigest(orgId: string): Promise<SlackDigestResult> 
   if (!slack.config.enabled) return { ok: true, skipped: 'paused', tasks: 0, followUps: 0 };
   if (!slack.config.dailyDigest) return { ok: true, skipped: 'off', tasks: 0, followUps: 0 };
 
+  // Close what has already been dealt with before listing what is waiting —
+  // a task finished, a vendor who replied, a nudge sent by hand — so the
+  // reminder never chases something that is done. The nightly scan does this
+  // too, but a reminder at 9am should not rely on last night's.
+  try {
+    await resolveFollowUps(orgId);
+  } catch (err) {
+    console.error('[slack] follow-up clean-up before the reminder failed:', (err as Error).message);
+  }
+
   const db = supabaseAdmin;
   const [subtasks, snoozable] = await Promise.all([hasSubtasks(), hasColumn('follow_ups', 'snoozed_until')]);
 
+  const projectChannels = await hasColumn('projects', 'slack_channel');
+  const proj = projectChannels ? 'projects(name, slack_channel)' : 'projects(name)';
+
   let tq = db
     .from('tasks')
-    .select('title, due_date, status, projects(name), profiles(full_name)')
+    .select(`title, due_date, status, ${proj}, profiles(full_name)`)
     .eq('org_id', orgId)
     .in('status', LIVE);
   // A subtask is a step inside its parent, not a line of its own.
@@ -153,7 +173,7 @@ export async function runSlackDigest(orgId: string): Promise<SlackDigestResult> 
 
   let fq = db
     .from('follow_ups')
-    .select('type, status, reason, projects(name), vendors(name)')
+    .select(`type, status, reason, ${proj}, vendors(name)`)
     .eq('org_id', orgId)
     .in('status', ['open', 'drafted']);
   // Snoozed on purpose: not waiting on anyone until it wakes.
@@ -164,17 +184,19 @@ export async function runSlackDigest(orgId: string): Promise<SlackDigestResult> 
 
   const tasks = ((taskRows ?? []) as unknown as {
     title: string; due_date: string | null; status: string;
-    projects: { name: string } | null; profiles: { full_name: string | null } | null;
+    projects: { name: string; slack_channel?: string | null } | null; profiles: { full_name: string | null } | null;
   }[]).map((t) => ({
     title: t.title, due: t.due_date, status: t.status,
     project: t.projects?.name ?? null, assignee: t.profiles?.full_name ?? null,
+    channel: t.projects?.slack_channel ?? null,
   }));
   const followUps = ((fuRows ?? []) as unknown as {
     type: string; status: string; reason: string | null;
-    projects: { name: string } | null; vendors: { name: string } | null;
+    projects: { name: string; slack_channel?: string | null } | null; vendors: { name: string } | null;
   }[]).map((f) => ({
     type: f.type, status: f.status, reason: f.reason,
     project: f.projects?.name ?? null, vendor: f.vendors?.name ?? null,
+    channel: f.projects?.slack_channel ?? null,
   }));
 
   const appUrl = (env.appUrl ?? '').replace(/\/+$/, '');
@@ -189,11 +211,49 @@ export async function runSlackDigest(orgId: string): Promise<SlackDigestResult> 
     return { ok: false, tasks: tasks.length, followUps: followUps.length, error: msg };
   }
 
+  // Each project's own slice, to its own channel. Best effort: the studio-wide
+  // message above has already gone out, so a failure here is reported, not fatal.
+  const warnings: string[] = [];
+  let projectPosts = 0;
+  try {
+    const names = new Set([...tasks, ...followUps].map((x) => x.project).filter((n): n is string => !!n));
+    if (names.size) {
+      const dir = await loadDirectory(slack.token);
+      if (dir.missingScope) warnings.push('Add channels:read and groups:read to the Slack app so projects can be matched to their channels.');
+      for (const name of names) {
+        const pt = tasks.filter((t) => t.project === name);
+        const pf = followUps.filter((f) => f.project === name);
+        const ref: ProjectRef = { name, slack_channel: pt[0]?.channel ?? pf[0]?.channel ?? null };
+        const channel = channelFor(ref, dir, slack.config.channel);
+        // Already in the default channel's studio-wide message.
+        if (channel === slack.config.channel) continue;
+        const msg = buildDigest(pt, pf, pacificToday(), appUrl ? `${appUrl}/tasks` : null, `${name} — daily reminder`);
+        if (!msg) continue;
+        try {
+          const joined = await joinIfNeeded(slack.token, channel, dir);
+          if (joined === 'missing_scope' && !warnings.includes(JOIN_SCOPE_HINT)) warnings.push(JOIN_SCOPE_HINT);
+          await postMessage(slack.token, channel, msg);
+          projectPosts++;
+        } catch (err) {
+          if (err instanceof SlackError && ROUTE_FALLBACK_CODES.includes(err.code)) {
+            warnings.push(`The bot could not post in the channel for ${name} (${channel}). In Slack, run /invite on that channel.`);
+          } else {
+            warnings.push(`${name}: ${(err as Error).message}`);
+          }
+        }
+        await new Promise((r) => setTimeout(r, 1100)); // Slack allows about one post a second per channel
+      }
+    }
+  } catch (err) {
+    warnings.push((err as Error).message);
+  }
+  if (warnings.length) console.error('[slack] project reminders:', warnings.join(' | '));
+
   await db.from('activity_log').insert({
     org_id: orgId,
     action: 'slack_digest.sent',
     entity: 'tasks',
-    meta: { tasks: tasks.length, follow_ups: followUps.length },
+    meta: { tasks: tasks.length, follow_ups: followUps.length, project_posts: projectPosts },
   });
-  return { ok: true, tasks: tasks.length, followUps: followUps.length };
+  return { ok: true, tasks: tasks.length, followUps: followUps.length, projectPosts, warnings };
 }

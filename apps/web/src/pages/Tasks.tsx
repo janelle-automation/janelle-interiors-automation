@@ -794,10 +794,11 @@ function ScanResult({
   );
 }
 
-type DueFilter = 'any' | 'overdue' | 'today' | 'week' | 'next7' | 'none' | 'range';
+type DueFilter = 'any' | 'last3' | 'overdue' | 'today' | 'week' | 'next7' | 'none' | 'range';
 
 const DUE_OPTIONS: { v: DueFilter; label: string }[] = [
   { v: 'any', label: 'Any due date' },
+  { v: 'last3', label: 'Added in the last 3 days' },
   { v: 'overdue', label: 'Overdue' },
   { v: 'today', label: 'Due today' },
   { v: 'week', label: 'Due this week' },
@@ -819,6 +820,8 @@ interface TaskFilters {
 }
 
 const NO_FILTERS: TaskFilters = { person: '', statuses: [], categories: [], due: 'any', from: '', to: '' };
+/** What the board opens on: this week's work. "Clear all" shows everything, and that choice is remembered for the tab. */
+const DEFAULT_FILTERS: TaskFilters = { ...NO_FILTERS, due: 'week' };
 
 /** How many filters are switched on — the number on the button. */
 function activeFilterCount(f: TaskFilters): number {
@@ -839,6 +842,8 @@ function dueMatches(t: TaskView, f: TaskFilters): boolean {
   switch (f.due) {
     case 'any':
       return true;
+    case 'last3':
+      return Date.now() - Date.parse(t.createdAt) <= 3 * 86_400_000;
     case 'none':
       return !due;
     case 'overdue':
@@ -862,6 +867,42 @@ function dueMatches(t: TaskView, f: TaskFilters): boolean {
       if (!due) return !f.from && !f.to;
       return (!f.from || due >= f.from) && (!f.to || due <= f.to);
   }
+}
+
+/**
+ * How urgent a task is by its due date, most urgent first. The tiers are the
+ * studio's SLA: a task three or more days late is critical, anything late is
+ * overdue, and what is not yet due is ranked by how soon.
+ */
+const SLA_TIERS = [
+  { key: 'critical', label: 'Critical — 3+ days overdue' },
+  { key: 'overdue', label: 'Overdue' },
+  { key: 'today', label: 'Due today' },
+  { key: 'soon', label: 'Due in the next 2 days' },
+  { key: 'week', label: 'Due within a week' },
+  { key: 'later', label: 'Later' },
+  { key: 'none', label: 'No due date' },
+  { key: 'closed', label: 'Closed' },
+] as const;
+type SlaTier = (typeof SLA_TIERS)[number]['key'];
+
+/** Whole days from `due` to today; positive when late. */
+function daysLate(t: TaskView): number {
+  if (!t.due) return 0;
+  const p = (d: string) => Date.parse(`${d.slice(0, 10)}T00:00:00`);
+  return Math.round((p(isoDay(new Date())) - p(t.due)) / 86_400_000);
+}
+
+function slaTier(t: TaskView): SlaTier {
+  if (!OPEN_STATUSES.includes(t.status)) return 'closed';
+  if (!t.due) return 'none';
+  const late = daysLate(t);
+  if (late >= 3) return 'critical';
+  if (late >= 1) return 'overdue';
+  if (late === 0) return 'today';
+  if (late >= -2) return 'soon';
+  if (late >= -7) return 'week';
+  return 'later';
 }
 
 function IconFilter(p: { width?: number; height?: number }) {
@@ -1119,6 +1160,23 @@ export default function Tasks() {
     }
   });
 
+  // The list is grouped by category, or by how urgent each task is.
+  const [groupBy, setGroupBy] = useState<'category' | 'priority'>(() => {
+    try {
+      return localStorage.getItem('tasks.groupBy') === 'priority' ? 'priority' : 'category';
+    } catch {
+      return 'category';
+    }
+  });
+  const chooseGroup = (next: 'category' | 'priority') => {
+    setGroupBy(next);
+    try {
+      localStorage.setItem('tasks.groupBy', next);
+    } catch {
+      // The choice just will not stick.
+    }
+  };
+
   const chooseView = (next: 'board' | 'list') => {
     setView(next);
     try {
@@ -1142,10 +1200,10 @@ export default function Tasks() {
   const [filters, setFilters] = useState<TaskFilters>(() => {
     try {
       const saved = sessionStorage.getItem('tasks.filters');
-      const parsed = saved ? { ...NO_FILTERS, ...(JSON.parse(saved) as Partial<TaskFilters>) } : NO_FILTERS;
+      const parsed = saved ? { ...NO_FILTERS, ...(JSON.parse(saved) as Partial<TaskFilters>) } : DEFAULT_FILTERS;
       return { ...parsed, statuses: Array.isArray(parsed.statuses) ? parsed.statuses : [] };
     } catch {
-      return NO_FILTERS;
+      return DEFAULT_FILTERS;
     }
   });
   const changeFilters = (next: TaskFilters) => {
@@ -1374,7 +1432,23 @@ export default function Tasks() {
           <h2 className="text-[16px] font-semibold text-ink">
             {showDone ? 'All tasks' : 'Open work'}
           </h2>
-          <span className="text-[12px] text-ink-faint">{visible.length} shown</span>
+          <div className="flex items-center gap-3">
+            <div className="inline-flex rounded-lg border border-line bg-surface p-0.5 text-[12px]" role="group" aria-label="Group tasks by">
+              {([['category', 'Category'], ['priority', 'Priority (SLA)']] as const).map(([v, text]) => (
+                <button
+                  key={v}
+                  onClick={() => chooseGroup(v)}
+                  aria-pressed={groupBy === v}
+                  className={`focusable rounded-md px-2.5 py-1 font-medium transition-colors ${
+                    groupBy === v ? 'bg-brass text-white' : 'text-ink-soft hover:text-ink'
+                  }`}
+                >
+                  {text}
+                </button>
+              ))}
+            </div>
+            <span className="text-[12px] text-ink-faint">{visible.length} shown</span>
+          </div>
         </div>
         <ul className="divide-y divide-line-soft">
           {isLoading && (
@@ -1387,14 +1461,28 @@ export default function Tasks() {
                 : 'No open tasks. They appear here as the system reads email and spots work that needs doing.'}
             </li>
           )}
-          {TASK_CATEGORIES.map((c) => {
-            const group = visible.filter((t) => t.category === c);
+          {(groupBy === 'priority'
+            ? SLA_TIERS.map((tier) => ({
+                key: tier.key as string,
+                label: tier.label as string,
+                urgent: tier.key === 'critical' || tier.key === 'overdue',
+                items: visible
+                  .filter((t) => slaTier(t) === tier.key)
+                  .sort((a, b) => (a.due ?? '9999').localeCompare(b.due ?? '9999')),
+              }))
+            : TASK_CATEGORIES.map((c) => ({
+                key: c as string,
+                label: TASK_CATEGORY_LABELS[c] as string,
+                urgent: false,
+                items: visible.filter((t) => t.category === c),
+              }))
+          ).map(({ key: c, label: groupLabel, urgent, items: group }) => {
             if (!group.length) return null;
             return (
               <Fragment key={c}>
                 <li className="flex items-center justify-between bg-sunk px-5 py-2">
-                  <h3 className="text-[11.5px] font-bold uppercase tracking-[0.07em] text-ink-soft">
-                    {TASK_CATEGORY_LABELS[c]}
+                  <h3 className={`text-[11.5px] font-bold uppercase tracking-[0.07em] ${urgent ? 'text-crit' : 'text-ink-soft'}`}>
+                    {groupLabel}
                   </h3>
                   <span className="text-[11.5px] text-ink-faint">{group.length}</span>
                 </li>
@@ -1410,6 +1498,9 @@ export default function Tasks() {
                     <div className="mt-0.5 text-[11px] text-ink-faint">
                       {t.project} · raised {t.age}
                       {t.due && <> · due {shortDate(t.due)}</>}
+                      {t.overdue && daysLate(t) > 0 && (
+                        <span className="font-semibold text-crit"> · {daysLate(t)} day{daysLate(t) > 1 ? 's' : ''} overdue</span>
+                      )}
                       {t.status === 'done' && t.completedAt ? (
                         <>
                           {' '}· done {shortDate(t.completedAt)}

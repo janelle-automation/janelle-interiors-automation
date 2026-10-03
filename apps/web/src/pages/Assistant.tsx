@@ -5,6 +5,9 @@ import { AssistantChat } from '../components/AssistantChat';
 import { AssistantGuide } from '../components/AssistantGuide';
 import { AssistantHistory } from '../components/AssistantHistory';
 import { IconTalk } from '../components/AssistantPanel';
+import { AgentCards } from '../components/AgentPicker';
+import { IconPlus } from '../components/icons';
+import { useSearchParams } from 'react-router-dom';
 import { useAssistant } from '../context/AssistantContext';
 
 type IconProps = SVGProps<SVGSVGElement>;
@@ -67,7 +70,6 @@ const stroke = {
   width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
   strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const,
 };
-const IconList = (p: IconProps) => <svg {...stroke} {...p}><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg>;
 const IconSpark = (p: IconProps) => (
   <svg {...stroke} {...p}><path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9Z" /><path d="M19 17v4M17 19h4" /></svg>
 );
@@ -100,6 +102,18 @@ function Sheet({ side, title, onClose, children }: { side: 'left' | 'right'; tit
   );
 }
 
+/** The conversation, filling what is left of the window. Past ones are on their own tab. */
+function ChatTab() {
+  const [fillRef, fillHeight] = useFillsViewport<HTMLDivElement>();
+  return (
+    <div ref={fillRef} style={fillHeight ? { height: fillHeight } : undefined}>
+      <Card className="flex h-full min-h-0 flex-col overflow-hidden">
+        <AssistantChat />
+      </Card>
+    </div>
+  );
+}
+
 /**
  * Jenny with the whole screen to herself.
  *
@@ -108,20 +122,35 @@ function Sheet({ side, title, onClose, children }: { side: 'left' | 'right'; tit
  * conversations sit beside it, and what she can do is a click away.
  */
 export default function Assistant() {
-  const { handsFree, setHandsFree, canListen, canSpeak, speakReplies, setSpeakReplies, conversations } = useAssistant();
+  const { handsFree, setHandsFree, canListen, canSpeak, speakReplies, setSpeakReplies, conversations, agents, setAgents, newConversation, messages } = useAssistant();
+  const [params, setParams] = useSearchParams();
+  type Tab = 'chat' | 'conversations' | 'agents';
+  const asked = params.get('tab');
+  const tab: Tab = asked === 'agents' || asked === 'conversations' ? asked : 'chat';
+  const chooseTab = (next: Tab) => {
+    const p = new URLSearchParams(params);
+    if (next === 'chat') p.delete('tab');
+    else p.set('tab', next);
+    setParams(p, { replace: true });
+  };
   const [guide, setGuide] = useState(false);
-  const [history, setHistory] = useState(false);
-  const [fillRef, fillHeight] = useFillsViewport<HTMLDivElement>();
 
   return (
     <Page>
       <PageHeading
         title={ASSISTANT_NAME}
         action={
+          tab === 'chat' ? (
           <div className="flex flex-wrap items-center gap-2">
-            <button type="button" onClick={() => setHistory(true)} className="btn-secondary btn-sm lg:hidden">
-              <IconList />
-              Conversations{conversations.length ? ` (${conversations.length})` : ''}
+            <button
+              type="button"
+              onClick={newConversation}
+              disabled={messages.length === 0}
+              title={messages.length === 0 ? 'This conversation has not started yet' : 'Start a new conversation'}
+              className="btn-primary btn-sm"
+            >
+              <IconPlus width={15} height={15} />
+              New conversation
             </button>
             <button type="button" onClick={() => setGuide(true)} className="btn-secondary btn-sm">
               <IconSpark />
@@ -149,41 +178,60 @@ export default function Assistant() {
               </button>
             )}
           </div>
+          ) : undefined
         }
       />
 
-      <div
-        ref={fillRef}
-        style={fillHeight ? { height: fillHeight } : undefined}
-        className="grid gap-4 lg:grid-cols-[17.5rem_minmax(0,1fr)] 2xl:grid-cols-[20rem_minmax(0,1fr)]"
-      >
-        <Card className="hidden h-full min-h-0 flex-col overflow-hidden lg:flex">
-          <div className="border-b border-line px-4 py-3">
-            <h2 className="text-[13.5px] font-semibold text-ink">Conversations</h2>
-            <p className="text-[11.5px] text-ink-faint">Kept in this browser</p>
-          </div>
-          <AssistantHistory />
-        </Card>
-
-        <Card className="flex h-full min-h-0 flex-col overflow-hidden">
-          <AssistantChat />
-        </Card>
+      <div role="tablist" aria-label="Jenny sections" className="mb-4 inline-flex gap-1 rounded-xl border border-line bg-surface p-1">
+        {([['chat', 'Chat'], ['conversations', 'Conversations'], ['agents', 'Agents']] as const).map(([id, label]) => (
+          <button
+            key={id}
+            role="tab"
+            aria-selected={tab === id}
+            onClick={() => chooseTab(id)}
+            className={`focusable flex items-center gap-2 rounded-lg px-4 py-2 text-[13px] font-medium transition-colors ${
+              tab === id ? 'bg-brass/15 text-ink shadow-card' : 'text-ink-soft hover:bg-sunk hover:text-ink'
+            }`}
+          >
+            {label}
+            {id === 'conversations' && conversations.length > 0 && (
+              <span className="grid min-w-5 place-items-center rounded-full bg-sunk px-1.5 text-[11px] font-bold leading-5 text-ink-faint">
+                {conversations.length}
+              </span>
+            )}
+            {id === 'agents' && (
+              <span
+                className={`grid min-w-5 place-items-center rounded-full px-1.5 text-[11px] font-bold leading-5 ${
+                  agents.length ? 'bg-brass text-white' : 'bg-sunk text-ink-faint'
+                }`}
+                title={agents.length ? `${agents.length} agent(s) on` : 'No agent on'}
+              >
+                {agents.length}
+              </span>
+            )}
+          </button>
+        ))}
       </div>
+
+      {tab === 'agents' && <AgentCards agents={agents} onChange={setAgents} />}
+      {tab === 'chat' && <ChatTab />}
+      {tab === 'conversations' && (
+        <div className="mx-auto max-w-3xl" style={{ height: 'min(44rem, calc(100vh - 14rem))' }}>
+          <Card className="flex h-full min-h-0 flex-col overflow-hidden">
+              <AssistantHistory showAgents={false} onOpened={() => chooseTab('chat')} onNew={() => chooseTab('chat')} />
+          </Card>
+        </div>
+      )}
 
       {/* Only when it explains something the person can see is missing: the
           microphone button is absent in a browser that cannot listen, and
           without a word that reads as the app being broken. */}
-      {!canListen && (
+      {tab === 'chat' && !canListen && (
         <p className="mt-3 text-[12.5px] text-ink-faint">
           Voice is not available in this browser; Chrome, Edge and Safari support it.
         </p>
       )}
 
-      {history && (
-        <Sheet side="left" title="Conversations" onClose={() => setHistory(false)}>
-          <AssistantHistory onOpened={() => setHistory(false)} onNew={() => setHistory(false)} />
-        </Sheet>
-      )}
       {guide && (
         <Sheet side="right" title={`What ${ASSISTANT_NAME} can do`} onClose={() => setGuide(false)}>
           <div className="min-h-0 flex-1 overflow-y-auto p-4">

@@ -41,6 +41,7 @@ import {
   useClearSlackToken,
   useSetSlackConfig,
   useSlackTest,
+  useSlackDigestNow,
   useSlackSync,
   useSlackProjects,
   useSetProjectChannel,
@@ -1045,7 +1046,7 @@ function SlackProjectChannels({ defaultChannel }: { defaultChannel: string }) {
                   const value = drafts[p.id] ?? p.channel;
                   const dirty = value.trim().replace(/^#/, '') !== p.channel;
                   const status = p.botIn === false
-                    ? { text: 'Invite the bot', tone: 'text-warn' }
+                    ? { text: 'Bot joins on next post', tone: 'text-warn' }
                     : p.channel
                       ? { text: 'Assigned', tone: 'text-ink-soft' }
                       : p.auto
@@ -1113,6 +1114,7 @@ function SlackSetupCard() {
   const clearToken = useClearSlackToken();
   const setConfig = useSetSlackConfig();
   const test = useSlackTest();
+  const digestNow = useSlackDigestNow();
   const sync = useSlackSync();
   const [token, setTokenText] = useState('');
   const [channel, setChannel] = useState<string | null>(null);
@@ -1201,8 +1203,25 @@ function SlackSetupCard() {
                   <button className="btn-ghost btn-sm" disabled={test.isPending || !data.connected} onClick={() => test.mutate(undefined, { onSuccess: () => say(`Test message sent to #${data.channel}`) })}>
                     {test.isPending ? 'Sending…' : 'Send a test'}
                   </button>
+                  <button
+                    className="btn-ghost btn-sm"
+                    disabled={digestNow.isPending || !data.connected}
+                    onClick={() =>
+                      digestNow.mutate(undefined, {
+                        onSuccess: (r) =>
+                          say(
+                            r.error ? `Reminder failed: ${r.error}`
+                              : r.skipped ? `Nothing sent (${r.skipped.replace(/_/g, ' ')})`
+                              : `Reminder sent to #${data.channel} and ${r.projectPosts ?? 0} project channel(s)${r.warnings?.length ? ` — ${r.warnings[0]}` : ''}`,
+                          ),
+                        onError: (e) => say((e as Error).message),
+                      })
+                    }
+                  >
+                    {digestNow.isPending ? 'Sending…' : 'Send reminders now'}
+                  </button>
                 </div>
-                <Hint>Where the daily reminder goes, and any project without a channel of its own. Invite the bot first: /invite @your-bot.</Hint>
+                <Hint>Where the daily reminder goes, and any project without a channel of its own. The bot joins public project channels by itself (needs the channels:join permission); private channels still need /invite @your-bot.</Hint>
               </div>
             </div>
 
@@ -1753,10 +1772,11 @@ function TeamCard() {
   );
 }
 
-type SettingsTab = 'connections' | 'ai' | 'studio' | 'account';
+type SettingsTab = 'connections' | 'slack' | 'ai' | 'studio' | 'account';
 
 const TABS: { id: SettingsTab; label: string; Icon: (p: { width?: number; height?: number }) => JSX.Element; principal: boolean }[] = [
   { id: 'connections', label: 'Connections', Icon: IconInbox, principal: false },
+  { id: 'slack', label: 'Slack', Icon: IconBell, principal: true },
   { id: 'ai', label: 'AI', Icon: IconAssistant, principal: true },
   { id: 'studio', label: 'Studio', Icon: IconBell, principal: true },
   { id: 'account', label: 'Account', Icon: IconPerson, principal: false },
@@ -1821,9 +1841,10 @@ export default function Settings() {
             <GoogleCard />
             <MailSyncCard />
             <EmailReadingCard />
-            <SlackSetupCard />
           </>
         )}
+
+        {tab === 'slack' && <SlackSetupCard />}
 
         {tab === 'ai' && (
           <>

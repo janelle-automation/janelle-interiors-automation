@@ -180,7 +180,7 @@ function Row({ c, active, onOpened }: { c: ConversationSummary; active: boolean;
   );
 }
 
-export function AssistantHistory({ onOpened, onNew }: { onOpened?: () => void; onNew?: () => void }) {
+export function AssistantHistory({ onOpened, onNew, showAgents = true }: { onOpened?: () => void; onNew?: () => void; showAgents?: boolean }) {
   const { conversations, activeConversationId, newConversation, messages, agents, setAgents } = useAssistant();
   const [query, setQuery] = useState('');
 
@@ -214,7 +214,7 @@ export function AssistantHistory({ onOpened, onNew }: { onOpened?: () => void; o
           <IconPlus width={15} height={15} />
           New conversation
         </button>
-        <AgentList agents={agents} onChange={setAgents} />
+        {showAgents && <AgentList agents={agents} onChange={setAgents} />}
         <label className="relative block">
           <IconSearch className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-faint" width={14} height={14} />
           <input

@@ -143,6 +143,14 @@ export async function listChannels(token: string): Promise<SlackChannel[]> {
 }
 
 /**
+ * Join a public channel. Needs the channels:join scope; a private channel
+ * cannot be joined by a bot at all, only invited to.
+ */
+export async function joinChannel(token: string, channelId: string): Promise<void> {
+  await call(token, 'conversations.join', { channel: channelId }, true);
+}
+
+/**
  * The permissions the token was granted, as Slack reports them in a header.
  * Whether the bot can post in a public channel it has not joined depends on
  * chat:write.public, and only the token knows if it has it.

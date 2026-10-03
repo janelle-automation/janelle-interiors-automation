@@ -21,7 +21,7 @@ const IconCheck = (p: IconProps) => <svg {...stroke} {...p}><path d="m5 12.5 4.5
 const IconChevron = (p: IconProps) => <svg {...stroke} {...p}><path d="m6 9 6 6 6-6" /></svg>;
 const IconX = (p: IconProps) => <svg {...stroke} {...p}><path d="M6 6l12 12M18 6 6 18" /></svg>;
 
-const AGENT_ICON: Record<AgentKey, (p: IconProps) => JSX.Element> = {
+export const AGENT_ICON: Record<AgentKey, (p: IconProps) => JSX.Element> = {
   inbox: IconInbox,
   vendors: IconVendors,
   projects: IconProjects,
@@ -153,5 +153,66 @@ export function ActiveAgents({ agents, onClear }: { agents: AgentKey[]; onClear:
       <span>{text}</span>
       <IconX width={12} height={12} />
     </button>
+  );
+}
+
+/**
+ * The agents as a page of their own: one card each, what it does written out,
+ * and one switch. The same setting as the compact list in the side panel —
+ * this is the place to read about them and manage them without a conversation
+ * open beside it.
+ */
+export function AgentCards({ agents, onChange }: { agents: AgentKey[]; onChange: (next: AgentKey[]) => void }) {
+  const toggle = (key: AgentKey) => onChange(agents.includes(key) ? agents.filter((a) => a !== key) : [...agents, key]);
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-surface px-4 py-3">
+        <p className="text-[13px] text-ink-soft">
+          {agents.length === 0
+            ? 'No agent is on, so Jenny does everything. Switch one on to narrow her to that job, or several to work across just those.'
+            : `${summaryOf(agents)}. Jenny declines anything outside ${agents.length === 1 ? 'it' : 'them'}, by name.`}
+        </p>
+        {agents.length > 0 && (
+          <button type="button" onClick={() => onChange([])} className="btn-secondary btn-sm">
+            Turn all off
+          </button>
+        )}
+      </div>
+      <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        {AGENT_KEYS.map((key) => {
+          const on = agents.includes(key);
+          const Icon = AGENT_ICON[key];
+          return (
+            <li key={key}>
+              <button
+                type="button"
+                aria-pressed={on}
+                onClick={() => toggle(key)}
+                className={`focusable flex h-full w-full flex-col gap-3 rounded-xl border p-4 text-left transition-colors ${
+                  on ? 'border-brass bg-brass/10 shadow-card' : 'border-line bg-surface hover:border-ink-faint'
+                }`}
+              >
+                <span className="flex items-center justify-between">
+                  <span className={`grid h-10 w-10 place-items-center rounded-lg ${on ? 'bg-brass text-white' : 'bg-sunk text-ink-soft'}`}>
+                    <Icon width={20} height={20} />
+                  </span>
+                  <span
+                    className={`rounded-full px-2.5 py-0.5 text-[11.5px] font-semibold ${
+                      on ? 'bg-brass/20 text-brass-deep' : 'bg-sunk text-ink-faint'
+                    }`}
+                  >
+                    {on ? 'On' : 'Off'}
+                  </span>
+                </span>
+                <span>
+                  <span className="block text-[15px] font-semibold text-ink">{AGENT_LABELS[key]}</span>
+                  <span className="mt-1 block text-[13px] leading-snug text-ink-soft">{AGENT_BLURBS[key]}</span>
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
