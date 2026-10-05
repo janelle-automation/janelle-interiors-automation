@@ -1,10 +1,110 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Page, PageHeading, Card, StageBadge, Pill, money, shortDate } from '../components/ui';
 import { IconArrow } from '../components/icons';
 import { useProject, useUpdateProject } from '../lib/queries';
 import { PROJECT_STAGES, STAGE_LABELS, type ProjectStage } from '@janelle/shared';
 import { DatePicker } from '../components/DatePicker';
+import { useTable, SortTh, SearchInput, FilterSelect, TableToolbar, TablePager, matches } from '../components/table';
+
+type ProjectPo = NonNullable<ReturnType<typeof useProject>['data']>['purchase_orders'][number];
+
+const poStatusLabel = (status: string) => status.replace('_', ' ');
+
+/**
+ * The project's purchase orders: searchable by vendor or PO number, filtered
+ * by status, sortable by every column. Its own component so its table state
+ * can sit below the page's loading and not-found returns.
+ */
+function PurchaseOrdersTable({ pos }: { pos: ProjectPo[] }) {
+  const [query, setQuery] = useState('');
+  const [status, setStatus] = useState('all');
+
+  const statuses = useMemo(() => [...new Set(pos.map((o) => o.status))].sort(), [pos]);
+  const shown = useMemo(
+    () =>
+      pos.filter(
+        (o) => (status === 'all' || o.status === status) && matches(query, o.vendors?.name, o.po_number),
+      ),
+    [pos, query, status],
+  );
+
+  const table = useTable(shown, {
+    storageKey: 'project-detail',
+    pageSize: 10,
+    defaultSort: { key: 'eta', dir: 'asc' },
+    sorters: {
+      vendor: (o) => o.vendors?.name ?? '',
+      po: (o) => o.po_number ?? '',
+      status: (o) => poStatusLabel(o.status),
+      items: (o) => o.line_items?.length ?? 0,
+      amount: (o) => o.amount ?? null,
+      eta: (o) => o.eta ?? '',
+    },
+  });
+
+  const filtering = Boolean(query.trim()) || status !== 'all';
+
+  return (
+    <>
+      {pos.length > 0 && (
+        <TableToolbar
+          search={<SearchInput value={query} onChange={setQuery} placeholder="Search vendor or PO number" label="Search purchase orders" className="w-full sm:w-60" />}
+          filters={
+            statuses.length > 1 && (
+              <FilterSelect
+                label="Filter by status"
+                value={status}
+                onChange={setStatus}
+                options={[{ value: 'all', label: 'All statuses' }, ...statuses.map((st) => ({ value: st, label: poStatusLabel(st) }))]}
+              />
+            )
+          }
+          shown={shown.length}
+          total={pos.length}
+          noun="order"
+          onClear={filtering ? () => { setQuery(''); setStatus('all'); } : null}
+        />
+      )}
+      <div className="overflow-x-auto">
+        <table className="w-full text-[14px]">
+          <thead>
+            <tr className="border-b border-line-soft text-left text-[11.5px] font-semibold uppercase tracking-[0.06em] text-ink-faint">
+              <SortTh table={table} col="vendor" className="px-5 py-3 font-medium">Vendor</SortTh>
+              <SortTh table={table} col="po" className="px-5 py-3 font-medium">PO</SortTh>
+              <SortTh table={table} col="status" className="px-5 py-3 font-medium">Status</SortTh>
+              <SortTh table={table} col="items" align="right" className="px-5 py-3 font-medium">Items</SortTh>
+              <SortTh table={table} col="amount" align="right" className="px-5 py-3 font-medium">Amount</SortTh>
+              <SortTh table={table} col="eta" align="right" className="px-5 py-3 font-medium">ETA</SortTh>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line-soft">
+            {pos.length === 0 && <tr><td colSpan={6} className="px-5 py-8 text-center text-[13px] text-ink-faint">No purchase orders yet.</td></tr>}
+            {pos.length > 0 && shown.length === 0 && (
+              <tr><td colSpan={6} className="px-5 py-8 text-center text-[13px] text-ink-faint">No orders match these filters.</td></tr>
+            )}
+            {table.rows.map((o) => (
+              <tr key={o.id} className="text-ink-soft">
+                <td className="px-5 py-3 text-[13px] font-medium text-ink">{o.vendors?.name ?? '—'}</td>
+                {/* Most of these orders came out of a vendor quote, which
+                    carries no PO number — the studio assigns one when it
+                    raises the order. Saying so beats another dash. */}
+                <td className="px-5 py-3 text-[13px] text-ink">
+                  {o.po_number ?? <span className="text-ink-faint">not yet numbered</span>}
+                </td>
+                <td className="px-5 py-3"><Pill tone={o.status === 'received' ? 'good' : o.status === 'shipped' ? 'brass' : 'neutral'}>{poStatusLabel(o.status)}</Pill></td>
+                <td className="px-5 py-3 text-right tabular-nums text-ink-soft">{o.line_items?.length || '—'}</td>
+                <td className="px-5 py-3 text-right tabular-nums text-ink">{money(o.amount)}</td>
+                <td className="px-5 py-3 text-right tabular-nums">{shortDate(o.eta)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <TablePager table={table} noun="order" />
+    </>
+  );
+}
 
 const inputCls = 'input';
 
@@ -196,35 +296,7 @@ export default function ProjectDetail() {
       <div className="grid gap-5 lg:grid-cols-3">
         <Card className="lg:col-span-2">
           <div className="border-b border-line-soft px-5 py-4"><h2 className="text-[16px] font-semibold text-ink">Purchase orders</h2></div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-[14px]">
-              <thead>
-                <tr className="border-b border-line-soft text-left text-[11.5px] font-semibold uppercase tracking-[0.06em] text-ink-faint">
-                  <th className="px-5 py-3 font-medium">Vendor</th><th className="px-5 py-3 font-medium">PO</th>
-                  <th className="px-5 py-3 font-medium">Status</th><th className="px-5 py-3 text-right font-medium">Items</th>
-                  <th className="px-5 py-3 text-right font-medium">Amount</th><th className="px-5 py-3 text-right font-medium">ETA</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-line-soft">
-                {pos.length === 0 && <tr><td colSpan={6} className="px-5 py-8 text-center text-[13px] text-ink-faint">No purchase orders yet.</td></tr>}
-                {pos.map((o) => (
-                  <tr key={o.id} className="text-ink-soft">
-                    <td className="px-5 py-3 text-[13px] font-medium text-ink">{o.vendors?.name ?? '—'}</td>
-                    {/* Most of these orders came out of a vendor quote, which
-                        carries no PO number — the studio assigns one when it
-                        raises the order. Saying so beats another dash. */}
-                    <td className="px-5 py-3 text-[13px] text-ink">
-                      {o.po_number ?? <span className="text-ink-faint">not yet numbered</span>}
-                    </td>
-                    <td className="px-5 py-3"><Pill tone={o.status === 'received' ? 'good' : o.status === 'shipped' ? 'brass' : 'neutral'}>{o.status.replace('_', ' ')}</Pill></td>
-                    <td className="px-5 py-3 text-right tabular-nums text-ink-soft">{o.line_items?.length || '—'}</td>
-                    <td className="px-5 py-3 text-right tabular-nums text-ink">{money(o.amount)}</td>
-                    <td className="px-5 py-3 text-right tabular-nums">{shortDate(o.eta)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <PurchaseOrdersTable pos={pos} />
         </Card>
 
         <Card>

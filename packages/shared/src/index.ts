@@ -1608,8 +1608,6 @@ export interface IngestInterval {
 
 export const INGEST_INTERVALS: IngestInterval[] = [
   { minutes: 0, label: 'Only when I ask' },
-  { minutes: 1, label: 'Every minute' },
-  { minutes: 5, label: 'Every 5 minutes' },
   { minutes: 10, label: 'Every 10 minutes' },
   { minutes: 15, label: 'Every 15 minutes' },
   { minutes: 30, label: 'Every 30 minutes' },

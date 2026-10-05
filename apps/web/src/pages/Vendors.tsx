@@ -1,8 +1,10 @@
 import { useMemo, useState } from 'react';
+import { Avatar } from '../components/hue';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { Page, PageHeading, Card, Pill, money, usePager, Pager } from '../components/ui';
+import { Page, PageHeading, Card, Pill, money } from '../components/ui';
+import { useTable, SortTh, SearchInput, FilterSelect, TableToolbar, TablePager, matches } from '../components/table';
 import { OrdersPanel } from '../components/OrdersPanel';
-import { IconSearch, IconPlus } from '../components/icons';
+import { IconPlus } from '../components/icons';
 import {
   useVendors, usePurchaseOrders, useCreateVendor, useVendorAbilities,
   type VendorView,
@@ -132,14 +134,19 @@ function VendorRow({ v }: { v: VendorView }) {
       className="cursor-pointer text-ink-soft transition-colors hover:bg-sunk/50"
     >
       <td className="px-5 py-3">
-        <Link
-          to={`/vendors/${v.id}`}
-          onClick={(e) => e.stopPropagation()}
-          className="focusable rounded text-[14px] font-medium text-ink hover:underline"
-        >
-          {v.name}
-        </Link>
-        {facts.length > 0 && <div className="truncate text-[12px] text-ink-faint">{facts.join(' · ')}</div>}
+        <div className="flex min-w-0 items-center gap-2.5">
+          <Avatar name={v.name} size={24} />
+          <div className="min-w-0">
+            <Link
+              to={`/vendors/${v.id}`}
+              onClick={(e) => e.stopPropagation()}
+              className="focusable rounded text-[14px] font-medium text-ink hover:underline"
+            >
+              {v.name}
+            </Link>
+            {facts.length > 0 && <div className="truncate text-[12px] text-ink-faint">{facts.join(' · ')}</div>}
+          </div>
+        </div>
       </td>
       <td className="whitespace-nowrap px-5 py-3 text-right">
         {v.openPOs > 0 ? <Pill tone="brass">{v.openPOs} open</Pill> : <span className="text-[12px] text-ink-faint">None open</span>}
@@ -156,45 +163,85 @@ function VendorDirectory({ canCreate }: { canCreate: boolean }) {
   const { data: vendors, isLoading } = useVendors();
   const [adding, setAdding] = useState(false);
   const [query, setQuery] = useState('');
+  const [category, setCategory] = useState('all');
+  const [open, setOpen] = useState<'all' | 'open' | 'none'>('all');
 
-  const shown = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return vendors;
-    return vendors.filter((v) => [v.name, v.category, v.website, v.email].some((f) => f.toLowerCase().includes(q)));
-  }, [vendors, query]);
+  const categories = useMemo(
+    () => [...new Set(vendors.map((v) => v.category.trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b)),
+    [vendors],
+  );
+
+  const shown = useMemo(
+    () =>
+      vendors.filter((v) => {
+        if (category !== 'all' && v.category.trim() !== category) return false;
+        if (open === 'open' && v.openPOs === 0) return false;
+        if (open === 'none' && v.openPOs > 0) return false;
+        return matches(query, v.name, v.category, v.website, v.email);
+      }),
+    [vendors, query, category, open],
+  );
 
   // A studio that has been ingesting for a season has dozens of vendors;
   // sorting and search apply to all of them, the page only picks the slice.
-  const pager = usePager(shown, 15);
+  const pager = useTable(shown, {
+    storageKey: 'vendors',
+    sorters: {
+      name: (v) => v.name,
+      openPOs: (v) => v.openPOs,
+      openValue: (v) => v.openValue,
+    },
+  });
+  const filtering = Boolean(query.trim()) || category !== 'all' || open !== 'all';
+  const clearFilters = () => {
+    setQuery('');
+    setCategory('all');
+    setOpen('all');
+  };
 
   return (
     <Card>
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line-soft px-5 py-4">
         <div>
           <h2 className="text-[16px] font-semibold text-ink">Vendors</h2>
-          <p className="text-[12.5px] text-ink-soft">
-            {shown.length === vendors.length ? `${vendors.length} on file` : `${shown.length} of ${vendors.length}`} · select one to see
-            their orders
-          </p>
+          <p className="text-[12.5px] text-ink-soft">Select one to see their orders</p>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="relative">
-            <IconSearch className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint" />
-            <input
-              className="input input-sm w-64 pl-8"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search name, site or category"
-              aria-label="Search vendors"
-            />
-          </div>
-          {canCreate && (
-            <button onClick={() => setAdding((v) => !v)} className="btn-primary btn-sm">
-              {adding ? 'Cancel' : <><IconPlus className="h-3.5 w-3.5" /> Add vendor</>}
-            </button>
-          )}
-        </div>
+        {canCreate && (
+          <button onClick={() => setAdding((v) => !v)} className="btn-primary btn-sm">
+            {adding ? 'Cancel' : <><IconPlus className="h-3.5 w-3.5" /> Add vendor</>}
+          </button>
+        )}
       </div>
+
+      <TableToolbar
+        search={<SearchInput value={query} onChange={setQuery} placeholder="Search name, site, email or category" label="Search vendors" />}
+        filters={
+          <>
+            {categories.length > 0 && (
+              <FilterSelect
+                label="Filter by category"
+                value={category}
+                onChange={setCategory}
+                options={[{ value: 'all', label: 'All categories' }, ...categories.map((c) => ({ value: c, label: c }))]}
+              />
+            )}
+            <FilterSelect
+              label="Filter by open orders"
+              value={open}
+              onChange={(v) => setOpen(v as 'all' | 'open' | 'none')}
+              options={[
+                { value: 'all', label: 'Any orders' },
+                { value: 'open', label: 'With open orders' },
+                { value: 'none', label: 'None open' },
+              ]}
+            />
+          </>
+        }
+        shown={shown.length}
+        total={vendors.length}
+        noun="vendor"
+        onClear={filtering ? clearFilters : null}
+      />
 
       {adding && <AddVendor onDone={() => setAdding(false)} />}
 
@@ -202,9 +249,9 @@ function VendorDirectory({ canCreate }: { canCreate: boolean }) {
         <table className="w-full text-[14px]">
           <thead>
             <tr className="border-b border-line-soft text-left text-[11.5px] font-semibold uppercase tracking-[0.06em] text-ink-faint">
-              <th className="px-5 py-3 font-medium">Vendor</th>
-              <th className="px-5 py-3 text-right font-medium">Open orders</th>
-              <th className="px-5 py-3 text-right font-medium">Open value</th>
+              <SortTh table={pager} col="name" className="px-5 py-3 font-medium">Vendor</SortTh>
+              <SortTh table={pager} col="openPOs" align="right" className="px-5 py-3 font-medium">Open orders</SortTh>
+              <SortTh table={pager} col="openValue" align="right" className="px-5 py-3 font-medium">Open value</SortTh>
               <th className="px-5 py-3"><span className="sr-only">Open</span></th>
             </tr>
           </thead>
@@ -218,14 +265,14 @@ function VendorDirectory({ canCreate }: { canCreate: boolean }) {
               </tr>
             )}
             {!isLoading && vendors.length > 0 && shown.length === 0 && (
-              <tr><td colSpan={4} className="px-5 py-10 text-center text-[13px] text-ink-faint">Nothing matches “{query}”.</td></tr>
+              <tr><td colSpan={4} className="px-5 py-10 text-center text-[13px] text-ink-faint">No vendors match these filters.</td></tr>
             )}
             {pager.rows.map((v) => <VendorRow key={v.id} v={v} />)}
           </tbody>
         </table>
       </div>
 
-      <Pager {...pager} count={pager.rows.length} noun="vendor" />
+      <TablePager table={pager} noun="vendor" />
     </Card>
   );
 }

@@ -10,7 +10,10 @@ interface ThemeCtx {
 }
 
 const Ctx = createContext<ThemeCtx | null>(null);
-const KEY = 'janelle-theme';
+// v2 with the navy redesign: everyone starts on light once (the old key held
+// 'system' for nearly everyone, which put most screens in dark), and any
+// choice made after that is kept as before.
+const KEY = 'janelle-theme-v2';
 
 function apply(theme: Theme) {
   const root = document.documentElement;
@@ -25,9 +28,9 @@ function systemDark() {
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(() => {
     try {
-      return (localStorage.getItem(KEY) as Theme) ?? 'system';
+      return (localStorage.getItem(KEY) as Theme) ?? 'light';
     } catch {
-      return 'system';
+      return 'light';
     }
   });
 

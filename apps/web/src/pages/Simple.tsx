@@ -1,9 +1,11 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Avatar, CategoryTag, ProjectName } from '../components/hue';
 import { Link, useSearchParams } from 'react-router-dom';
-import { Page, PageHeading, Card, Pill, money, usePager, Pager, shortDate } from '../components/ui';
-import { IconSearch } from '../components/icons';
+import { Page, PageHeading, Card, Pill, money, shortDate } from '../components/ui';
 import { useEmails, useEmail, useDocuments, gmailMessageUrl, type DocSource } from '../lib/queries';
 import { apiBlob } from '../lib/api';
+import { useTable, SortTh, SearchInput, FilterSelect, TableToolbar, TablePager, matches } from '../components/table';
+import { TASK_CATEGORIES, TASK_CATEGORY_LABELS } from '@janelle/shared';
 
 /** Fetch a document's original PDF and open it in a new tab. */
 async function openDocument(id: string, onError: (m: string) => void) {
@@ -54,6 +56,8 @@ export function Inbox() {
   const { data: emails, isLoading } = useEmails();
   const [query, setQuery] = useState('');
   const [cls, setCls] = useState<string>('all');
+  /** A TaskCategory, 'none' for mail with no category, or 'all'. */
+  const [category, setCategory] = useState('all');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   // A task's "Open in Inbox →" link lands here as /inbox?open=<id>. The id
@@ -97,31 +101,53 @@ export function Inbox() {
       // filter is set — that is the one thing this screen must not hide.
       if (m.id === openId) return true;
       if (cls !== 'all' && m.cls !== cls) return false;
-      if (!q) return true;
-      return [m.subject, m.snippet, m.fromName, m.fromEmail, m.project, m.vendor]
-        .some((f) => f.toLowerCase().includes(q));
+      if (category === 'none' ? m.category !== '' : category !== 'all' && m.category !== category) return false;
+      return matches(q, m.subject, m.snippet, m.fromName, m.fromEmail, m.project, m.vendor, m.category ? TASK_CATEGORY_LABELS[m.category] : '');
     });
-  }, [emails, query, cls, openId]);
+  }, [emails, query, cls, category, openId]);
 
   // A column nothing fills is left out entirely rather than drawn as a stack
   // of em dashes — measured over all mail so the shape holds while filtering.
   const showProject = emails.some((m) => m.project !== '');
   const showVendor = emails.some((m) => m.vendor !== '');
-  const cols = 4 + Number(showProject) + Number(showVendor);
+  const showCategory = emails.some((m) => m.category !== '');
+  // Only the categories actually present, like the classification filter.
+  const categories = TASK_CATEGORIES.filter((c) => emails.some((m) => m.category === c));
+  const uncategorised = emails.some((m) => m.category === '');
+
+  const cols = 4 + Number(showCategory) + Number(showProject) + Number(showVendor);
 
   // A studio mailbox runs to hundreds of messages; the table shows a
   // screenful, and the filters above decide what is being paged through.
-  const pager = usePager(shown, 25);
+  const pager = useTable(shown, {
+    storageKey: 'inbox',
+    defaultSort: { key: 'when', dir: 'desc' },
+    sorters: {
+      type: (m) => emailClassLabel[m.cls] ?? m.cls,
+      category: (m) => (m.category ? TASK_CATEGORY_LABELS[m.category] : ''),
+      from: (m) => m.fromName || m.fromEmail,
+      subject: (m) => m.subject,
+      project: (m) => m.project,
+      vendor: (m) => m.vendor,
+      when: (m) => m.receivedAt,
+    },
+  });
+  const filtering = Boolean(query.trim()) || cls !== 'all' || category !== 'all';
+  const clearFilters = () => {
+    setQuery('');
+    setCls('all');
+    setCategory('all');
+  };
 
   // Land on whichever page holds the message a task linked to, so "Open in
   // Inbox" does not drop someone on page 1 and leave them to go hunting.
   useEffect(() => {
     if (!openId) return;
-    const idx = shown.findIndex((m) => m.id === openId);
+    const idx = pager.sorted.findIndex((m) => m.id === openId);
     if (idx === -1) return;
-    pager.setPage(Math.floor(idx / 25) + 1);
+    pager.setPage(Math.floor(idx / pager.pageSize) + 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openId, shown]);
+  }, [openId, pager.sorted]);
 
   useEffect(() => {
     if (!openId) return;
@@ -173,39 +199,40 @@ export function Inbox() {
         </Card>
       )}
       <Card>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line-soft px-5 py-3">
-          <div className="relative">
-            <IconSearch className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint" />
-            <input
-              className="input input-sm w-64 pl-8"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search subject, sender or project"
-              aria-label="Search mail"
-            />
-          </div>
-          <div className="flex items-center gap-3">
-            <select
-              className="input input-sm"
-              value={cls}
-              onChange={(e) => setCls(e.target.value)}
-              aria-label="Filter by classification"
-            >
-              <option value="all">All mail</option>
-              {classes.map((c) => (
-                <option key={c} value={c}>{emailClassLabel[c] ?? c}</option>
-              ))}
-            </select>
-            <span className="text-[12px] text-ink-faint">
-              {shown.length === emails.length ? `${emails.length} read` : `${shown.length} of ${emails.length}`}
-            </span>
-          </div>
-        </div>
-
+        <TableToolbar
+          search={<SearchInput value={query} onChange={setQuery} placeholder="Search subject, sender, project or vendor" label="Search mail" />}
+          filters={
+            <>
+              <FilterSelect
+                label="Filter by type"
+                value={cls}
+                onChange={setCls}
+                options={[{ value: 'all', label: 'All types' }, ...classes.map((c) => ({ value: c, label: emailClassLabel[c] ?? c }))]}
+              />
+              {categories.length > 0 && (
+                <FilterSelect
+                  label="Filter by category"
+                  value={category}
+                  onChange={setCategory}
+                  options={[
+                    { value: 'all', label: 'All categories' },
+                    ...categories.map((c) => ({ value: c, label: TASK_CATEGORY_LABELS[c] })),
+                    ...(uncategorised ? [{ value: 'none', label: 'No category' }] : []),
+                  ]}
+                />
+              )}
+            </>
+          }
+          shown={shown.length}
+          total={emails.length}
+          noun="message"
+          onClear={filtering ? clearFilters : null}
+        />
         <div className="overflow-x-auto">
           <table className="w-full table-fixed text-[14px]">
             <colgroup>
               <col className="w-[108px]" />
+              {showCategory && <col className="w-[150px]" />}
               <col className="w-[168px]" />
               {/* Subject takes every pixel the fixed columns do not: the old
                   layout stacked subject, snippet and sender in a narrow middle
@@ -217,12 +244,13 @@ export function Inbox() {
             </colgroup>
             <thead>
               <tr className="border-b border-line-soft text-left text-[11.5px] font-semibold uppercase tracking-[0.06em] text-ink-faint">
-                <th className="px-5 py-2.5 font-medium">Type</th>
-                <th className="px-3 py-2.5 font-medium">From</th>
-                <th className="px-3 py-2.5 font-medium">Subject</th>
-                {showProject && <th className="px-3 py-2.5 font-medium">Project</th>}
-                {showVendor && <th className="px-3 py-2.5 font-medium">Vendor</th>}
-                <th className="px-5 py-2.5 text-right font-medium">When</th>
+                <SortTh table={pager} col="type" className="px-5 py-2.5 font-medium">Type</SortTh>
+                {showCategory && <SortTh table={pager} col="category" className="px-3 py-2.5 font-medium">Category</SortTh>}
+                <SortTh table={pager} col="from" className="px-3 py-2.5 font-medium">From</SortTh>
+                <SortTh table={pager} col="subject" className="px-3 py-2.5 font-medium">Subject</SortTh>
+                {showProject && <SortTh table={pager} col="project" className="px-3 py-2.5 font-medium">Project</SortTh>}
+                {showVendor && <SortTh table={pager} col="vendor" className="px-3 py-2.5 font-medium">Vendor</SortTh>}
+                <SortTh table={pager} col="when" align="right" className="px-5 py-2.5 font-medium">When</SortTh>
               </tr>
             </thead>
             <tbody className="divide-y divide-line-soft">
@@ -258,9 +286,19 @@ export function Inbox() {
                       <td className="px-5 py-2.5">
                         <Pill tone={emailClassTone[m.cls] ?? 'neutral'}>{emailClassLabel[m.cls] ?? m.cls}</Pill>
                       </td>
+                      {showCategory && (
+                        <td className="px-3 py-2.5">
+                          {m.category ? (
+                            <CategoryTag category={m.category} label={TASK_CATEGORY_LABELS[m.category]} className="max-w-full truncate" />
+                          ) : (
+                            <span className="text-[13px] text-ink-faint">—</span>
+                          )}
+                        </td>
+                      )}
                       <td className="px-3 py-2.5">
-                        <span className="block truncate text-[13px] text-ink" title={m.fromEmail || undefined}>
-                          {m.fromName || m.fromEmail || '—'}
+                        <span className="flex min-w-0 items-center gap-2 text-[13px] text-ink" title={m.fromEmail || undefined}>
+                          <Avatar name={m.fromName || m.fromEmail} size={22} />
+                          <span className="truncate">{m.fromName || m.fromEmail || '—'}</span>
                         </span>
                       </td>
                       <td className="px-3 py-2.5">
@@ -287,7 +325,7 @@ export function Inbox() {
                       </td>
                       {showProject && (
                         <td className="px-3 py-2.5">
-                          <span className="block truncate text-[13px] text-ink-soft">{m.project || '—'}</span>
+                          {m.project ? <ProjectName name={m.project} className="max-w-full text-[13px] text-ink-soft" /> : <span className="text-[13px] text-ink-faint">—</span>}
                         </td>
                       )}
                       {showVendor && (
@@ -338,7 +376,7 @@ export function Inbox() {
           </table>
         </div>
 
-        <Pager {...pager} count={pager.rows.length} noun="message" />
+        <TablePager table={pager} noun="message" />
       </Card>
     </Page>
   );
@@ -408,11 +446,10 @@ export function Documents() {
     const q = query.trim().toLowerCase();
     return docs.filter((d) => {
       if (type !== 'all' && d.type !== type) return false;
-      if (!q) return true;
-      return [
-        d.vendor, d.project, docTypeLabel[d.type] ?? d.type,
-        d.source?.fromName ?? '', d.source?.fromEmail ?? '', d.source?.subject ?? '',
-      ].some((f) => f.toLowerCase().includes(q));
+      return matches(
+        q, d.vendor, d.project, docTypeLabel[d.type] ?? d.type,
+        d.source?.fromName, d.source?.fromEmail, d.source?.subject,
+      );
     });
   }, [docs, query, type]);
 
@@ -424,7 +461,26 @@ export function Documents() {
   // Type, Shared by, Received, Total, Confidence and File always render.
   const cols = 6 + Number(showVendor) + Number(showProject);
 
-  const pager = usePager(shown, 25);
+  const pager = useTable(shown, {
+    storageKey: 'documents',
+    defaultSort: { key: 'received', dir: 'desc' },
+    sorters: {
+      type: (d) => docTypeLabel[d.type] ?? d.type,
+      vendor: (d) => d.vendor,
+      project: (d) => d.project,
+      sharedBy: (d) => d.source?.fromName || d.source?.fromEmail || '',
+      // When it was shared where that is known, else when it was parsed — the
+      // same date the column shows first.
+      received: (d) => (d.source?.kind === 'gmail' && d.source.sharedAt) || d.createdAt,
+      total: (d) => d.total,
+      confidence: (d) => d.confidence,
+    },
+  });
+  const filtering = Boolean(query.trim()) || type !== 'all';
+  const clearFilters = () => {
+    setQuery('');
+    setType('all');
+  };
 
   return (
     <Page>
@@ -435,46 +491,33 @@ export function Documents() {
         <div className="mb-4 rounded-lg bg-crit/10 px-4 py-2.5 text-[13px] text-crit">{error}</div>
       )}
       <Card>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line-soft px-5 py-3">
-          <div className="relative">
-            <IconSearch className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint" />
-            <input
-              className="input input-sm w-64 pl-8"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search vendor, project or sender"
-              aria-label="Search documents"
-            />
-          </div>
-          <div className="flex items-center gap-3">
-            <select
-              className="input input-sm"
+        <TableToolbar
+          search={<SearchInput value={query} onChange={setQuery} placeholder="Search vendor, project or sender" label="Search documents" />}
+          filters={
+            <FilterSelect
+              label="Filter by document type"
               value={type}
-              onChange={(e) => setType(e.target.value)}
-              aria-label="Filter by document type"
-            >
-              <option value="all">All documents</option>
-              {types.map((t) => (
-                <option key={t} value={t}>{docTypeLabel[t] ?? t}</option>
-              ))}
-            </select>
-            <span className="text-[12px] text-ink-faint">
-              {shown.length === docs.length ? `${docs.length} parsed` : `${shown.length} of ${docs.length}`}
-            </span>
-          </div>
-        </div>
+              onChange={setType}
+              options={[{ value: 'all', label: 'All types' }, ...types.map((t) => ({ value: t, label: docTypeLabel[t] ?? t }))]}
+            />
+          }
+          shown={shown.length}
+          total={docs.length}
+          noun="document"
+          onClear={filtering ? clearFilters : null}
+        />
 
         <div className="overflow-x-auto">
           <table className="w-full text-[14px]">
             <thead>
               <tr className="border-b border-line-soft bg-sunk/40 text-left text-[11.5px] font-semibold uppercase tracking-[0.06em] text-ink-faint">
-                <th className="px-5 py-3 font-semibold">Type</th>
-                {showVendor && <th className="px-5 py-3 font-semibold">Vendor</th>}
-                {showProject && <th className="px-5 py-3 font-semibold">Project</th>}
-                <th className="px-5 py-3 font-semibold">Shared by</th>
-                <th className="px-5 py-3 font-semibold">Received</th>
-                <th className="px-5 py-3 text-right font-semibold">Total</th>
-                <th className="px-5 py-3 text-right font-semibold">Confidence</th>
+                <SortTh table={pager} col="type" className="px-5 py-3 font-semibold">Type</SortTh>
+                {showVendor && <SortTh table={pager} col="vendor" className="px-5 py-3 font-semibold">Vendor</SortTh>}
+                {showProject && <SortTh table={pager} col="project" className="px-5 py-3 font-semibold">Project</SortTh>}
+                <SortTh table={pager} col="sharedBy" className="px-5 py-3 font-semibold">Shared by</SortTh>
+                <SortTh table={pager} col="received" className="px-5 py-3 font-semibold">Received</SortTh>
+                <SortTh table={pager} col="total" align="right" className="px-5 py-3 font-semibold">Total</SortTh>
+                <SortTh table={pager} col="confidence" align="right" className="px-5 py-3 font-semibold">Confidence</SortTh>
                 <th className="px-5 py-3 text-right font-semibold">File</th>
               </tr>
             </thead>
@@ -495,8 +538,14 @@ export function Documents() {
               {pager.rows.map((d) => (
                 <tr key={d.id} className="text-ink-soft transition-colors hover:bg-sunk/40">
                   <td className="px-5 py-3"><Pill tone="brass">{docTypeLabel[d.type] ?? d.type}</Pill></td>
-                  {showVendor && <td className="px-5 py-3 font-medium text-ink">{d.vendor || '—'}</td>}
-                  {showProject && <td className="px-5 py-3">{d.project || '—'}</td>}
+                  {showVendor && (
+                    <td className="px-5 py-3 font-medium text-ink">
+                      {d.vendor ? (
+                        <span className="flex min-w-0 items-center gap-2"><Avatar name={d.vendor} size={22} /><span className="truncate">{d.vendor}</span></span>
+                      ) : '—'}
+                    </td>
+                  )}
+                  {showProject && <td className="px-5 py-3">{d.project ? <ProjectName name={d.project} /> : '—'}</td>}
                   <td className="px-5 py-3"><SharedBy source={d.source} /></td>
                   <td className="px-5 py-3 whitespace-nowrap" title={exactWhen(d.createdAt)}>
                     {d.source?.kind === 'gmail' ? (
@@ -527,7 +576,7 @@ export function Documents() {
           </table>
         </div>
 
-        <Pager {...pager} count={pager.rows.length} noun="document" />
+        <TablePager table={pager} noun="document" />
       </Card>
     </Page>
   );

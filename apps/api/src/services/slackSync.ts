@@ -14,6 +14,7 @@ import {
   type TaskCard,
   type TaskState,
 } from './slack.js';
+import { pacificDate } from '../lib/pacificTime.js';
 import { ROUTE_FALLBACK_CODES, channelFor, joinIfNeeded, loadDirectory, type ChannelDirectory, type ProjectRef } from './slackRouting.js';
 
 /**
@@ -34,6 +35,16 @@ import { ROUTE_FALLBACK_CODES, channelFor, joinIfNeeded, loadDirectory, type Cha
  *
  * Work finished before Slack was connected is not announced — the channel
  * starts with what happens from then on, not a backlog.
+ *
+ * Only what is current is ANNOUNCED: a task due yesterday, today or tomorrow
+ * (Pacific), and a follow-up about such a task. A follow-up's own due_date is
+ * only the day it was raised, so it says nothing about what is current — and
+ * most are reminders about tasks long overdue, the very noise this removes.
+ * Announcing every task the mail reader raised put a hundred-odd messages a
+ * day in the channel, most of them long overdue. A task enters the channel
+ * when its date comes into the window — a separate pass looks for those, since
+ * time passing does not touch updated_at — and once it has a message there,
+ * every change to it is still kept in step, whatever its date.
  */
 
 /** Messages and edits per run. Slack allows about one a second per channel. */
@@ -43,6 +54,14 @@ const PAUSE_MS = 1_100;
 const STALE_CLAIM_MS = 10 * 60_000;
 /** Re-read this much before the cursor: handling a task twice is harmless, missing one is not. */
 const OVERLAP_MS = 60_000;
+
+/** Yesterday, today and tomorrow in the studio's time zone, as YYYY-MM-DD bounds. */
+function dueWindow(): { from: string; to: string } {
+  return { from: pacificDate(-1), to: pacificDate(1) };
+}
+const inWindow = (date: string | null | undefined, w = dueWindow()) => Boolean(date && date >= w.from && date <= w.to);
+const CLOSED_TASK = ['done', 'cancelled'];
+const OPEN_FOLLOW_UP = ['open', 'drafted'];
 
 export interface SlackSyncResult {
   ok: boolean;
@@ -201,8 +220,8 @@ async function syncTask(ctx: Ctx, raw: RawTask, row: PostRow | undefined): Promi
   const now = stateOf(card);
 
   if (!row) {
-    // Finished before Slack was connected: not news.
-    if (['done', 'cancelled'].includes(card.status) && ctx.enabledAt && raw.created_at < ctx.enabledAt) return;
+    // Only what is due yesterday, today or tomorrow is news; a closed task never is.
+    if (CLOSED_TASK.includes(card.status) || !inWindow(raw.due_date)) return;
     const rowId = await claim(ctx, 'task', card.id, { ...now });
     if (!rowId) return;
     try {
@@ -253,9 +272,7 @@ async function syncTasks(ctx: Ctx, progress: Progress): Promise<void> {
 
   let q = db
     .from('tasks')
-    .select(
-      `id, title, detail, kind, seat, status, due_date, next_step, source_email_id, created_at, updated_at${categorised ? ', category' : ''}${completion ? ', completion_note' : ''}, ${projectColumns(ctx)}, profiles(full_name)`,
-    )
+    .select(taskColumns(ctx, categorised, completion))
     .eq('org_id', ctx.orgId)
     .gte('updated_at', since)
     .order('updated_at', { ascending: true })
@@ -283,20 +300,75 @@ async function syncTasks(ctx: Ctx, progress: Progress): Promise<void> {
   }
 }
 
+const taskColumns = (ctx: Ctx, categorised: boolean, completion: boolean) =>
+  `id, title, detail, kind, seat, status, due_date, next_step, source_email_id, created_at, updated_at${categorised ? ', category' : ''}${completion ? ', completion_note' : ''}, ${projectColumns(ctx)}, profiles(full_name)`;
+
+/** Ids of the given entities that already have a message in Slack. */
+async function postedIds(ctx: Ctx, entity: PostRow['entity'], ids: string[]): Promise<Set<string>> {
+  if (!ids.length) return new Set();
+  const { data } = await admin()
+    .from('slack_posts')
+    .select('entity_id')
+    .eq('org_id', ctx.orgId)
+    .eq('entity', entity)
+    .in('entity_id', ids);
+  return new Set(((data ?? []) as { entity_id: string }[]).map((r) => r.entity_id));
+}
+
+/**
+ * Announce what has come INTO the window since it was last looked at — a task
+ * due tomorrow that was raised last week has not changed, so the cursor pass
+ * never sees it. Only tasks and follow-ups not yet in Slack.
+ */
+async function announceDue(ctx: Ctx, slack: ResolvedSlack): Promise<void> {
+  const db = admin();
+  const w = dueWindow();
+  const [categorised, completion, subtasks] = await Promise.all([hasTaskCategory(), hasTaskCompletion(), hasSubtasks()]);
+
+  let q = db
+    .from('tasks')
+    .select(taskColumns(ctx, categorised, completion))
+    .eq('org_id', ctx.orgId)
+    .gte('due_date', w.from)
+    .lte('due_date', w.to)
+    .not('status', 'in', `(${CLOSED_TASK.join(',')})`)
+    .order('due_date', { ascending: true })
+    .limit(100);
+  if (subtasks) q = q.is('parent_task_id', null);
+  const { data: taskData, error } = await q;
+  if (error) throw new Error(error.message);
+  const tasks = (taskData ?? []) as unknown as RawTask[];
+
+  if (slack.config.tasks) {
+    const posted = await postedIds(ctx, 'task', tasks.map((t) => t.id));
+    for (const t of tasks) if (!posted.has(t.id)) await syncTask(ctx, t, undefined);
+  }
+
+  const taskIds = tasks.map((t) => t.id);
+  if (slack.config.followUps && taskIds.length) {
+    const { data: viaTask } = await db.from('follow_ups').select(followUpColumns(ctx)).eq('org_id', ctx.orgId)
+      .in('status', OPEN_FOLLOW_UP).in('task_id', taskIds).limit(100);
+    const items = (viaTask ?? []) as unknown as RawFollowUp[];
+    const posted = await postedIds(ctx, 'follow_up', items.map((f) => f.id));
+    await handleFollowUps(ctx, items.filter((f) => !posted.has(f.id)));
+  }
+}
+
 // ── Follow-ups ──────────────────────────────────────────────
 
 type RawFollowUp = {
   id: string; type: string; status: string; reason: string | null; target: string | null;
   task_id: string | null; created_at: string; updated_at: string;
   projects: ProjectRef | null; vendors: { name: string } | null;
+  tasks: { due_date: string | null } | null;
 };
 
 async function syncFollowUp(ctx: Ctx, f: RawFollowUp, row: PostRow | undefined, card: FollowUpCard, taskPost: PostRow | undefined): Promise<void> {
   const state = { status: f.status };
 
   if (!row) {
-    // Nothing to announce about one that was dismissed or settled before we ever saw it.
-    if (['dismissed', 'done'].includes(f.status)) return;
+    // Only an open one about a task due yesterday, today or tomorrow.
+    if (!OPEN_FOLLOW_UP.includes(f.status) || !inWindow(f.tasks?.due_date)) return;
     const rowId = await claim(ctx, 'follow_up', f.id, state);
     if (!rowId) return;
     // Under its task when that has a thread, so the task's history reads in one place.
@@ -344,14 +416,22 @@ async function syncFollowUps(ctx: Ctx, progress: Progress): Promise<void> {
   const db = admin();
   const { data, error } = await db
     .from('follow_ups')
-    .select(`id, type, status, reason, target, task_id, created_at, updated_at, ${projectColumns(ctx)}, vendors(name)`)
+    .select(followUpColumns(ctx))
     .eq('org_id', ctx.orgId)
     .gte('updated_at', since)
     .order('updated_at', { ascending: true })
     .limit(100);
   if (error) throw new Error(error.message);
-  const items = (data ?? []) as unknown as RawFollowUp[];
+  await handleFollowUps(ctx, (data ?? []) as unknown as RawFollowUp[], progress);
+}
+
+const followUpColumns = (ctx: Ctx) =>
+  `id, type, status, reason, target, task_id, created_at, updated_at, ${projectColumns(ctx)}, vendors(name), tasks(due_date)`;
+
+/** Bring a batch of follow-ups up to date in Slack. `progress` is moved past each one handled, when given. */
+async function handleFollowUps(ctx: Ctx, items: RawFollowUp[], progress?: Progress): Promise<void> {
   if (!items.length) return;
+  const db = admin();
 
   const ids = items.map((f) => f.id);
   const taskIds = [...new Set(items.map((f) => f.task_id).filter((x): x is string => Boolean(x)))];
@@ -383,7 +463,7 @@ async function syncFollowUps(ctx: Ctx, progress: Progress): Promise<void> {
       draftSubject: subjects.get(f.id) ?? null,
     };
     await syncFollowUp(ctx, f, own.get(f.id), card, f.task_id ? taskPosts.get(f.task_id) : undefined);
-    progress.cursor = f.updated_at;
+    if (progress) progress.cursor = f.updated_at;
   }
 }
 
@@ -461,6 +541,12 @@ export async function runSlackSync(orgId: string, opts: { budgetMs?: number } = 
     // Tasks first, so a follow-up raised on one finds its thread.
     await pass(slack.config.tasks, taskCursor, (p) => syncTasks(ctx, p), (c) => { taskCursor = c; });
     await pass(slack.config.followUps, followUpCursor, (p) => syncFollowUps(ctx, p), (c) => { followUpCursor = c; });
+    // Then whatever has come into the yesterday–tomorrow window without changing.
+    try {
+      await announceDue(ctx, slack);
+    } catch (err) {
+      if (!(err instanceof StopRun)) throw err;
+    }
   } catch (err) {
     if (err instanceof SlackError) {
       // Rate-limited or briefly unreachable: quiet, the next run carries on.

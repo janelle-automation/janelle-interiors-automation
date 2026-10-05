@@ -54,6 +54,8 @@ export interface EmailView {
   fromName: string; fromEmail: string;
   /** The vendor the mail was linked to; '' when none. */
   vendor: string;
+  /** Design / FF&E / Procurement / Admin, from the task it raised; '' when unknown. */
+  category: TaskCategory | '';
   /** Full ISO timestamp, for the exact date on hover. */
   receivedAt: string;
   /** Gmail's own message id — '' when this was raised by hand, with no mail behind it. */
@@ -617,6 +619,24 @@ interface EmailRow {
   received_at: string | null; class: string; gmail_id: string | null;
   extracted_json: { summary?: string } | null;
   projects: { name: string } | null; vendors: { name: string } | null;
+  tasks?: { category: TaskCategory | null; kind: TaskKind; seat: string | null }[] | null;
+}
+
+/**
+ * Which part of the studio an email belongs to. The task it raised says so
+ * (its own category, or the one its kind and seat imply); mail that raised no
+ * task falls back on what it is — a quote is FF&E, an order confirmation is
+ * procurement, an approval is design. '' when nothing says.
+ */
+const CLASS_CATEGORY: Record<string, TaskCategory> = {
+  vendor_quote: 'ffe',
+  order_confirmation: 'procurement',
+  client_approval: 'design',
+};
+function emailCategory(r: EmailRow): TaskCategory | '' {
+  const t = r.tasks?.[0];
+  if (t) return t.category ?? defaultTaskCategory(t.kind, t.seat);
+  return CLASS_CATEGORY[r.class] ?? '';
 }
 
 const NAMED_ENTITIES: Record<string, string> = {
@@ -650,6 +670,7 @@ function mapEmailRow(r: EmailRow): EmailView {
     // '' not '—' — the table hides a column nothing fills rather than
     // printing a dash down every row of it.
     project: r.projects?.name ?? '', vendor: r.vendors?.name ?? '',
+    category: emailCategory(r),
     fromName: who.name, fromEmail: who.email,
     receivedAt: r.received_at ?? '',
     when: r.received_at ? ageFrom(r.received_at) : '—',
@@ -1699,9 +1720,27 @@ export interface SlackConfig {
   tasks: boolean;
   followUps: boolean;
   dailyDigest: boolean;
+  /** Channels for the completed / pending / overdue task reports; '' = not sent. */
+  reportChannels: SlackReportChannels;
   lastRunAt: string | null;
   lastPosted: number;
   lastError: string | null;
+}
+
+export interface SlackReportChannels {
+  completed: string;
+  pending: string;
+  overdue: string;
+}
+
+export interface SlackReportSent {
+  ok: boolean;
+  skipped?: 'not_connected' | 'paused' | 'no_channels';
+  reports: { kind: keyof SlackReportChannels; channel: string; tasks: number; posted: boolean; error?: string }[];
+}
+
+export function useSlackReportNow() {
+  return useMutation({ mutationFn: () => api<SlackReportSent>('/settings/slack/report', { method: 'POST' }) });
 }
 
 export function useSlackConfig() {
@@ -1724,7 +1763,7 @@ export function useClearSlackToken() {
 }
 
 export function useSetSlackConfig() {
-  return useSlackMutation((v: { channel?: string; enabled?: boolean; tasks?: boolean; followUps?: boolean; dailyDigest?: boolean }) =>
+  return useSlackMutation((v: { channel?: string; enabled?: boolean; tasks?: boolean; followUps?: boolean; dailyDigest?: boolean; reportChannels?: Partial<SlackReportChannels> }) =>
     api<SlackConfig>('/settings/slack/config', { method: 'PUT', body: JSON.stringify(v) }),
   );
 }

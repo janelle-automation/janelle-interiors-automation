@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Avatar } from '../components/hue';
 import { Link } from 'react-router-dom';
 import { ROLE_LABELS, SEATS, SEAT_KEYS, USER_ROLES, type Seat, type UserRole } from '@janelle/shared';
 import { Page, PageHeading, Card, Pill, PasswordInput } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
+import { useTable, SortTh, SearchInput, FilterSelect, TableToolbar, TablePager, matches } from '../components/table';
 import { startImpersonation } from '../lib/impersonate';
 import {
   useAddTeamMember, useEditTeamMember, useRemoveTeamMember, useResetMemberPassword, useSendInvite, useSetMemberDisabled,
@@ -331,9 +333,7 @@ function PersonRow({
       <tr className={`transition-colors hover:bg-sunk/40 ${panel ? 'bg-sunk/30' : ''}`}>
         <td className="py-2.5 pl-5 pr-3">
           <div className="flex items-center gap-3">
-            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-brass/10 text-[12.5px] font-bold text-brass-deep">
-              {(m.full_name ?? m.email ?? '?').slice(0, 1).toUpperCase()}
-            </span>
+            <Avatar name={m.full_name ?? m.email} size={28} />
             <div className="min-w-0">
               <div className={`truncate text-[13.5px] font-medium ${m.disabled ? 'text-ink-soft' : 'text-ink'}`}>
                 {m.full_name ?? '—'}
@@ -788,6 +788,35 @@ export default function Team() {
   const columns = manages ? 6 : 5;
   const googleConnected = team.filter((m) => m.google?.connected).length;
 
+  const [query, setQuery] = useState('');
+  const [roleFilter, setRoleFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const shown = useMemo(
+    () =>
+      team.filter((m) => {
+        if (roleFilter !== 'all' && m.role !== roleFilter) return false;
+        if (statusFilter === 'active' && m.disabled) return false;
+        if (statusFilter === 'disabled' && !m.disabled) return false;
+        if (statusFilter === 'connected' && !m.google?.connected) return false;
+        if (statusFilter === 'not_connected' && m.google?.connected) return false;
+        return matches(query, m.full_name, m.email);
+      }),
+    [team, query, roleFilter, statusFilter],
+  );
+  const table = useTable(shown, {
+    storageKey: 'team',
+    defaultSort: { key: 'name', dir: 'asc' },
+    sorters: {
+      name: (m) => m.full_name || m.email,
+      role: (m) => ROLE_LABELS[m.role] ?? m.role,
+      seat: (m) => (m.seat ? SEATS[m.seat]?.label : ''),
+      google: (m) => (m.google?.connected ? 1 : 0),
+      tasks: (m) => m.live_tasks ?? 0,
+    },
+  });
+  const filtering = Boolean(query.trim()) || roleFilter !== 'all' || statusFilter !== 'all';
+  const rolesPresent = USER_ROLES.filter((r) => team.some((m) => m.role === r));
+
   return (
     <Page>
       <PageHeading
@@ -822,15 +851,55 @@ export default function Team() {
 
           {adding && <AddPerson onDone={() => setAdding(false)} />}
 
+          {team.length > 0 && (
+            <TableToolbar
+              search={<SearchInput value={query} onChange={setQuery} placeholder="Search name or email" label="Search people" />}
+              filters={
+                <>
+                  <FilterSelect
+                    label="Filter by role"
+                    value={roleFilter}
+                    onChange={setRoleFilter}
+                    options={[{ value: 'all', label: 'All roles' }, ...rolesPresent.map((r) => ({ value: r, label: ROLE_LABELS[r] ?? r }))]}
+                  />
+                  <FilterSelect
+                    label="Filter by status"
+                    value={statusFilter}
+                    onChange={setStatusFilter}
+                    options={[
+                      { value: 'all', label: 'Any status' },
+                      { value: 'active', label: 'Active' },
+                      { value: 'disabled', label: 'Switched off' },
+                      { value: 'connected', label: 'Google connected' },
+                      { value: 'not_connected', label: 'Google not connected' },
+                    ]}
+                  />
+                </>
+              }
+              shown={shown.length}
+              total={team.length}
+              noun="member"
+              onClear={
+                filtering
+                  ? () => {
+                      setQuery('');
+                      setRoleFilter('all');
+                      setStatusFilter('all');
+                    }
+                  : null
+              }
+            />
+          )}
+
           <div className="overflow-x-auto">
             <table className="w-full min-w-[860px] border-collapse text-left">
               <thead>
                 <tr className="border-b border-line-soft bg-sunk/40 text-[11px] uppercase tracking-[0.08em] text-ink-faint">
-                  <th className="py-2.5 pl-5 pr-3 font-semibold">Person</th>
-                  <th className="px-3 py-2.5 font-semibold">Role</th>
-                  <th className="px-3 py-2.5 font-semibold">Seat</th>
-                  <th className="px-3 py-2.5 font-semibold">Google</th>
-                  <th className="px-3 py-2.5 text-right font-semibold">Open tasks</th>
+                  <SortTh table={table} col="name" className="py-2.5 pl-5 pr-3 font-semibold">Person</SortTh>
+                  <SortTh table={table} col="role" className="px-3 py-2.5 font-semibold">Role</SortTh>
+                  <SortTh table={table} col="seat" className="px-3 py-2.5 font-semibold">Seat</SortTh>
+                  <SortTh table={table} col="google" className="px-3 py-2.5 font-semibold">Google</SortTh>
+                  <SortTh table={table} col="tasks" align="right" className="px-3 py-2.5 font-semibold">Open tasks</SortTh>
                   {manages && (
                     <th className="py-2.5 pl-3 pr-5 text-right font-semibold">
                       <span className="sr-only">Actions</span>
@@ -853,7 +922,15 @@ export default function Team() {
                   </tr>
                 )}
 
-                {team.map((m) => (
+                {!isLoading && team.length > 0 && shown.length === 0 && (
+                  <tr>
+                    <td colSpan={columns} className="px-5 py-10 text-center text-[13px] text-ink-faint">
+                      Nobody matches these filters.
+                    </td>
+                  </tr>
+                )}
+
+                {table.rows.map((m) => (
                   <PersonRow
                     key={m.id}
                     m={m}
@@ -868,6 +945,8 @@ export default function Team() {
               </tbody>
             </table>
           </div>
+
+          <TablePager table={table} noun="member" />
 
           {!manages && (
             <div className="border-t border-line-soft px-5 py-3 text-[12.5px] text-ink-faint">
@@ -900,7 +979,7 @@ export default function Team() {
                 Exactly what each role may do — module by module, and editable without a deploy —
                 lives in Permissions.
               </p>
-              <Link to="/permissions" className="btn-secondary btn-sm shrink-0">
+              <Link to="/settings?tab=permissions" className="btn-secondary btn-sm shrink-0">
                 Open Permissions →
               </Link>
             </div>

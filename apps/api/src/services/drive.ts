@@ -1,4 +1,4 @@
-import { google, type drive_v3 } from 'googleapis';
+import { drive as driveApi, type drive_v3 } from '@googleapis/drive';
 import { googleClientForUser } from '../lib/tokens.js';
 import { isWorkbook, workbookText } from '../lib/xlsx.js';
 
@@ -15,7 +15,7 @@ export interface DriveFile {
 export async function driveFor(userId: string): Promise<drive_v3.Drive | null> {
   const auth = await googleClientForUser(userId, 'drive');
   if (!auth) return null;
-  return google.drive({ version: 'v3', auth });
+  return driveApi({ version: 'v3', auth });
 }
 
 /**

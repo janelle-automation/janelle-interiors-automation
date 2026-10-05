@@ -15,10 +15,11 @@ import {
 } from '@janelle/shared';
 import { Page, PageHeading, Card, Pill, shortDate, ConfirmDialog } from '../components/ui';
 import { ScopeToggle, useScope } from '../components/ScopeToggle';
-import { IconBoard, IconEye, IconSearch, IconEyeOff, IconList, IconMailScan } from '../components/icons';
+import { IconBoard, IconSearch, IconList } from '../components/icons';
+import { Avatar, CATEGORY_HUE, HUE, HueDot, ProjectName } from '../components/hue';
 import { useAuth } from '../context/AuthContext';
 import {
-  daysEarly, useAddSubtask, useBackfillTasks, useDeleteTask, useTaskDetail, useTasks, useTeam, useUpdateTask,
+  daysEarly, useAddSubtask, useDeleteTask, useTaskDetail, useTasks, useTeam, useUpdateTask,
   type TaskView, type TeamMember,
 } from '../lib/queries';
 import { DatePicker } from '../components/DatePicker';
@@ -32,32 +33,20 @@ const tone: Record<TaskKind, 'crit' | 'warn' | 'brass' | 'neutral'> = {
   admin: 'neutral',
 };
 
-/**
- * The kind, as a dot rather than a filled badge.
- *
- * Every card carried a coloured pill for its kind, so a column of them was a
- * column of loud blocks and nothing stood out — least of all the one word
- * that should, which is "Overdue". A dot and a quiet label carry the same
- * information and give the alert somewhere to be loud against.
- *
- * `spec_review` takes olive rather than the brass its pill uses: beside
- * `quote_request` two identical greens said "these are the same kind".
- */
-const KIND_DOT: Record<TaskKind, string> = {
-  quote_request: 'bg-brass',
-  order_followup: 'bg-warn',
-  client_approval: 'bg-crit',
-  spec_review: 'bg-olive',
-  scheduling: 'bg-warn',
-  admin: 'bg-ink-faint',
-};
-
 /** The accent each board column is headed with. */
 const COLUMN_DOT: Partial<Record<TaskStatus, string>> = {
   open: 'bg-ink-faint',
-  in_progress: 'bg-brass',
+  in_progress: 'bg-olive',
   blocked: 'bg-crit',
   done: 'bg-good',
+};
+
+/** The same colour as a band across the top of the column, so each column reads as its own lane. */
+const COLUMN_TOP: Partial<Record<TaskStatus, string>> = {
+  open: 'border-t-ink-faint',
+  in_progress: 'border-t-olive',
+  blocked: 'border-t-crit',
+  done: 'border-t-good',
 };
 
 /** Replaces the platform's own select arrow, which cannot be themed. */
@@ -412,21 +401,7 @@ const BOARD_COLUMNS: { status: TaskStatus; hint: string }[] = [
 ];
 
 function Initials({ name }: { name: string }) {
-  const letters = name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((p) => p[0])
-    .join('')
-    .toUpperCase();
-  return (
-    <span
-      className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-brass/15 text-[9.5px] font-bold text-brass-deep"
-      title={name}
-    >
-      {letters || '?'}
-    </span>
-  );
+  return <Avatar name={name} size={20} />;
 }
 
 /** Two staggered checkmarks — "done", distinct from a single tick used elsewhere. */
@@ -482,9 +457,9 @@ const BoardCard = memo(function BoardCard({
         e.dataTransfer.setData('text/plain', t.id);
       }}
       onClick={() => onOpen(t.id)}
-      className={`board-card group relative overflow-hidden rounded-xl border bg-surface p-3.5 ${
+      className={`board-card group relative overflow-hidden rounded-xl border bg-surface p-3.5 shadow-card ${
         mayEdit ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'
-      } ${t.overdue ? 'border-crit/35' : 'border-line-soft hover:border-line'}`}
+      } ${t.overdue ? 'border-crit/40' : 'border-line hover:border-ink-faint/50'}`}
     >
       {/* A bar down the edge rather than a red box around everything. The
           full border fought the card's own outline and made a late task look
@@ -494,9 +469,9 @@ const BoardCard = memo(function BoardCard({
 
       <div className="mb-2 flex items-center gap-2">
         <span className="flex min-w-0 items-center gap-1.5">
-          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${KIND_DOT[t.kind]}`} aria-hidden="true" />
+          <HueDot hue={CATEGORY_HUE[t.category]} className="h-1.5 w-1.5" />
           <span className="truncate text-[10px] font-bold uppercase tracking-[0.07em] text-ink-faint">
-            {TASK_CATEGORY_LABELS[t.category]} · {TASK_KIND_LABELS[t.kind]}
+            <span className={HUE[CATEGORY_HUE[t.category]].text}>{TASK_CATEGORY_LABELS[t.category]}</span> · {TASK_KIND_LABELS[t.kind]}
           </span>
         </span>
         {t.overdue && <Tag tone="crit">Overdue</Tag>}
@@ -578,7 +553,7 @@ const BoardCard = memo(function BoardCard({
       )}
 
       {t.project !== '—' && (
-        <p className="mt-2 truncate text-[11.5px] text-ink-faint">{t.project}</p>
+        <ProjectName name={t.project} className="mt-2 max-w-full text-[11.5px] text-ink-faint" />
       )}
 
       {/* Owner and date are changed here rather than on another screen: the
@@ -592,7 +567,8 @@ const BoardCard = memo(function BoardCard({
         onClick={(e) => e.stopPropagation()}
       >
         {mayEdit ? (
-          <span className="relative min-w-0 flex-1">
+          <span className="relative flex min-w-0 flex-1 items-center gap-1">
+            {t.assignedTo && <Initials name={t.assignee} />}
             <select
               className="control-quiet pr-5"
               value={t.assignedTo ?? ''}
@@ -712,8 +688,8 @@ function Board({
               e.preventDefault();
               drop(col.status);
             }}
-            className={`rounded-2xl border p-3 transition-colors ${
-              over === col.status ? 'border-brass bg-brass/5' : 'border-line-soft bg-sunk/40'
+            className={`rounded-2xl border border-t-[3px] p-3 transition-colors ${COLUMN_TOP[col.status] ?? 'border-t-ink-faint'} ${
+              over === col.status ? 'border-brass bg-brass/5' : 'border-line bg-sunk'
             }`}
           >
             <header className="mb-3 flex items-center gap-2 px-1">
@@ -724,7 +700,7 @@ function Board({
               <h3 className="text-[12px] font-bold uppercase tracking-[0.06em] text-ink-soft">
                 {TASK_STATUS_LABELS[col.status]}
               </h3>
-              <span className="ml-auto grid h-5 min-w-[20px] place-items-center rounded-full bg-sunk px-1.5 text-[11px] font-semibold tabular-nums text-ink-soft">
+              <span className="ml-auto grid h-5 min-w-[20px] place-items-center rounded-full border border-line bg-surface px-1.5 text-[11px] font-semibold tabular-nums text-ink-soft">
                 {items.length}
               </span>
             </header>
@@ -746,7 +722,7 @@ function Board({
                 />
               ))}
               {items.length === 0 && (
-                <li className="rounded-xl border border-dashed border-line/70 px-3 py-7 text-center text-[11.5px] text-ink-faint">
+                <li className="rounded-xl border border-dashed border-ink-faint/40 bg-surface/60 px-3 py-7 text-center text-[11.5px] text-ink-faint">
                   {col.hint}
                 </li>
               )}
@@ -761,40 +737,7 @@ function Board({
 /** Statuses a row can still be moved to; done/cancelled drop out of the list filter. */
 const OPEN_STATUSES: TaskStatus[] = ['open', 'in_progress', 'blocked'];
 
-/**
- * What a scan found, said once it has finished.
- *
- * The button used to fall silent at the end: it read the inbox, raised
- * nothing or something, and gave no sign which. Pressed on a test email
- * that did not warrant a task, that silence was indistinguishable from the
- * scan not working at all.
- */
-function ScanResult({
-  result,
-  error,
-}: {
-  result?: { ok: boolean; reason?: string; scanned: number; created: number; remaining: number } | undefined;
-  error: Error | null;
-}) {
-  if (error) return <span className="text-[11.5px] text-crit">{error.message}</span>;
-  if (!result) return null;
-  if (!result.ok) return <span className="text-[11.5px] text-crit">{result.reason ?? 'The scan could not run.'}</span>;
-
-  const read =
-    result.scanned === 0
-      ? 'No new email to read — everything has been checked.'
-      : `Read ${result.scanned} email${result.scanned === 1 ? '' : 's'}: ${
-          result.created === 0 ? 'none needed a task' : `${result.created} new task${result.created === 1 ? '' : 's'}`
-        }.`;
-  return (
-    <span className="text-[11.5px] text-ink-faint">
-      {read}
-      {result.remaining > 0 ? ` ${result.remaining} more to go.` : ''}
-    </span>
-  );
-}
-
-type DueFilter = 'any' | 'last3' | 'overdue' | 'today' | 'week' | 'next7' | 'none' | 'range';
+type DueFilter = 'any' | 'last3' | 'overdue' | 'today' | 'week' | 'next7' | 'range';
 
 const DUE_OPTIONS: { v: DueFilter; label: string }[] = [
   { v: 'any', label: 'Any due date' },
@@ -803,7 +746,6 @@ const DUE_OPTIONS: { v: DueFilter; label: string }[] = [
   { v: 'today', label: 'Due today' },
   { v: 'week', label: 'Due this week' },
   { v: 'next7', label: 'Due in the next 7 days' },
-  { v: 'none', label: 'No due date' },
   { v: 'range', label: 'Date range…' },
 ];
 
@@ -844,8 +786,6 @@ function dueMatches(t: TaskView, f: TaskFilters): boolean {
       return true;
     case 'last3':
       return Date.now() - Date.parse(t.createdAt) <= 3 * 86_400_000;
-    case 'none':
-      return !due;
     case 'overdue':
       return Boolean(due && due < today && t.status !== 'done');
     case 'today':
@@ -1044,10 +984,11 @@ function TaskFilterMenu({
                       onClick={() =>
                         set({ categories: on ? filters.categories.filter((x) => x !== c) : [...filters.categories, c] })
                       }
-                      className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors ${
                         on ? 'border-brass bg-brass/15 text-ink' : 'border-line text-ink-soft hover:border-ink-faint hover:text-ink'
                       }`}
                     >
+                      <HueDot hue={CATEGORY_HUE[c]} />
                       {TASK_CATEGORY_LABELS[c]}
                     </button>
                   );
@@ -1114,9 +1055,7 @@ export default function Tasks() {
   const { data: team } = useTeam();
   const update = useUpdateTask();
   const remove = useDeleteTask();
-  const backfill = useBackfillTasks();
   const { user, may } = useAuth();
-  const [showDone, setShowDone] = useState(false);
   // Which task's detail panel is open, if any.
   //
   // Seeded from ?task=, so a task named in an answer, a digest or a link
@@ -1201,7 +1140,12 @@ export default function Tasks() {
     try {
       const saved = sessionStorage.getItem('tasks.filters');
       const parsed = saved ? { ...NO_FILTERS, ...(JSON.parse(saved) as Partial<TaskFilters>) } : DEFAULT_FILTERS;
-      return { ...parsed, statuses: Array.isArray(parsed.statuses) ? parsed.statuses : [] };
+      return {
+        ...parsed,
+        statuses: Array.isArray(parsed.statuses) ? parsed.statuses : [],
+        // A choice saved before that option was removed ("No due date") falls back to any date.
+        due: DUE_OPTIONS.some((o) => o.v === parsed.due) ? parsed.due : 'any',
+      };
     } catch {
       return DEFAULT_FILTERS;
     }
@@ -1243,7 +1187,7 @@ export default function Tasks() {
   const allCount = tasks.filter((t) => OPEN_STATUSES.includes(t.status)).length;
 
   const visible =
-    showDone || filters.statuses.includes('done') ? scoped : scoped.filter((t) => OPEN_STATUSES.includes(t.status));
+    filters.statuses.includes('done') ? scoped : scoped.filter((t) => OPEN_STATUSES.includes(t.status));
 
   // The board always shows its Done column — that is what a board is for, and
   // "Hide closed" was written for the list. Only the most recently FINISHED
@@ -1315,31 +1259,6 @@ export default function Tasks() {
               shown={view === 'board' ? boardTasks.length : visible.length}
               total={unfilteredCount}
             />
-            {supervisor && (
-              <button
-                onClick={() => backfill.mutate()}
-                disabled={backfill.isPending}
-                aria-label="Scan email already in the system for tasks"
-                title={
-                  backfill.isPending
-                    ? 'Reading email…'
-                    : backfill.data && backfill.data.remaining > 0
-                      ? `Keep reading — ${backfill.data.remaining} left`
-                      : 'Scan email already in the system for tasks'
-                }
-                className="focusable relative grid h-8 w-8 place-items-center rounded-lg border border-line bg-surface text-ink-soft transition-colors hover:border-ink-faint hover:text-ink disabled:opacity-50"
-              >
-                <IconMailScan width={16} height={16} className={backfill.isPending ? 'animate-pulse' : ''} />
-                {/* How much is left is the one thing the icon cannot say,
-                    and the reason to press it a second time. */}
-                {!backfill.isPending && !!backfill.data?.remaining && (
-                  <span className="absolute -right-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-brass px-1 text-[9.5px] font-bold leading-none text-white ring-2 ring-surface">
-                    {backfill.data.remaining > 99 ? '99+' : backfill.data.remaining}
-                  </span>
-                )}
-              </button>
-            )}
-
             <div className="inline-flex rounded-lg border border-line bg-surface p-0.5" role="group" aria-label="How to show the tasks">
               {([
                 { v: 'board' as const, label: 'Board', Icon: IconBoard },
@@ -1360,31 +1279,9 @@ export default function Tasks() {
               ))}
             </div>
 
-            <button
-              onClick={() => setShowDone((v) => !v)}
-              aria-pressed={showDone}
-              aria-label={showDone ? 'Hide closed tasks' : 'Show closed tasks'}
-              title={showDone ? 'Hide closed tasks' : 'Show closed tasks'}
-              className={`focusable grid h-8 w-8 place-items-center rounded-lg border transition-colors ${
-                showDone
-                  ? 'border-brass bg-brass/10 text-brass-deep'
-                  : 'border-line bg-surface text-ink-soft hover:border-ink-faint hover:text-ink'
-              }`}
-            >
-              {/* The icon is the ACTION, not the state — matching the label
-                  beside it, which already reads "Hide closed tasks" when
-                  they are showing. An eye means "click to reveal". */}
-              {showDone ? <IconEyeOff width={16} height={16} /> : <IconEye width={16} height={16} />}
-            </button>
           </div>
         }
       />
-
-      {(backfill.data || backfill.error) && (
-        <div className="-mt-2">
-          <ScanResult result={backfill.data} error={backfill.error as Error | null} />
-        </div>
-      )}
 
 
       {view === 'board' && (
@@ -1430,7 +1327,7 @@ export default function Tasks() {
       <Card>
         <div className="flex items-center justify-between border-b border-line-soft px-5 py-4">
           <h2 className="text-[16px] font-semibold text-ink">
-            {showDone ? 'All tasks' : 'Open work'}
+            {filters.statuses.includes('done') ? 'All tasks' : 'Open work'}
           </h2>
           <div className="flex items-center gap-3">
             <div className="inline-flex rounded-lg border border-line bg-surface p-0.5 text-[12px]" role="group" aria-label="Group tasks by">
@@ -1481,7 +1378,12 @@ export default function Tasks() {
             return (
               <Fragment key={c}>
                 <li className="flex items-center justify-between bg-sunk px-5 py-2">
-                  <h3 className={`text-[11.5px] font-bold uppercase tracking-[0.07em] ${urgent ? 'text-crit' : 'text-ink-soft'}`}>
+                  <h3
+                    className={`flex items-center gap-2 text-[11.5px] font-bold uppercase tracking-[0.07em] ${
+                      urgent ? 'text-crit' : c in CATEGORY_HUE ? HUE[CATEGORY_HUE[c as TaskCategory]].text : 'text-ink-soft'
+                    }`}
+                  >
+                    {c in CATEGORY_HUE && <HueDot hue={CATEGORY_HUE[c as TaskCategory]} />}
                     {groupLabel}
                   </h3>
                   <span className="text-[11.5px] text-ink-faint">{group.length}</span>
@@ -1496,7 +1398,7 @@ export default function Tasks() {
                     <div className="text-[14px] font-medium text-ink">{t.title}</div>
                     {t.detail && <div className="text-[13px] text-ink-soft">{t.detail}</div>}
                     <div className="mt-0.5 text-[11px] text-ink-faint">
-                      {t.project} · raised {t.age}
+                      {t.project !== '—' ? <ProjectName name={t.project} className="align-bottom" /> : t.project} · raised {t.age}
                       {t.due && <> · due {shortDate(t.due)}</>}
                       {t.overdue && daysLate(t) > 0 && (
                         <span className="font-semibold text-crit"> · {daysLate(t)} day{daysLate(t) > 1 ? 's' : ''} overdue</span>
@@ -1514,14 +1416,11 @@ export default function Tasks() {
                   </div>
 
                   <div className="flex items-center gap-2 self-start sm:self-auto">
-                    <span
-                      className={`grid h-7 w-7 shrink-0 place-items-center rounded-full text-[12px] font-bold ${
-                        t.assignedTo ? 'bg-brass/10 text-brass-deep' : 'bg-sunk text-ink-faint'
-                      }`}
-                      title={t.assignee}
-                    >
-                      {t.assignedTo ? t.assignee.slice(0, 1).toUpperCase() : '?'}
-                    </span>
+                    {t.assignedTo ? (
+                      <Avatar name={t.assignee} size={28} />
+                    ) : (
+                      <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-sunk text-[12px] font-bold text-ink-faint" title="Unassigned">?</span>
+                    )}
 
                     {supervisor ? (
                       <select
@@ -1567,18 +1466,6 @@ export default function Tasks() {
             );
           })}
         </ul>
-        {backfill.isSuccess && (
-          <div className="border-t border-line-soft px-5 py-3 text-[12.5px] text-ink-soft">
-            {backfill.data.created > 0
-              ? `Raised ${backfill.data.created} task(s) from ${backfill.data.scanned} email(s).`
-              : `Read ${backfill.data.scanned} email(s); none needed a task.`}
-          </div>
-        )}
-        {backfill.isError && (
-          <div className="border-t border-line-soft px-5 py-3 text-[12.5px] text-crit">
-            {(backfill.error as Error).message}
-          </div>
-        )}
         {update.isError && (
           <div className="border-t border-line-soft px-5 py-3 text-[12.5px] text-crit">
             {(update.error as Error).message}

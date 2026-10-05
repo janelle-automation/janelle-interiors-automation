@@ -1,9 +1,10 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Page, PageHeading, Card, Pill } from '../components/ui';
-import { useFollowUps, useOps, useFollowUpStatus, useSnoozeFollowUp, type FollowUpView } from '../lib/queries';
+import { useFollowUps, useFollowUpStatus, useSnoozeFollowUp, type FollowUpView } from '../lib/queries';
 import { ScopeToggle, useScope } from '../components/ScopeToggle';
 import { useAuth } from '../context/AuthContext';
+import { HUE, ProjectName, type Hue } from '../components/hue';
 
 const tone: Record<string, 'crit' | 'warn' | 'brass'> = {
   vendor_silence: 'warn',
@@ -195,7 +196,9 @@ function ProjectBox({ name, rows }: { name: string; rows: FollowUpView[] }) {
     <Card>
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-line-soft bg-sunk/40 px-5 py-3">
         <div className="flex min-w-0 items-center gap-3">
-          <h3 className={`truncate text-[15px] font-semibold ${name === NO_PROJECT ? 'text-ink-soft' : 'text-ink'}`}>{name}</h3>
+          <h3 className={`min-w-0 truncate text-[15px] font-semibold ${name === NO_PROJECT ? 'text-ink-soft' : 'text-ink'}`}>
+            {name === NO_PROJECT ? name : <ProjectName name={name} />}
+          </h3>
           <Pill tone={tone[worst.type]}>{label[worst.type] ?? worst.type}</Pill>
         </div>
         <p className="text-[12px] text-ink-faint">
@@ -238,11 +241,24 @@ function boxesOf(items: FollowUpView[]): [string, FollowUpView[]][] {
   );
 }
 
-function Stat({ text, value, hint, tone: t }: { text: string; value: number; hint: string; tone?: 'crit' }) {
+/**
+ * A headline figure with its own colour: a band across the top, a tinted
+ * marker and the number in that colour. `tone="crit"` keeps the red that
+ * means "late" — it only turns red while there is something in it.
+ */
+function Stat({ text, value, hint, tone: t, hue }: { text: string; value: number; hint: string; tone?: 'crit'; hue: Hue }) {
+  const urgent = t === 'crit' && value > 0;
   return (
-    <div className={`rounded-lg border bg-surface px-4 py-3 ${t === 'crit' && value > 0 ? 'border-crit/40' : 'border-line-soft'}`}>
-      <p className="text-[11.5px] font-semibold uppercase tracking-[0.06em] text-ink-faint">{text}</p>
-      <p className={`mt-1 text-[24px] font-semibold tabular-nums leading-tight ${t === 'crit' && value > 0 ? 'text-crit' : 'text-ink'}`}>{value}</p>
+    <div
+      className={`rounded-xl border border-t-[3px] bg-surface px-4 py-3 shadow-card ${
+        urgent ? 'border-crit/40 border-t-crit' : `border-line ${HUE[hue].top}`
+      }`}
+    >
+      <div className="flex items-center gap-2">
+        <span className={`h-2.5 w-2.5 shrink-0 rounded-[3px] ${urgent ? 'bg-crit' : HUE[hue].dot}`} aria-hidden="true" />
+        <p className="text-[11.5px] font-semibold uppercase tracking-[0.06em] text-ink-faint">{text}</p>
+      </div>
+      <p className={`mt-1 text-[24px] font-semibold tabular-nums leading-tight ${urgent ? 'text-crit' : HUE[hue].text}`}>{value}</p>
       <p className="mt-0.5 text-[12px] text-ink-faint">{hint}</p>
     </div>
   );
@@ -250,7 +266,6 @@ function Stat({ text, value, hint, tone: t }: { text: string; value: number; hin
 
 export default function FollowUps() {
   const { data: all } = useFollowUps();
-  const { followUps: runFollowUps } = useOps();
   const [scope] = useScope();
   const { user } = useAuth();
   const [showOthers, setShowOthers] = useState(true);
@@ -301,17 +316,10 @@ export default function FollowUps() {
   return (
     <Page>
       <PageHeading
-        title="Follow-up Inbox"
+        title="Top Priority Actions"
         action={
           <div className="flex items-center gap-2">
             <ScopeToggle mine={all.filter(isMine).length} all={all.length} />
-            <button
-              onClick={() => runFollowUps.mutate()}
-              disabled={runFollowUps.isPending}
-              className="btn-secondary btn-sm"
-            >
-              {runFollowUps.isPending ? 'Checking…' : 'Run follow-ups now'}
-            </button>
           </div>
         }
       />
@@ -328,9 +336,9 @@ export default function FollowUps() {
       ) : (
         <div className="space-y-8">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <Stat text="Top priority" value={topCount} hint="Escalated, approval overdue, date slipping" tone="crit" />
-            <Stat text="Everything else" value={otherCount} hint="Clients waiting, stale quotes, reminders" />
-            <Stat text="Projects affected" value={projectCount} hint="Each has its own box below" />
+            <Stat text="Top priority" value={topCount} hint="Escalated, approval overdue, date slipping" tone="crit" hue="orange" />
+            <Stat text="Everything else" value={otherCount} hint="Clients waiting, stale quotes, reminders" hue="amber" />
+            <Stat text="Projects affected" value={projectCount} hint="Each has its own box below" hue="indigo" />
           </div>
 
           <section aria-labelledby="top-heading">

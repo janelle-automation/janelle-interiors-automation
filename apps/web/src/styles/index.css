@@ -2,72 +2,126 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ── Design tokens · Houzz Pro-style: white surfaces, cool greys, signature green ── */
+/* ── Design tokens · navy sidebar, clean light pages, one blue accent ──
+   Blue means "act here": buttons, links, the active menu item, selected
+   toggles. Green, amber and red mean only done, due soon and late; violet
+   marks work in progress. A status never reads as a button. */
 :root {
-  --paper: 244 245 247;
-  --surface: 255 255 255;
-  --sunk: 238 240 242;
-  --ink: 31 35 39;
-  --ink-soft: 90 97 105;
-  --ink-faint: 141 148 156;
-  --line: 223 226 230;
-  --line-soft: 236 238 241;
-  --brass: 77 188 21;        /* Houzz green — primary actions & active states */
-  --brass-deep: 58 154 12;   /* darker green for text on white */
-  --olive: 38 112 201;        /* secondary / informational blue */
-  --good: 46 158 58;
-  --warn: 217 138 31;
-  --crit: 214 58 47;
-  --nav: 30 34 38;
-  --nav-hover: 42 47 52;
-  --nav-text: 242 244 246;
-  --nav-muted: 163 170 178;
+  --paper: 245 247 250;      /* #F5F7FA page */
+  --surface: 255 255 255;    /* cards */
+  --sunk: 234 239 245;       /* #EAEFF5 board columns, table headers, wells — distinct from the page */
+  --ink: 15 23 42;           /* #0F172A text */
+  --ink-soft: 71 85 105;     /* #475569 */
+  --ink-faint: 94 109 132;   /* #5E6D84 — 4.9:1 even on the page grey */
+  --line: 218 225 234;       /* #DAE1EA — visible on white and on the page grey */
+  --line-soft: 237 241 246;
+  --brass: 37 99 235;        /* #2563EB blue — primary actions & active states */
+  --brass-deep: 29 78 216;   /* #1D4ED8 for text and hover */
+  --olive: 124 58 237;       /* #7C3AED violet — in progress / info */
+  --good: 21 128 61;         /* #15803D done */
+  --warn: 180 83 9;          /* #B45309 due soon */
+  --crit: 220 38 38;         /* #DC2626 overdue */
+  --nav: 15 27 45;           /* #0F1B2D navy sidebar */
+  --nav-hover: 30 44 66;
+  --nav-text: 241 245 249;
+  --nav-muted: 148 163 184;
+  /* Category hues — one colour per KIND of thing (task category, menu item,
+     person, project), used the same way everywhere. Base for dots, edges and
+     tints; -ink is the shade that reads as text on this theme's surfaces. */
+  --hue-pink: 219 39 119;
+  --hue-pink-ink: 190 24 93;
+  --hue-teal: 13 148 136;
+  --hue-teal-ink: 15 118 110;
+  --hue-orange: 234 88 12;
+  --hue-orange-ink: 194 65 12;
+  --hue-indigo: 79 70 229;
+  --hue-indigo-ink: 67 56 202;
+  --hue-green: 22 163 74;
+  --hue-green-ink: 21 128 61;
+  --hue-amber: 217 119 6;
+  --hue-amber-ink: 180 83 9;
+  --hue-violet: 147 51 234;
+  --hue-violet-ink: 126 34 206;
+  --hue-sky: 2 132 199;
+  --hue-sky-ink: 3 105 161;
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not(.light) {
-    --paper: 19 21 23;
-    --surface: 27 30 33;
-    --sunk: 36 40 44;
-    --ink: 240 242 244;
-    --ink-soft: 179 185 192;
-    --ink-faint: 127 134 142;
-    --line: 45 50 54;
-    --line-soft: 36 40 44;
-    --brass: 92 204 37;
-    --brass-deep: 125 220 74;
-    --olive: 91 156 240;
-    --good: 92 196 106;
-    --warn: 230 163 74;
-    --crit: 238 106 95;
-    --nav: 15 17 19;
-    --nav-hover: 27 30 33;
-    --nav-text: 242 244 246;
-    --nav-muted: 143 151 159;
+    --paper: 15 23 36;         /* #0F1724 soft navy, not black */
+    --surface: 22 32 50;       /* #162032 */
+    --sunk: 30 42 64;
+    --ink: 241 245 249;
+    --ink-soft: 191 203 219;
+    --ink-faint: 140 155 178;
+    --line: 44 58 82;
+    --line-soft: 34 47 68;
+    --brass: 37 99 235;        /* #2563EB — white text on it 5.2:1 */
+    --brass-deep: 96 165 250;  /* #60A5FA for text on dark */
+    --olive: 167 139 250;
+    --good: 74 222 128;
+    --warn: 251 191 36;
+    --crit: 248 113 113;
+    --nav: 11 18 32;           /* #0B1220 */
+    --nav-hover: 26 38 60;
+    --nav-text: 241 245 249;
+    --nav-muted: 148 163 184;
+    --hue-pink: 244 114 182;
+    --hue-pink-ink: 249 168 212;
+    --hue-teal: 45 212 191;
+    --hue-teal-ink: 94 234 212;
+    --hue-orange: 251 146 60;
+    --hue-orange-ink: 253 186 116;
+    --hue-indigo: 129 140 248;
+    --hue-indigo-ink: 165 180 252;
+    --hue-green: 74 222 128;
+    --hue-green-ink: 134 239 172;
+    --hue-amber: 251 191 36;
+    --hue-amber-ink: 252 211 77;
+    --hue-violet: 192 132 252;
+    --hue-violet-ink: 216 180 254;
+    --hue-sky: 56 189 248;
+    --hue-sky-ink: 125 211 252;
     color-scheme: dark;
   }
 }
 
 :root.dark {
-  --paper: 19 21 23;
-  --surface: 27 30 33;
-  --sunk: 36 40 44;
-  --ink: 240 242 244;
-  --ink-soft: 179 185 192;
-  --ink-faint: 127 134 142;
-  --line: 45 50 54;
-  --line-soft: 36 40 44;
-  --brass: 92 204 37;
-  --brass-deep: 125 220 74;
-  --olive: 91 156 240;
-  --good: 92 196 106;
-  --warn: 230 163 74;
-  --crit: 238 106 95;
-  --nav: 15 17 19;
-  --nav-hover: 27 30 33;
-  --nav-text: 242 244 246;
-  --nav-muted: 143 151 159;
+  --paper: 15 23 36;         /* #0F1724 soft navy, not black */
+  --surface: 22 32 50;       /* #162032 */
+  --sunk: 30 42 64;
+  --ink: 241 245 249;
+  --ink-soft: 191 203 219;
+  --ink-faint: 140 155 178;
+  --line: 44 58 82;
+  --line-soft: 34 47 68;
+  --brass: 37 99 235;        /* #2563EB — white text on it 5.2:1 */
+  --brass-deep: 96 165 250;  /* #60A5FA for text on dark */
+  --olive: 167 139 250;
+  --good: 74 222 128;
+  --warn: 251 191 36;
+  --crit: 248 113 113;
+  --nav: 11 18 32;           /* #0B1220 */
+  --nav-hover: 26 38 60;
+  --nav-text: 241 245 249;
+  --nav-muted: 148 163 184;
+  --hue-pink: 244 114 182;
+  --hue-pink-ink: 249 168 212;
+  --hue-teal: 45 212 191;
+  --hue-teal-ink: 94 234 212;
+  --hue-orange: 251 146 60;
+  --hue-orange-ink: 253 186 116;
+  --hue-indigo: 129 140 248;
+  --hue-indigo-ink: 165 180 252;
+  --hue-green: 74 222 128;
+  --hue-green-ink: 134 239 172;
+  --hue-amber: 251 191 36;
+  --hue-amber-ink: 252 211 77;
+  --hue-violet: 192 132 252;
+  --hue-violet-ink: 216 180 254;
+  --hue-sky: 56 189 248;
+  --hue-sky-ink: 125 211 252;
   color-scheme: dark;
 }
 
@@ -103,12 +157,16 @@ table,
   .card {
     @apply rounded-xl border border-line bg-surface shadow-card;
   }
+  /* Every table header reads as a header: a tinted band, not floating grey text. */
+  .card table thead tr {
+    background: rgb(var(--sunk));
+  }
   .focusable:focus-visible {
     outline: 2px solid rgb(var(--brass));
     outline-offset: 2px;
   }
 
-  /* Buttons — Houzz Pro: solid green primary, white outlined secondary, 6px radius */
+  /* Buttons — solid blue primary, white outlined secondary */
   .btn {
     @apply focusable inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-4 py-2 text-[13.5px] font-semibold leading-5 transition-colors disabled:cursor-not-allowed disabled:opacity-50;
   }
@@ -116,7 +174,7 @@ table,
     @apply btn border border-transparent bg-brass text-white hover:bg-brass-deep;
   }
   .btn-secondary {
-    @apply btn border border-line bg-surface text-ink hover:border-ink-faint hover:bg-sunk;
+    @apply btn border border-line bg-surface text-ink shadow-sm hover:border-ink-faint hover:bg-sunk;
   }
   .btn-ghost {
     @apply btn border border-transparent bg-transparent text-ink-soft hover:bg-sunk hover:text-ink;
@@ -126,7 +184,7 @@ table,
   }
 
   .input {
-    @apply focusable w-full rounded-lg border border-line bg-surface px-3.5 py-2.5 text-[14px] text-ink placeholder:text-ink-faint transition-colors hover:border-ink-faint focus:border-brass;
+    @apply focusable w-full rounded-lg border border-line bg-surface px-3.5 py-2.5 text-[14px] text-ink placeholder:text-ink-faint transition-colors hover:border-ink-faint focus:border-brass focus:outline-none focus:ring-2 focus:ring-brass/20;
   }
 
   /* Board cards put two controls side by side in a narrow column. */

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { ASSISTANT_NAME, type AiRoutingFeatureView, type AiRoutingView, type LlmProvider } from '@janelle/shared';
 import { Page, PageHeading, Card, Pill, PasswordInput, Switch } from '../components/ui';
 import {
@@ -20,6 +20,8 @@ import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
 import { MIN_PASSWORD } from './ResetPassword';
+import Team from './Team';
+import Permissions from './Permissions';
 import {
   useMe,
   useConnectGoogle,
@@ -41,10 +43,7 @@ import {
   useClearSlackToken,
   useSetSlackConfig,
   useSlackTest,
-  useSlackDigestNow,
-  useSlackSync,
-  useSlackProjects,
-  useSetProjectChannel,
+  useSlackReportNow,
   useClearAiKey,
   useDisconnectGoogleService,
   useSetAiKey,
@@ -61,6 +60,7 @@ import {
   type MailSyncResult,
   type GoogleService,
   type Sla,
+  type SlackReportChannels,
 } from '../lib/queries';
 
 const SERVICE_LABEL: Record<GoogleService | 'all', string> = { gmail: 'Gmail', drive: 'Google Drive', all: 'Google' };
@@ -983,130 +983,12 @@ function OpenAiSetupCard() {
   );
 }
 
-/**
- * Which channel each project's updates go to.
- *
- * A table, because it is one: a project, the channel it posts to, and where
- * that choice came from. A project with a channel of its own posts there; one
- * without is matched to a channel by name where Slack lets the bot see the
- * list, and otherwise goes to the default. Folded away until asked for —
- * thirty rows is a lot to scroll past for something that mostly takes care of
- * itself.
- */
-function SlackProjectChannels({ defaultChannel }: { defaultChannel: string }) {
-  const [flash, say] = useFlash();
-  const [open, setOpen] = useState(false);
-  const list = useSlackProjects(open);
-  const save = useSetProjectChannel();
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const data = list.data;
-  const columns = 'sm:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_8.5rem]';
+const REPORT_KINDS: { key: keyof SlackReportChannels; label: string; placeholder: string; note: string }[] = [
+  { key: 'completed', label: 'Completed', placeholder: 'completed-tasks', note: 'Finished yesterday and today.' },
+  { key: 'pending', label: 'Pending', placeholder: 'pending-tasks', note: 'Open and due today or tomorrow.' },
+  { key: 'overdue', label: 'Overdue', placeholder: 'overdue-tasks', note: 'Open and past their due date.' },
+];
 
-  return (
-    <div className="rounded-lg border border-line">
-      <button
-        type="button"
-        className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <span>
-          <span className="block text-[13px] font-medium text-ink">Project channels</span>
-          <span className="block text-[12px] text-ink-soft">
-            Each project posts to its own channel; anything without one goes to #{defaultChannel}.
-          </span>
-        </span>
-        <span className="shrink-0 text-[12px] text-brass">{open ? 'Hide' : 'Show'}</span>
-      </button>
-
-      {open && (
-        <div className="border-t border-line">
-          {!data ? (
-            <p className="p-3 text-[13px] text-ink-faint">{list.isError ? 'Could not load projects.' : 'Loading…'}</p>
-          ) : (
-            <>
-              {(data.missingScope || !data.ready) && (
-                <div className="space-y-1 border-b border-line bg-sunk/40 px-3 py-2 text-[12px] text-warn">
-                  {data.missingScope && (
-                    <p>
-                      Matching by name is off: add the channels:read and groups:read permissions to the Slack app and reinstall it.
-                      Channels typed below still work.
-                    </p>
-                  )}
-                  {!data.ready && <p>Choosing a channel needs migration 0029 applied (npm run db:apply).</p>}
-                </div>
-              )}
-              <div className={`hidden gap-3 border-b border-line px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-faint sm:grid ${columns}`}>
-                <span>Project</span>
-                <span>Channel</span>
-                <span>Status</span>
-              </div>
-              <ul className="max-h-[26rem] divide-y divide-line overflow-y-auto">
-                {data.projects.map((p) => {
-                  const value = drafts[p.id] ?? p.channel;
-                  const dirty = value.trim().replace(/^#/, '') !== p.channel;
-                  const status = p.botIn === false
-                    ? { text: 'Bot joins on next post', tone: 'text-warn' }
-                    : p.channel
-                      ? { text: 'Assigned', tone: 'text-ink-soft' }
-                      : p.auto
-                        ? { text: 'Matched by name', tone: 'text-good' }
-                        : { text: 'Default', tone: 'text-ink-faint' };
-                  return (
-                    <li key={p.id} className={`grid items-center gap-x-3 gap-y-1.5 px-3 py-2 ${columns}`}>
-                      <span className="truncate text-[13px] font-medium text-ink" title={p.name}>{p.name}</span>
-                      <input
-                        className="input w-full text-[12.5px]"
-                        aria-label={`Slack channel for ${p.name}`}
-                        autoComplete="off"
-                        spellCheck={false}
-                        disabled={!data.ready}
-                        value={value}
-                        onChange={(e) => setDrafts((d) => ({ ...d, [p.id]: e.target.value }))}
-                        placeholder={p.auto ? p.auto : defaultChannel}
-                      />
-                      {dirty ? (
-                        <button
-                          className="btn-primary btn-sm justify-self-start"
-                          disabled={save.isPending}
-                          onClick={() =>
-                            save.mutate(
-                              { id: p.id, channel: value.trim() },
-                              { onSuccess: () => { setDrafts((d) => { const { [p.id]: _gone, ...rest } = d; return rest; }); say(`${p.name} will post to #${value.trim().replace(/^#/, '') || defaultChannel}`); } },
-                            )
-                          }
-                        >
-                          Save
-                        </button>
-                      ) : (
-                        <span className={`text-[12px] ${status.tone}`}>{status.text}</span>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-              <div className="px-3 py-2">
-                <Flash message={flash} />
-                <ErrorLine error={save.error as Error | null} />
-              </div>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * Slack — task and follow-up updates, posted to a channel.
- *
- * Two columns: how the bot connects on the left, what it sends on the right,
- * then the per-project channels and the sync status across the bottom. The
- * token is checked against Slack before it is saved and is never shown again;
- * what the card keeps showing is the last thing the sync did, so a revoked
- * token or a channel the bot was removed from is visible here rather than
- * only as silence in Slack.
- */
 function SlackSetupCard() {
   const [flash, say] = useFlash();
   const config = useSlackConfig();
@@ -1114,30 +996,27 @@ function SlackSetupCard() {
   const clearToken = useClearSlackToken();
   const setConfig = useSetSlackConfig();
   const test = useSlackTest();
-  const digestNow = useSlackDigestNow();
-  const sync = useSlackSync();
+  const reportNow = useSlackReportNow();
   const [token, setTokenText] = useState('');
   const [channel, setChannel] = useState<string | null>(null);
+  const [reports, setReports] = useState<SlackReportChannels | null>(null);
 
   if (config.isError) return null;
   const data = config.data;
   const channelValue = channel ?? data?.channel ?? '';
   const channelDirty = data !== undefined && channelValue.trim().replace(/^#/, '') !== data.channel;
 
-  const switches = data
-    ? ([
-        { key: 'enabled', label: 'Send updates to Slack', note: 'Switch off to pause without losing the setup.', on: data.enabled },
-        { key: 'tasks', label: 'Tasks', note: 'New tasks, status, owner and date changes, and tasks the system closes.', on: data.tasks },
-        { key: 'followUps', label: 'Follow-ups', note: 'Vendor and client chasers, drafted or sent.', on: data.followUps },
-        { key: 'dailyDigest', label: 'Daily reminder', note: 'Every morning at 9am Pacific: overdue, due today, blocked, and follow-ups waiting.', on: data.dailyDigest },
-      ] as const)
-    : [];
+  const clean = (c: string) => c.trim().replace(/^#/, '');
+  const reportValue = reports ?? data?.reportChannels ?? { completed: '', pending: '', overdue: '' };
+  const reportsDirty =
+    data !== undefined &&
+    REPORT_KINDS.some(({ key }) => clean(reportValue[key]) !== data.reportChannels[key]);
 
   return (
     <SettingsCard
       icon={<IconBell width={18} height={18} />}
       title="Slack"
-      description="Post new tasks, changes to them and the follow-ups Jenny raises into Slack. Each task is one message that updates as the work does."
+      description="Task reports in Slack — completed, pending and overdue, each in its own channel — at 9am, midday and 5pm Pacific."
       status={data && <Pill tone={data.connected ? 'good' : 'crit'}>{data.connected ? 'Connected' : 'Not set up'}</Pill>}
       className="lg:col-span-2"
     >
@@ -1203,66 +1082,89 @@ function SlackSetupCard() {
                   <button className="btn-ghost btn-sm" disabled={test.isPending || !data.connected} onClick={() => test.mutate(undefined, { onSuccess: () => say(`Test message sent to #${data.channel}`) })}>
                     {test.isPending ? 'Sending…' : 'Send a test'}
                   </button>
+                </div>
+                <Hint>Where the test message goes. The task reports go to their own channels, set alongside.</Hint>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div className="flex items-start gap-3 rounded-lg border border-line p-3">
+                <Switch
+                  checked={data.enabled}
+                  disabled={setConfig.isPending}
+                  label="Send task reports"
+                  onChange={(next) => setConfig.mutate({ enabled: next }, { onSuccess: () => say(`Task reports turned ${next ? 'on' : 'off'}`) })}
+                />
+                <div className="min-w-0">
+                  <p className="text-[13px] font-medium leading-tight text-ink">Send task reports</p>
+                  <p className="mt-0.5 text-[12px] leading-snug text-ink-soft">9am, midday and 5pm Pacific. Switch off to pause without losing the setup.</p>
+                </div>
+              </div>
+
+              <div>
+                <FieldLabel>Report channels</FieldLabel>
+                <div className="space-y-2">
+                  {REPORT_KINDS.map(({ key, label, placeholder, note }) => (
+                    <div key={key} className="grid grid-cols-[96px_1fr] items-center gap-2">
+                      <label htmlFor={`slack-report-${key}`} className="text-[13px] font-medium text-ink">{label}</label>
+                      <div>
+                        <input
+                          id={`slack-report-${key}`}
+                          className="input w-full"
+                          autoComplete="off"
+                          spellCheck={false}
+                          value={reportValue[key]}
+                          onChange={(e) => setReports({ ...reportValue, [key]: e.target.value })}
+                          placeholder={placeholder}
+                        />
+                        <p className="mt-0.5 text-[11.5px] text-ink-faint">{note}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    className="btn-primary btn-sm"
+                    disabled={setConfig.isPending || !reportsDirty}
+                    onClick={() =>
+                      setConfig.mutate(
+                        { reportChannels: { completed: clean(reportValue.completed), pending: clean(reportValue.pending), overdue: clean(reportValue.overdue) } },
+                        { onSuccess: () => { setReports(null); say('Report channels saved'); } },
+                      )
+                    }
+                  >
+                    {setConfig.isPending ? 'Saving…' : 'Save channels'}
+                  </button>
                   <button
                     className="btn-ghost btn-sm"
-                    disabled={digestNow.isPending || !data.connected}
+                    disabled={reportNow.isPending || reportsDirty || !data.keyHint || !REPORT_KINDS.some(({ key }) => data.reportChannels[key])}
                     onClick={() =>
-                      digestNow.mutate(undefined, {
+                      reportNow.mutate(undefined, {
                         onSuccess: (r) =>
                           say(
-                            r.error ? `Reminder failed: ${r.error}`
-                              : r.skipped ? `Nothing sent (${r.skipped.replace(/_/g, ' ')})`
-                              : `Reminder sent to #${data.channel} and ${r.projectPosts ?? 0} project channel(s)${r.warnings?.length ? ` — ${r.warnings[0]}` : ''}`,
+                            r.skipped
+                              ? `Nothing sent (${r.skipped.replace(/_/g, ' ')})`
+                              : r.reports
+                                  .map((x) => `#${x.channel}: ${x.error ? `failed — ${x.error}` : x.posted ? `${x.tasks} task${x.tasks === 1 ? '' : 's'}` : 'nothing to report'}`)
+                                  .join(' · '),
                           ),
                         onError: (e) => say((e as Error).message),
                       })
                     }
                   >
-                    {digestNow.isPending ? 'Sending…' : 'Send reminders now'}
+                    {reportNow.isPending ? 'Sending…' : 'Send reports now'}
                   </button>
                 </div>
-                <Hint>Where the daily reminder goes, and any project without a channel of its own. The bot joins public project channels by itself (needs the channels:join permission); private channels still need /invite @your-bot.</Hint>
-              </div>
-            </div>
-
-            <div>
-              <FieldLabel>What to send</FieldLabel>
-              <div className="divide-y divide-line rounded-lg border border-line">
-                {switches.map((row) => (
-                  <div key={row.key} className="flex items-start gap-3 p-3">
-                    <Switch
-                      checked={row.on}
-                      disabled={setConfig.isPending}
-                      label={row.label}
-                      onChange={(next) => setConfig.mutate({ [row.key]: next }, { onSuccess: () => say(`${row.label} turned ${next ? 'on' : 'off'}`) })}
-                    />
-                    <div className="min-w-0">
-                      <p className="text-[13px] font-medium leading-tight text-ink">{row.label}</p>
-                      <p className="mt-0.5 text-[12px] leading-snug text-ink-soft">{row.note}</p>
-                    </div>
-                  </div>
-                ))}
+                <Hint>Leave a channel blank to skip that report. A report with nothing in it is not posted. Invite the bot to private channels with /invite @your-bot.</Hint>
               </div>
             </div>
           </div>
 
-          {data.connected && <SlackProjectChannels defaultChannel={data.channel} />}
-
-          <div className="flex flex-wrap items-center gap-3 border-t border-line pt-4">
-            <button className="btn-ghost btn-sm" disabled={sync.isPending || !data.connected} onClick={() => sync.mutate(undefined, { onSuccess: (r) => say(`Sync finished — ${r.result.posted + r.result.updated} update${r.result.posted + r.result.updated === 1 ? '' : 's'} sent`) })}>
-              {sync.isPending ? 'Syncing…' : 'Sync now'}
-            </button>
-            <p className="text-[12px] text-ink-faint">
-              {data.lastRunAt
-                ? `Last checked ${new Date(data.lastRunAt).toLocaleString()} — ${data.lastPosted} update${data.lastPosted === 1 ? '' : 's'} sent.`
-                : 'Checked every five minutes once connected.'}
-            </p>
-            <Flash message={flash} className="sm:ml-auto" />
-          </div>
+          <Flash message={flash} />
           {data.lastError && <p className="text-[12.5px] text-crit">{data.lastError}</p>}
         </div>
       )}
-      <ErrorLine error={(setToken.error ?? clearToken.error ?? setConfig.error ?? test.error ?? sync.error) as Error | null} />
+      <ErrorLine error={(setToken.error ?? clearToken.error ?? setConfig.error ?? test.error ?? reportNow.error) as Error | null} />
     </SettingsCard>
   );
 }
@@ -1760,37 +1662,40 @@ function AppearanceCard() {
   );
 }
 
-function TeamCard() {
-  return (
-    <SettingsCard
-      icon={<IconTeam width={18} height={18} />}
-      title="Team & roles"
-      description="People, their roles and what each may do — enforced in the API and again in the database."
-    >
-      <Link to="/team" className="btn-secondary btn-sm inline-flex">Open Team &amp; Roles →</Link>
-    </SettingsCard>
-  );
-}
+type SettingsTab = 'connections' | 'slack' | 'ai' | 'studio' | 'team' | 'permissions' | 'account';
 
-type SettingsTab = 'connections' | 'slack' | 'ai' | 'studio' | 'account';
+/**
+ * Who sees a tab. `settings` — the principal-only sections, whose cards answer
+ * 403 to anybody else. `team` — Team & roles, for whoever may change the roster
+ * (the same test the menu used before it moved here). `owner` — Permissions,
+ * the principal's alone whatever the matrix says: it is the module that grants
+ * every other one.
+ */
+type TabAccess = 'everyone' | 'settings' | 'team' | 'owner';
 
-const TABS: { id: SettingsTab; label: string; Icon: (p: { width?: number; height?: number }) => JSX.Element; principal: boolean }[] = [
-  { id: 'connections', label: 'Connections', Icon: IconInbox, principal: false },
-  { id: 'slack', label: 'Slack', Icon: IconBell, principal: true },
-  { id: 'ai', label: 'AI', Icon: IconAssistant, principal: true },
-  { id: 'studio', label: 'Studio', Icon: IconBell, principal: true },
-  { id: 'account', label: 'Account', Icon: IconPerson, principal: false },
+const TABS: { id: SettingsTab; label: string; Icon: (p: { width?: number; height?: number }) => JSX.Element; access: TabAccess }[] = [
+  { id: 'connections', label: 'Connections', Icon: IconInbox, access: 'everyone' },
+  { id: 'slack', label: 'Slack', Icon: IconBell, access: 'settings' },
+  { id: 'ai', label: 'AI', Icon: IconAssistant, access: 'settings' },
+  { id: 'studio', label: 'Studio', Icon: IconBell, access: 'settings' },
+  { id: 'team', label: 'Team & Roles', Icon: IconTeam, access: 'team' },
+  { id: 'permissions', label: 'Permissions', Icon: IconKey, access: 'owner' },
+  { id: 'account', label: 'Account', Icon: IconPerson, access: 'everyone' },
 ];
 
 export default function Settings() {
-  const { may } = useAuth();
+  const { may, user } = useAuth();
   const [params, setParams] = useSearchParams();
   const flash = googleFlash();
 
-  // Principal-only sections are hidden rather than shown empty: their cards
-  // answer 403 to anybody else.
-  const principal = may('settings', 'update');
-  const tabs = TABS.filter((t) => principal || !t.principal);
+  // Sections a person cannot use are hidden rather than shown empty.
+  const allowed: Record<TabAccess, boolean> = {
+    everyone: true,
+    settings: may('settings', 'update'),
+    team: may('team', 'update'),
+    owner: user?.role === 'principal',
+  };
+  const tabs = TABS.filter((t) => allowed[t.access]);
   const asked = params.get('tab') as SettingsTab | null;
   // Coming back from Google always lands on Connections, where the result is.
   const tab: SettingsTab =
@@ -1859,7 +1764,6 @@ export default function Settings() {
           <>
             <ChasingCard />
             <AiUsageLinkCard />
-            <TeamCard />
           </>
         )}
 
@@ -1870,6 +1774,10 @@ export default function Settings() {
           </>
         )}
       </div>
+
+      {/* Full width, below the card grid: both are whole screens of their own. */}
+      {tab === 'team' && <Team />}
+      {tab === 'permissions' && <Permissions />}
     </Page>
   );
 }

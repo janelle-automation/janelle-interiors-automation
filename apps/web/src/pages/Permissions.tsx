@@ -328,7 +328,7 @@ export default function Permissions() {
                   Roles are assigned per person on Team &amp; Roles.
                 </p>
               </div>
-              <Link to="/team" className="btn-secondary btn-sm">Open Team &amp; Roles →</Link>
+              <Link to="/settings?tab=team" className="btn-secondary btn-sm">Open Team &amp; Roles →</Link>
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
               {USER_ROLES.map((r) => (

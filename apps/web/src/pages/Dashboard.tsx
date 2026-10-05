@@ -8,7 +8,8 @@ import {
   ROLE_LABELS,
   type DashboardCardKey,
 } from '@janelle/shared';
-import { Page, PageHeading, StatTile, Card, Pill, money, shortDate } from '../components/ui';
+import { Page, PageHeading, Card, Pill, money, shortDate } from '../components/ui';
+import { Avatar, HUE, HueDot, hueFor, type Hue } from '../components/hue';
 import { IconArrow, IconBell, IconInbox, IconReport, IconSettings } from '../components/icons';
 import {
   useDashboard, useFollowUps, usePurchaseOrders, useOps,
@@ -526,10 +527,13 @@ function MorningDigest() {
                           >
                             <span className="min-w-0 flex-1">
                               <span className="block truncate text-[13px] font-medium text-ink">{r.title}</span>
-                              <span className="mt-0.5 block truncate text-[11.5px] text-ink-faint">
-                                {r.owner}
-                                {r.project && r.project !== '—' ? ` · ${r.project}` : ''}
-                                {r.status === 'blocked' ? ' · blocked' : ''}
+                              <span className="mt-1 flex min-w-0 items-center gap-1.5 text-[11.5px] text-ink-faint">
+                                {r.owner && <Avatar name={r.owner} size={18} />}
+                                <span className="truncate">
+                                  {r.owner}
+                                  {r.project && r.project !== '—' ? ` · ${r.project}` : ''}
+                                  {r.status === 'blocked' ? ' · blocked' : ''}
+                                </span>
                               </span>
                             </span>
                             <span
@@ -602,16 +606,46 @@ const CARD_HINTS: Partial<Record<DashboardCardKey, string>> = {
   escalations: 'overdue and escalated to you',
 };
 
+/** Each figure's own colour, so the row of tiles reads as different things at a glance. */
+const CARD_HUE: Record<DashboardCardKey, Hue> = {
+  myOpenTasks: 'sky',
+  myOverdueTasks: 'orange',
+  unassignedTasks: 'amber',
+  tasksWithoutNextStep: 'violet',
+  openFollowUps: 'amber',
+  awaitingClient: 'pink',
+  draftsPending: 'pink',
+  specGaps: 'violet',
+  openPOs: 'indigo',
+  activeProjects: 'green',
+  installsSoon: 'teal',
+  emailsRead: 'teal',
+  documentsParsed: 'sky',
+  escalations: 'orange',
+};
+
+const URGENT_TEXT = { crit: 'text-crit', warn: 'text-warn' } as const;
+const URGENT_BAR = { crit: 'border-t-crit', warn: 'border-t-warn' } as const;
+const URGENT_DOT = { crit: 'bg-crit', warn: 'bg-warn' } as const;
+
 function RoleCard({ cardKey, value }: { cardKey: DashboardCardKey; value: number }) {
-  const tone = value > 0 ? (URGENT[cardKey] ?? 'neutral') : 'neutral';
+  // Red or amber only while there is something late in it — otherwise the
+  // tile's own colour. Status keeps its meaning; colour alone says "which".
+  const urgent = value > 0 ? URGENT[cardKey] : undefined;
+  const hue = HUE[CARD_HUE[cardKey]];
+  const hint = CARD_HINTS[cardKey];
   return (
     <Link to={DASHBOARD_CARD_LINKS[cardKey]} className="focusable block h-full rounded-xl">
-      <StatTile
-        label={DASHBOARD_CARD_LABELS[cardKey]}
-        value={value}
-        tone={tone}
-        hint={CARD_HINTS[cardKey]}
-      />
+      <Card className={`flex h-full flex-col border-t-[3px] p-5 ${urgent ? URGENT_BAR[urgent] : hue.top}`}>
+        <div className="flex items-center gap-2">
+          <span className={`h-2.5 w-2.5 shrink-0 rounded-[3px] ${urgent ? URGENT_DOT[urgent] : hue.dot}`} aria-hidden="true" />
+          <div className="text-[12.5px] font-medium text-ink-soft">{DASHBOARD_CARD_LABELS[cardKey]}</div>
+        </div>
+        <div className={`mt-2.5 text-[30px] font-bold leading-none tracking-[-0.02em] tabular-nums ${urgent ? URGENT_TEXT[urgent] : hue.text}`}>
+          {value}
+        </div>
+        {hint && <div className="mt-auto pt-2 text-[12.5px] text-ink-faint">{hint}</div>}
+      </Card>
     </Link>
   );
 }
@@ -641,9 +675,9 @@ export default function Dashboard() {
   const recentPos = pos.slice(0, 5);
 
   const intel = [
-    { label: 'Emails read', value: summary.figures.emailsRead, hint: 'classified & linked to projects', to: '/inbox' },
-    { label: 'Documents parsed', value: summary.figures.documentsParsed, hint: 'quotes & order confirmations', to: '/documents' },
-    { label: 'Reply drafts', value: summary.figures.draftsPending, hint: 'waiting in Gmail for review', to: '/drafts' },
+    { label: 'Emails read', value: summary.figures.emailsRead, hint: 'classified & linked to projects', to: '/inbox', hue: 'teal' as Hue },
+    { label: 'Documents parsed', value: summary.figures.documentsParsed, hint: 'quotes & order confirmations', to: '/documents', hue: 'sky' as Hue },
+    { label: 'Reply drafts', value: summary.figures.draftsPending, hint: 'waiting in Gmail for review', to: '/drafts', hue: 'pink' as Hue },
   ];
 
   return (
@@ -681,8 +715,11 @@ export default function Dashboard() {
             {intel.map((i) => (
               <Link key={i.label} to={i.to} className="focusable group flex items-center justify-between gap-4 px-5 py-4 transition-colors hover:bg-sunk/60">
                 <div>
-                  <div className="text-[12.5px] font-medium text-ink-soft">{i.label}</div>
-                  <div className="mt-1 text-[26px] font-bold leading-none tracking-[-0.02em] tabular-nums text-ink">{i.value}</div>
+                  <div className="flex items-center gap-2 text-[12.5px] font-medium text-ink-soft">
+                    <span className={`h-2.5 w-2.5 shrink-0 rounded-[3px] ${HUE[i.hue].dot}`} aria-hidden="true" />
+                    {i.label}
+                  </div>
+                  <div className={`mt-1 text-[26px] font-bold leading-none tracking-[-0.02em] tabular-nums ${HUE[i.hue].text}`}>{i.value}</div>
                   <div className="mt-1.5 text-[12px] text-ink-faint">{i.hint}</div>
                 </div>
                 <IconArrow className="text-ink-faint transition-colors group-hover:text-brass-deep" width={16} height={16} />
@@ -714,7 +751,10 @@ export default function Dashboard() {
                 </div>
                 <div className="whitespace-nowrap text-right">
                   <div className="text-[12.5px] font-medium text-ink-soft">{f.age}</div>
-                  <div className="text-[11.5px] text-ink-faint">{f.project}</div>
+                  <div className="flex items-center justify-end gap-1.5 text-[11.5px] text-ink-faint">
+                    {f.project && f.project !== '—' && <HueDot hue={hueFor(f.project)} />}
+                    {f.project}
+                  </div>
                 </div>
               </li>
             ))}

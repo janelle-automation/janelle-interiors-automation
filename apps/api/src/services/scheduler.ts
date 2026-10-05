@@ -10,7 +10,18 @@ import { claimCronSlot } from '../lib/cronSlot.js';
 import { sweepJobs } from './mediaJobs.js';
 import { keepGoogleAlive } from './googleKeepalive.js';
 import { runMiddayReminder } from './middayReminder.js';
+import { runSlackReport } from './slackReport.js';
 import { pacificHourNow } from '../lib/pacificTime.js';
+import {
+  INGEST_RAN_FIELD,
+  MIDDAY_REMINDER_COOLDOWN_MS,
+  MIDDAY_REMINDER_HOURS,
+  MIDDAY_REMINDER_RAN_FIELD,
+  SLACK_REPORT_COOLDOWN_MS,
+  SLACK_REPORT_HOURS,
+  SLACK_REPORT_RAN_FIELD,
+  TASK_REVIEW_RAN_FIELD,
+} from '../lib/cronJobs.js';
 
 async function forEachOrg(fn: (orgId: string) => Promise<unknown>, label: string) {
   if (!supabaseAdmin) return;
@@ -25,143 +36,116 @@ async function forEachOrg(fn: (orgId: string) => Promise<unknown>, label: string
 }
 
 /**
- * The ingest tick fires every minute; each studio is then read only as
- * often as it has asked to be (Settings → Reading email, default every
- * 10 minutes, and "Only when I ask" turns it off entirely).
- *
- * This used to be a hard-coded six-field cron firing every five seconds.
- * That is a lot of Gmail and Supabase traffic, and since every NEW email costs
- * a Claude call to read, a busy inbox turned into a bill nobody chose.
- * Re-reading the setting each tick means a change takes effect within the
- * minute, with no restart.
+ * Run `fn` on a cron pattern, skipping a tick while the previous run is
+ * still going — a slow Gmail or provider must not stack runs on top of
+ * each other. `utc` pins the daily jobs to the same UTC times vercel.json
+ * used, whatever the server's own time zone is.
  */
-const INGEST_TICK = '* * * * *'; // every minute; the studio decides the rest
-let ingestRunning = false;
-
-/** One media sweep at a time: they poll a provider and can overlap. */
-let mediaRunning = false;
-
-/** One hourly task review at a time. */
-let reviewRunning = false;
-
-/** When each org was last read, so an interval can be honoured. */
-const lastIngest = new Map<string, number>();
-
-async function ingestDueOrgs(): Promise<void> {
-  if (!supabaseAdmin) return;
-  const { data: orgs } = await supabaseAdmin.from('organizations').select('id');
-
-  for (const org of orgs ?? []) {
-    const orgId = (org as { id: string }).id;
-    try {
-      const { intervalMinutes } = await readIngestSettings(orgId);
-      if (intervalMinutes <= 0) continue; // reading on demand only
-
-      const last = lastIngest.get(orgId) ?? 0;
-      if (Date.now() - last < intervalMinutes * 60_000) continue;
-
-      lastIngest.set(orgId, Date.now());
-      await runIngest(orgId);
-
-      // Straight after reading the mail, while the replies that answer a
-      // nudge are the newest thing in the system. Waiting for the 2am engine
-      // meant a follow-up settled at nine in the morning sat in the review
-      // queue all day.
-      await resolveFollowUps(orgId);
-
-      // Same moment, same reason: a thread that moved since a task was
-      // raised means somebody is on it, and the board should show that
-      // without being told.
-      await advanceActiveTasks(orgId);
-    } catch (err) {
-      console.error(`[scheduler] ingest failed for org ${orgId}:`, (err as Error).message);
-    }
-  }
+function every(pattern: string, label: string, fn: () => Promise<unknown>, utc = false): void {
+  let running = false;
+  cron.schedule(
+    pattern,
+    () => {
+      if (running) return;
+      running = true;
+      void fn()
+        .catch((err) => console.error(`[scheduler] ${label} failed:`, (err as Error).message))
+        .finally(() => {
+          running = false;
+        });
+    },
+    utc ? { timezone: 'Etc/UTC' } : undefined,
+  );
 }
 
 /**
- * Register the background jobs. No-op until Supabase is configured, so
- * it is always safe to call at startup.
- *   • every minute  — read email for any studio whose interval is due
- *   • nightly 02:00 — raise follow-ups and draft nudges
- *   • Monday 07:00  — generate the weekly report
+ * Register the background jobs — the long-running-server twin of the
+ * /api/ops/cron/* endpoints, with the same gates and the same claim fields
+ * (lib/cronJobs.ts). Because the "last ran" marks live in the database, not
+ * in this process, a restart does not reset anyone's interval, and a second
+ * clock (a laptop running `npm run dev`, or pg_cron left switched on) is
+ * refused by the claim rather than doing the work twice.
+ *
+ * Ticks are free here, so they run at the fastest pace any setting needs;
+ * each studio's own Settings choice decides the rest. No-op until Supabase
+ * is configured, and SCHEDULER=off turns it off (e.g. a dev machine).
  */
 export function startScheduler(): void {
   if (!supabaseAdmin) {
     console.log('  ▸ Scheduler idle (Supabase not configured)');
     return;
   }
+  if ((process.env.SCHEDULER ?? '').toLowerCase() === 'off') {
+    console.log('  ▸ Scheduler off (SCHEDULER=off)');
+    return;
+  }
 
-  cron.schedule(INGEST_TICK, () => {
-    if (ingestRunning) return; // skip while a run is already in progress
-    ingestRunning = true;
-    void ingestDueOrgs().finally(() => {
-      ingestRunning = false;
-    });
-  });
+  // Read the mail of every studio that is due, then act on it in the same
+  // pass: a reply that settles a nudge, or a thread that moved since a task
+  // was raised, should show without waiting for another job.
+  every('* * * * *', 'ingest', () =>
+    forEachOrg(async (id) => {
+      const { intervalMinutes } = await readIngestSettings(id);
+      if (intervalMinutes <= 0) return; // "Only when I ask"
+      if (!(await claimCronSlot(id, INGEST_RAN_FIELD, intervalMinutes * 60_000))) return;
+      await runIngest(id);
+      await resolveFollowUps(id);
+      await advanceActiveTasks(id);
+    }, 'ingest'),
+  );
 
-  // Put each live task beside the mail since it was raised and close the
-  // ones that are plainly finished, as often as the studio chose in Settings
-  // (default hourly). Only tasks with new mail cost a Claude call.
-  cron.schedule('*/5 * * * *', () => {
-    if (reviewRunning) return;
-    reviewRunning = true;
-    void forEachOrg(async (id) => {
+  // Close the tasks the mail since they were raised shows are done, as often
+  // as the studio chose in Settings (default hourly).
+  every('*/5 * * * *', 'task review', () =>
+    forEachOrg(async (id) => {
       const { taskReviewMinutes } = await readIngestSettings(id);
       if (taskReviewMinutes <= 0) return;
-      if (!(await claimCronSlot(id, 'task_review_ran_at', taskReviewMinutes * 60_000))) return;
+      if (!(await claimCronSlot(id, TASK_REVIEW_RAN_FIELD, taskReviewMinutes * 60_000))) return;
       await reviewOpenTasks(id);
-    }, 'task review').finally(() => {
-      reviewRunning = false;
-    });
-  });
+      await resolveFollowUps(id);
+    }, 'task review'),
+  );
 
-  cron.schedule('0 2 * * *', () => {
-    void forEachOrg((id) => runFollowUps(id), 'followups');
-  });
+  // Finished video clips nobody is watching, fetched before the provider's
+  // temporary link expires.
+  every('*/2 * * * *', 'media', () => forEachOrg((id) => sweepJobs(id), 'media'));
 
-  // 9am and 5pm Pacific, whatever the server's own time zone is (see
-  // routes/ops.ts's matching /cron/midday-reminder for why this polls, and
-  // for the cooldown that lets both daily hours fire without a duplicate).
-  cron.schedule('*/15 * * * *', () => {
-    if (![9, 17].includes(pacificHourNow())) return;
-    void forEachOrg(async (id) => {
-      if (!(await claimCronSlot(id, 'midday_reminder_ran_at', 4 * 3600_000))) return;
+
+  // 9am and 5pm Pacific, read from the wall clock so PST/PDT needs no edit.
+  every('*/15 * * * *', 'task reminder', async () => {
+    if (!MIDDAY_REMINDER_HOURS.includes(pacificHourNow())) return;
+    await forEachOrg(async (id) => {
+      if (!(await claimCronSlot(id, MIDDAY_REMINDER_RAN_FIELD, MIDDAY_REMINDER_COOLDOWN_MS))) return;
       await runMiddayReminder(id);
-    }, 'midday reminder');
+    }, 'task reminder');
   });
 
-  // Video finishes a minute or two after the request that started it, and
-  // the provider's URL for a finished clip is temporary. A person watching
-  // the screen polls it themselves; this is for the one who closed the tab.
-  cron.schedule('*/2 * * * *', () => {
-    if (mediaRunning) return;
-    mediaRunning = true;
-    void forEachOrg((id) => sweepJobs(id), 'media').finally(() => {
-      mediaRunning = false;
-    });
+  // The completed / pending / overdue reports to their Slack channels, at
+  // 9am, midday and 5pm Pacific. They replaced the per-task posts and the
+  // daily reminder, which flooded one channel.
+  every('*/15 * * * *', 'slack report', async () => {
+    if (!SLACK_REPORT_HOURS.includes(pacificHourNow())) return;
+    await forEachOrg(async (id) => {
+      if (!(await claimCronSlot(id, SLACK_REPORT_RAN_FIELD, SLACK_REPORT_COOLDOWN_MS))) return;
+      await runSlackReport(id);
+    }, 'slack report');
   });
 
-  // Morning digest, every day — the push that means nobody has to log in.
-  // Offset past the weekly report so Monday does not run both at once.
-  cron.schedule('5 7 * * *', () => {
-    void forEachOrg((id) => runDigest(id), 'digest');
-  });
-
-  cron.schedule('0 7 * * 1', () => {
-    void forEachOrg((id) => runReport(id), 'report');
-  });
+  // The daily and weekly jobs, at the UTC times vercel.json gave them.
+  every('0 2 * * *', 'follow-ups', () => forEachOrg((id) => runFollowUps(id), 'follow-ups'), true);
+  every('5 7 * * *', 'digest', () => forEachOrg((id) => runDigest(id), 'digest'), true);
+  every('0 7 * * 1', 'report', () => forEachOrg((id) => runReport(id), 'report'), true);
 
   // Every Google connection refreshed, so none sits idle until Google
   // expires it — and a revoked one is found by this, not by a failed read.
-  const keepalive = () =>
-    void keepGoogleAlive()
-      .then((r) => console.log(`[google] keep-alive: ${r.healthy}/${r.checked} healthy, ${r.needReconnect} need reconnect, ${r.transient} retry later`))
-      .catch((err) => console.error('[google] keep-alive failed:', (err as Error).message));
-  cron.schedule('15 */6 * * *', keepalive);
-  keepalive();
+  const keepalive = async () => {
+    const r = await keepGoogleAlive();
+    console.log(`[google] keep-alive: ${r.healthy}/${r.checked} healthy, ${r.needReconnect} need reconnect, ${r.transient} retry later`);
+  };
+  every('15 */6 * * *', 'google keep-alive', keepalive);
+  void keepalive().catch((err) => console.error('[google] keep-alive failed:', (err as Error).message));
 
   console.log(
-    '  ▸ Scheduler started (email: per-studio interval · follow-ups 02:00 · task reminder 9am & 5pm Pacific · digest 07:05 · report Mon 07:00 · media every 2 min · Google keep-alive every 6h)',
+    '  ▸ Scheduler started (email & task review: per-studio interval · media 2 min · reminders 9am & 5pm Pacific · Slack task reports 9am, 12pm & 5pm Pacific · follow-ups 02:00 UTC · digest 07:05 UTC · report Mon 07:00 UTC · Google keep-alive 6h)',
   );
 }
