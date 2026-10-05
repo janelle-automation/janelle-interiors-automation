@@ -61,20 +61,14 @@ from a developer machine, not from Vercel.
 
 ## Scheduled work
 
-Self-hosted, `services/scheduler.ts` polls Gmail and Drive **every 5 seconds**
-and runs follow-ups and the weekly report on timers. A serverless function has
-no long-running process, so on Vercel that scheduler never starts. Vercel Cron
-calls these endpoints instead, authenticated with `CRON_SECRET`:
+**The app is now self-hosted at https://janelle.dev-build.in** (see
+`deploy/README.md`): `services/scheduler.ts` (node-cron) runs every scheduled
+job in the API process, and migration 0031 switches the Supabase pg_cron jobs
+off. Vercel Cron is not used (`vercel.json` has no `crons`).
 
-| Endpoint | Registered schedule |
-| --- | --- |
-| `/api/ops/cron/follow-ups` | `0 2 * * *` — nightly |
-| `/api/ops/cron/report` | `0 7 * * 1` — Monday morning |
-| `/api/ops/cron/ingest` | every minute, from Supabase pg_cron — see below |
-| `/api/ops/cron/digest` | `5 7 * * *` — every morning |
-| `/api/ops/cron/media` | every 2 minutes, from Supabase pg_cron — see below |
-| `/api/ops/cron/tasks` | every 5 minutes, from Supabase pg_cron — see below |
-| `/api/ops/cron/midday-reminder` | polled every 15 minutes, from Supabase pg_cron — see below |
+If the app ever goes back to Vercel, a serverless function cannot hold
+node-cron timers: re-run 0021, 0022, 0024, 0027 and 0028 so Supabase pg_cron
+calls the `/api/ops/cron/*` endpoints again, authenticated with `CRON_SECRET`.
 
 > **Never register a cron more often than once a day on Hobby.** Vercel rejects
 > the whole deployment, after a build that passed, with only "Deployment
@@ -87,20 +81,13 @@ everything more frequent is scheduled by **Supabase** instead: `pg_cron`
 fires the job and `pg_net` calls the endpoint with the bearer secret. Nothing
 is set in Vercel's cron settings or GitHub for these.
 
-| Supabase job | Schedule | Migration |
-| --- | --- | --- |
-| `task-review` → `/tasks` | `*/5 * * * *` | `0021_task_review_cron.sql` |
-| `email-ingest` → `/ingest` | `* * * * *` | `0022_ingest_and_media_cron.sql` |
-| `media-sweep` → `/media` | `*/2 * * * *` | `0022_ingest_and_media_cron.sql` |
-| `midday-reminder` → `/midday-reminder` | `*/15 * * * *` | `0024_midday_reminder_cron.sql` |
-
 Setup, once, in the Supabase SQL editor: store the address and secret in
 Vault (`app_url`, and `cron_secret` — the same value as `CRON_SECRET` on
-Vercel; 0021's header has the two lines), then run 0021, 0022 and 0024.
+Vercel; 0021's header has the two lines), then run 0021, 0022, 0024, 0027 and 0028.
 Recent runs are in `cron.job_run_details`, and each call's HTTP status in
 `net._http_response`. A 401 there means the Vault secret and Vercel's differ.
 
-**`/api/ops/cron/ingest`** is called every minute, but reads each studio only
+**`/api/ops/cron/ingest`** is called only when a studio is due, and reads each studio only
 as often as it chose in Settings → Reading email (the last start is kept in
 `settings.ingest_ran_at`), and never a studio set to "Only when I ask". Most
 calls therefore do nothing. Add `?force=1` to read every studio at once.

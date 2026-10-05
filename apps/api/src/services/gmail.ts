@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { google, type gmail_v1 } from 'googleapis';
+import { gmail as gmailApi, type gmail_v1 } from '@googleapis/gmail';
 import { googleClientForUser, orgSourceUserId } from '../lib/tokens.js';
 import { STUDIO_DOMAINS, isStudioAddress } from '../lib/studioTeam.js';
 
@@ -63,7 +63,7 @@ export function addressesOf(header: string): string[] {
 export async function gmailFor(userId: string): Promise<gmail_v1.Gmail | null> {
   const auth = await googleClientForUser(userId, 'gmail');
   if (!auth) return null;
-  return google.gmail({ version: 'v1', auth });
+  return gmailApi({ version: 'v1', auth });
 }
 
 /** Gmail client for whichever account the studio's Google connection runs through. */

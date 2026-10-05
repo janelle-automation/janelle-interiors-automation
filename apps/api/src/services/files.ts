@@ -1,4 +1,11 @@
-import { PDFDocument } from 'pdf-lib';
+import type { PDFDocument } from 'pdf-lib';
+
+/**
+ * pdf-lib, loaded on first use. It costs over half a second of CPU to load,
+ * and on Vercel every cold start would pay that — including the scheduled
+ * calls that never touch a PDF.
+ */
+const pdfLib = () => import('pdf-lib');
 import type { FileGrant } from '../lib/fileTokens.js';
 import { isGoogleAuthFailure, orgSourceUserId } from '../lib/tokens.js';
 import { downloadAttachment, gmailFor, gmailMessageUrl } from './gmail.js';
@@ -67,6 +74,7 @@ const isPdf = (mimeType: string, name: string) => mimeType === 'application/pdf'
 /** How many pages a PDF has, or null when it cannot be opened. */
 export async function pdfPageCount(bytes: Buffer): Promise<number | null> {
   try {
+    const { PDFDocument } = await pdfLib();
     const doc = await PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
     return doc.getPageCount();
   } catch {
@@ -101,6 +109,7 @@ export interface PdfCutter {
  * file cannot be opened at all.
  */
 export async function pdfCutter(bytes: Buffer): Promise<PdfCutter | null> {
+  const { PDFDocument } = await pdfLib();
   let source: PDFDocument;
   try {
     source = await PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });

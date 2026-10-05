@@ -37,6 +37,7 @@ import { loadDirectory, matchChannel } from '../services/slackRouting.js';
 import { runSlackDigest, type SlackDigestResult } from '../services/slackDigest.js';
 import { hasColumn } from '../lib/columns.js';
 import { runSlackSync } from '../services/slackSync.js';
+import { runSlackReport } from '../services/slackReport.js';
 import { clearGeminiKey, keyFor, looksLikeGeminiKey, routingView, saveGeminiKey, saveRoute } from '../lib/llmSettings.js';
 import { complete as completeWith, costOf } from '../services/llm.js';
 import { firstJson } from '../services/anthropic.js';
@@ -572,7 +573,7 @@ settingsRouter.put(
     if (!orgId) return res.status(400).json({ error: 'No organization for user' });
 
     const b = req.body ?? {};
-    const patch: { channel?: string; enabled?: boolean; tasks?: boolean; followUps?: boolean; dailyDigest?: boolean } = {};
+    const patch: Parameters<typeof saveSlackConfig>[1] = {};
     if ('channel' in b) {
       const channel = String(b.channel ?? '').trim();
       if (!CHANNEL.test(channel)) {
@@ -582,6 +583,19 @@ settingsRouter.put(
     }
     for (const key of ['enabled', 'tasks', 'followUps', 'dailyDigest'] as const) {
       if (key in b) patch[key] = Boolean(b[key]);
+    }
+    // The three task-report channels. Blank switches that report off.
+    if (b.reportChannels && typeof b.reportChannels === 'object') {
+      const rc: Record<string, string> = {};
+      for (const key of ['completed', 'pending', 'overdue'] as const) {
+        if (!(key in b.reportChannels)) continue;
+        const channel = String(b.reportChannels[key] ?? '').trim();
+        if (channel && !CHANNEL.test(channel)) {
+          return res.status(400).json({ error: `The ${key} channel should look like ${key}-tasks (lowercase, no spaces), or paste the channel ID.` });
+        }
+        rc[key] = channel;
+      }
+      patch.reportChannels = rc;
     }
     if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to change' });
 
@@ -627,6 +641,17 @@ settingsRouter.post(
     const orgId = req.auth!.orgId;
     if (!orgId) return res.status(400).json({ error: 'No organization for user' });
     res.json({ data: await runSlackDigest(orgId) });
+  }),
+);
+
+// Post the completed / pending / overdue reports now instead of at the next 9am, midday or 5pm.
+settingsRouter.post(
+  '/slack/report',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await runSlackReport(orgId) });
   }),
 );
 

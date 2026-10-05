@@ -6,8 +6,7 @@
   "outputDirectory": "apps/web/dist",
   "functions": {
     "api/index.mjs": {
-      "maxDuration": 60,
-      "memory": 1024
+      "maxDuration": 60
     }
   },
   "rewrites": [
@@ -18,24 +17,6 @@
     {
       "source": "/((?!api/).*)",
       "destination": "/index.html"
-    }
-  ],
-  "crons": [
-    {
-      "path": "/api/ops/cron/follow-ups",
-      "schedule": "0 2 * * *"
-    },
-    {
-      "path": "/api/ops/cron/report",
-      "schedule": "0 7 * * 1"
-    },
-    {
-      "path": "/api/ops/cron/digest",
-      "schedule": "5 7 * * *"
-    },
-    {
-      "path": "/api/ops/cron/google-keepalive",
-      "schedule": "30 1 * * *"
     }
   ]
 }

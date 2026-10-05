@@ -9,10 +9,11 @@ import { AssistantLauncher, AssistantPanel } from './AssistantPanel';
 import { TaskReminder } from './TaskReminder';
 import { ConnectGooglePrompt } from './ConnectGooglePrompt';
 import { endImpersonation, readImpersonation } from '../lib/impersonate';
+import { HUE, type Hue } from './hue';
 import { ASSISTANT_NAME, ROLE_LABELS, canSupervise, type Resource } from '@janelle/shared';
 import {
   IconDashboard, IconProjects, IconVendors, IconDoc,
-  IconPrompt, IconBell, IconInbox, IconTask, IconAssistant, IconTeam, IconKey, IconSettings, IconSun, IconMoon,
+  IconPrompt, IconBell, IconInbox, IconTask, IconAssistant, IconSettings, IconDraft, IconSun, IconMoon,
   IconLogout, IconArrow,
 } from './icons';
 
@@ -23,6 +24,8 @@ type NavItem = {
   end?: boolean;
   /** The module this page is. Hidden when the role may not view it. */
   needs?: Resource;
+  /** The icon's own colour, so each page is found by colour as well as by name. */
+  hue?: Hue;
   /**
    * For a screen that exists to CHANGE something rather than to read it.
    *
@@ -46,31 +49,15 @@ type NavItem = {
 };
 
 const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
-  {
-    title: 'Studio',
-    items: [
-      { to: '/', label: 'Dashboard', Icon: IconDashboard, end: true },
-      { to: '/projects', label: 'Projects', Icon: IconProjects, needs: 'projects' },
-      { to: '/vendors', label: 'Vendors & Orders', Icon: IconVendors, needs: 'vendors' },
-    ],
-  },
-  {
-    title: 'Intelligence',
-    items: [
-      { to: '/documents', label: 'Documents', Icon: IconDoc, needs: 'documents' },
-      { to: '/prompts', label: 'Prompt Studio', Icon: IconPrompt, needs: 'prompts' },
-    ],
-  },
+  // First: the day-to-day work. Slack is set up under Settings → Slack.
   {
     title: 'Automation',
     items: [
-      { to: '/follow-ups', label: 'Follow-ups', Icon: IconBell, needs: 'follow_ups' },
-      { to: '/assistant', label: ASSISTANT_NAME, Icon: IconAssistant },
-      { to: '/tasks', label: 'Tasks', Icon: IconTask, needs: 'tasks' },
-      { to: '/inbox', label: 'Inbox', Icon: IconInbox, needs: 'emails' },
-      // The Slack setup lives on a Settings tab; the menu goes straight to it.
-      { to: '/settings?tab=slack', label: 'Slack', Icon: IconBell, needsWrite: 'settings' },
-      { to: '/drafts', label: 'Drafts', Icon: IconDoc, needs: 'drafts' },
+      { to: '/follow-ups', label: 'Top Priority Actions', Icon: IconBell, needs: 'follow_ups', hue: 'amber' },
+      { to: '/assistant', label: ASSISTANT_NAME, Icon: IconAssistant, hue: 'violet' },
+      { to: '/tasks', label: 'Tasks', Icon: IconTask, needs: 'tasks', hue: 'sky' },
+      { to: '/inbox', label: 'Inbox', Icon: IconInbox, needs: 'emails', hue: 'teal' },
+      { to: '/drafts', label: 'Drafts', Icon: IconDraft, needs: 'drafts', hue: 'pink' },
       // Reports and Audit Log are out of the menu on purpose. The pages still work at
       // /reports and /activity; add the lines back to show them:
       //   { to: '/reports', label: 'Reports', Icon: IconReport, needs: 'reports' },
@@ -78,10 +65,14 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     ],
   },
   {
-    title: 'Admin',
+    // Team & Roles and Permissions are tabs under Settings.
+    title: 'Studio',
     items: [
-      { to: '/team', label: 'Team & Roles', Icon: IconTeam, needsWrite: 'team' },
-      { to: '/permissions', label: 'Permissions', Icon: IconKey, principalOnly: true },
+      { to: '/', label: 'Dashboard', Icon: IconDashboard, end: true, hue: 'green' },
+      { to: '/projects', label: 'Projects', Icon: IconProjects, needs: 'projects', hue: 'orange' },
+      { to: '/vendors', label: 'Vendors & Orders', Icon: IconVendors, needs: 'vendors', hue: 'indigo' },
+      { to: '/documents', label: 'Documents', Icon: IconDoc, needs: 'documents', hue: 'sky' },
+      { to: '/prompts', label: 'Prompt Studio', Icon: IconPrompt, needs: 'prompts', hue: 'violet' },
     ],
   },
 ];
@@ -97,7 +88,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/prompts': 'Prompt Studio',
   '/assistant': ASSISTANT_NAME,
   '/tasks': 'Tasks',
-  '/follow-ups': 'Follow-ups',
+  '/follow-ups': 'Top Priority Actions',
   '/drafts': 'Drafts',
   '/reports': 'Reports',
   '/activity': 'Audit Log',
@@ -135,21 +126,14 @@ function Brand({ collapsed }: { collapsed: boolean }) {
 }
 
 function NavItemLink({ item, collapsed, onNavigate }: { item: NavItem; collapsed: boolean; onNavigate?: () => void }) {
-  const { to, label, Icon, end } = item;
-  const { search } = useLocation();
-  // A link into a Settings tab is active only on that tab, and Settings itself
-  // is not active while that tab is open.
-  const toSearch = to.split('?')[1];
-  const onSlackTab = new URLSearchParams(search).get('tab') === 'slack';
-  const tabActive = (path: boolean) => (toSearch ? path && onSlackTab : to === '/settings' ? path && !onSlackTab : path);
+  const { to, label, Icon, end, hue } = item;
   return (
     <NavLink
       to={to}
-      end={end || !!toSearch}
+      end={end}
       onClick={onNavigate}
       title={collapsed ? label : undefined}
-      className={({ isActive: a }) => {
-        const isActive = tabActive(a);
+      className={({ isActive }) => {
         return `focusable group relative flex items-center gap-3 rounded-lg text-[14px] transition-colors ${
           collapsed ? 'justify-center px-0 py-2.5' : 'px-3 py-[9px]'
         } ${
@@ -159,14 +143,22 @@ function NavItemLink({ item, collapsed, onNavigate }: { item: NavItem; collapsed
         }`;
       }}
     >
-      {({ isActive: a }) => {
-        const isActive = tabActive(a);
+      {({ isActive }) => {
         return (
         <>
           {isActive && (
             <span className="absolute -left-3 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r bg-brass" aria-hidden="true" />
           )}
-          <Icon className={`shrink-0 ${isActive ? 'text-brass' : 'text-nav-muted group-hover:text-nav-text'}`} />
+          {/* Each page keeps its colour; the active one is lit up in it. */}
+          {/* Just the glyph in the page's colour — no box around it. The
+              active row is already marked by its background and the bar. */}
+          <span
+            className={`grid h-6 w-6 shrink-0 place-items-center transition-transform ${
+              hue ? `${HUE[hue].nav} group-hover:scale-110` : isActive ? 'text-brass' : 'text-nav-muted group-hover:text-nav-text'
+            }`}
+          >
+            <Icon width={19} height={19} strokeWidth={isActive ? 2.2 : 1.9} />
+          </span>
           {!collapsed && <span className="truncate">{label}</span>}
         </>
         );

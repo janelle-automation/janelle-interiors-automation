@@ -24,6 +24,13 @@ const TOKEN_FIELD = 'slack_bot_token_encrypted';
 const CONFIG_FIELD = 'slack_config';
 const SYNC_FIELD = 'slack_sync';
 
+/** Where each task report goes (services/slackReport.ts). Blank = that report is not sent. */
+export interface ReportChannels {
+  completed: string;
+  pending: string;
+  overdue: string;
+}
+
 export interface SlackConfig {
   /** Channel name (#project-updates) or ID. */
   channel: string;
@@ -36,6 +43,8 @@ export interface SlackConfig {
   followUps: boolean;
   /** The once-a-day reminder of what is overdue, due and waiting. */
   dailyDigest: boolean;
+  /** The completed / pending / overdue task reports, three times a day. */
+  reportChannels: ReportChannels;
 }
 
 export interface SlackSyncState {
@@ -65,12 +74,26 @@ export interface SlackSettingsView {
   tasks: boolean;
   followUps: boolean;
   dailyDigest: boolean;
+  reportChannels: ReportChannels;
   lastRunAt: string | null;
   lastPosted: number;
   lastError: string | null;
 }
 
-const DEFAULTS: SlackConfig = { channel: '', enabled: true, enabledAt: null, tasks: true, followUps: true, dailyDigest: true };
+const NO_REPORT_CHANNELS: ReportChannels = { completed: '', pending: '', overdue: '' };
+
+const DEFAULTS: SlackConfig = {
+  channel: '', enabled: true, enabledAt: null, tasks: true, followUps: true, dailyDigest: true,
+  reportChannels: NO_REPORT_CHANNELS,
+};
+
+const cleanChannel = (c: string) => c.trim().replace(/^#/, '');
+
+function readReportChannels(raw: unknown): ReportChannels {
+  const r = (raw ?? {}) as Partial<ReportChannels>;
+  const pick = (v: unknown) => (typeof v === 'string' ? cleanChannel(v) : '');
+  return { completed: pick(r.completed), pending: pick(r.pending), overdue: pick(r.overdue) };
+}
 
 async function readSettings(orgId: string): Promise<Record<string, unknown>> {
   if (!supabaseAdmin) return {};
@@ -94,6 +117,7 @@ function readConfig(settings: Record<string, unknown>): SlackConfig {
     tasks: raw.tasks !== false,
     followUps: raw.followUps !== false,
     dailyDigest: raw.dailyDigest !== false,
+    reportChannels: readReportChannels(raw.reportChannels),
   };
 }
 
@@ -162,10 +186,17 @@ export async function clearSlackToken(orgId: string): Promise<void> {
  * first switched on (or switched back on), so the channel is not flooded with
  * the whole backlog the moment an admin connects it.
  */
-export async function saveSlackConfig(orgId: string, patch: Partial<Omit<SlackConfig, 'enabledAt'>>): Promise<void> {
+export async function saveSlackConfig(
+  orgId: string,
+  patch: Partial<Omit<SlackConfig, 'enabledAt' | 'reportChannels'>> & { reportChannels?: Partial<ReportChannels> },
+): Promise<void> {
   const current = readConfig(await readSettings(orgId));
-  const next: SlackConfig = { ...current, ...patch };
-  if (patch.channel !== undefined) next.channel = patch.channel.trim().replace(/^#/, '');
+  const next: SlackConfig = {
+    ...current,
+    ...patch,
+    reportChannels: readReportChannels({ ...current.reportChannels, ...patch.reportChannels }),
+  };
+  if (patch.channel !== undefined) next.channel = cleanChannel(patch.channel);
   if (next.enabled && (!current.enabled || !current.enabledAt)) next.enabledAt = new Date().toISOString();
   await mergeSettings(orgId, { [CONFIG_FIELD]: next });
 }
@@ -185,6 +216,7 @@ export async function slackSettingsView(orgId: string): Promise<SlackSettingsVie
     tasks: resolved.config.tasks,
     followUps: resolved.config.followUps,
     dailyDigest: resolved.config.dailyDigest,
+    reportChannels: resolved.config.reportChannels,
     lastRunAt: sync.lastRunAt ?? null,
     lastPosted: sync.lastPosted ?? 0,
     lastError: sync.lastError ?? null,

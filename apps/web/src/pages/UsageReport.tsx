@@ -7,6 +7,7 @@ import {
   type AiFeature,
 } from '@janelle/shared';
 import { publicApi } from '../lib/api';
+import { useTable, SortTh, SearchInput, TablePager, matches } from '../components/table';
 
 /**
  * The AI usage report, reachable only by its link.
@@ -314,45 +315,7 @@ export default function UsageReport() {
           <BarList title="By model" buckets={report.by_model} total={totals.cost_usd} />
         )}
 
-        <section className="rounded-xl border border-line bg-panel p-5">
-          <div className="text-[13px] font-semibold text-ink">Most recent calls</div>
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full min-w-[560px] text-[12.5px]">
-              <thead>
-                <tr className="border-b border-line text-left text-ink-faint">
-                  <th className="pb-2 font-medium">When</th>
-                  <th className="pb-2 font-medium">Job</th>
-                  <th className="pb-2 font-medium">Who</th>
-                  <th className="pb-2 text-right font-medium">Tokens</th>
-                  <th className="pb-2 text-right font-medium">Cost</th>
-                </tr>
-              </thead>
-              <tbody>
-                {report.recent.map((r) => (
-                  <tr key={r.id} className="border-b border-line/60 last:border-0">
-                    <td className="py-2 text-ink-soft">{when(r.created_at)}</td>
-                    <td className="py-2 text-ink">
-                      {r.feature}
-                      {!r.ok && <span className="ml-2 text-[11px] font-medium text-crit">failed</span>}
-                    </td>
-                    <td className="py-2 text-ink-soft">{r.actor_name ?? 'The agent'}</td>
-                    <td className="py-2 text-right tabular-nums text-ink-soft">
-                      {compact(r.input_tokens + r.output_tokens)}
-                    </td>
-                    <td className="py-2 text-right tabular-nums text-ink">{usd(r.cost_usd)}</td>
-                  </tr>
-                ))}
-                {report.recent.length === 0 && (
-                  <tr>
-                    <td colSpan={5} className="py-6 text-center text-ink-faint">
-                      No calls in this period.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </section>
+        <RecentCalls rows={report.recent} />
 
         <footer className="space-y-1 pb-6 text-[11.5px] text-ink-faint">
           <div>
@@ -367,5 +330,74 @@ export default function UsageReport() {
         </footer>
       </div>
     </div>
+  );
+}
+
+type RecentCall = AiUsageReport['recent'][number];
+
+/** The latest calls: sortable, searchable by job or person, and paged. */
+function RecentCalls({ rows }: { rows: RecentCall[] }) {
+  const [query, setQuery] = useState('');
+  const shown = rows.filter((r) => matches(query, r.feature, r.actor_name ?? 'The agent'));
+  const table = useTable(shown, {
+    storageKey: 'usage',
+    defaultSort: { key: 'when', dir: 'desc' },
+    sorters: {
+      when: (r) => r.created_at,
+      job: (r) => r.feature,
+      who: (r) => r.actor_name ?? 'The agent',
+      tokens: (r) => r.input_tokens + r.output_tokens,
+      cost: (r) => r.cost_usd,
+    },
+  });
+
+  return (
+    <section className="rounded-xl border border-line bg-panel p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="text-[13px] font-semibold text-ink">Most recent calls</div>
+        {rows.length > 0 && (
+          <SearchInput value={query} onChange={setQuery} placeholder="Search job or person" className="w-full sm:w-60" />
+        )}
+      </div>
+      <div className="mt-4 overflow-x-auto">
+        <table className="w-full min-w-[560px] text-[12.5px]">
+          <thead>
+            <tr className="border-b border-line text-left text-ink-faint">
+              <SortTh table={table} col="when" className="pb-2 font-medium">When</SortTh>
+              <SortTh table={table} col="job" className="pb-2 font-medium">Job</SortTh>
+              <SortTh table={table} col="who" className="pb-2 font-medium">Who</SortTh>
+              <SortTh table={table} col="tokens" align="right" className="pb-2 font-medium">Tokens</SortTh>
+              <SortTh table={table} col="cost" align="right" className="pb-2 font-medium">Cost</SortTh>
+            </tr>
+          </thead>
+          <tbody>
+            {table.rows.map((r) => (
+              <tr key={r.id} className="border-b border-line/60 last:border-0">
+                <td className="py-2 text-ink-soft">{when(r.created_at)}</td>
+                <td className="py-2 text-ink">
+                  {r.feature}
+                  {!r.ok && <span className="ml-2 text-[11px] font-medium text-crit">failed</span>}
+                </td>
+                <td className="py-2 text-ink-soft">{r.actor_name ?? 'The agent'}</td>
+                <td className="py-2 text-right tabular-nums text-ink-soft">
+                  {compact(r.input_tokens + r.output_tokens)}
+                </td>
+                <td className="py-2 text-right tabular-nums text-ink">{usd(r.cost_usd)}</td>
+              </tr>
+            ))}
+            {table.total === 0 && (
+              <tr>
+                <td colSpan={5} className="py-6 text-center text-ink-faint">
+                  {rows.length === 0 ? 'No calls in this period.' : 'No calls match that search.'}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="-mx-5 -mb-5 mt-3">
+        <TablePager table={table} noun="call" />
+      </div>
+    </section>
   );
 }

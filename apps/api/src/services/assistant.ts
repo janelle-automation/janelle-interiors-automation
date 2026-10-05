@@ -31,7 +31,8 @@ import {
   type Seat,
 } from '@janelle/shared';
 import { agentAllows, agentsFor } from './assistantAgents.js';
-import type { drive_v3, gmail_v1 } from 'googleapis';
+import type { drive_v3 } from '@googleapis/drive';
+import type { gmail_v1 } from '@googleapis/gmail';
 import { createMessage, isAiReady, isTimeoutError } from './anthropic.js';
 import { fillTemplate, matchPrompt, missingInputs, runLibraryPrompt } from './promptRunner.js';
 import { BOARD_PROMPTS, boardPrompt, freeformBoard, isRenderable } from './boards.js';

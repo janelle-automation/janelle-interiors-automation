@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Page, PageHeading, Card, Pill, usePager, Pager } from '../components/ui';
-import { IconSearch, IconArrow } from '../components/icons';
+import { Page, PageHeading, Card, Pill } from '../components/ui';
+import { IconArrow } from '../components/icons';
+import { useTable, SortTh, SearchInput, FilterSelect, TableToolbar, TablePager, matches } from '../components/table';
 import { Markdown } from '../components/Markdown';
 import {
   usePromptLibrary, useRunPrompt, useCreateDraft, useProjects,
@@ -393,16 +394,26 @@ export default function Prompts() {
   const { data: prompts, isLoading } = usePromptLibrary();
 
   const shown = useMemo(() => {
-    const q = query.trim().toLowerCase();
     return prompts.filter((p) => {
       if (cat !== 'all' && p.category !== cat) return false;
-      if (!q) return true;
-      return [p.title, p.description ?? '', ...p.variables.map((v) => v.label)]
-        .some((f) => f.toLowerCase().includes(q));
+      return matches(query, p.title, p.description, ...p.variables.map((v) => v.label));
     });
   }, [prompts, cat, query]);
 
-  const pager = usePager(shown, 20);
+  const pager = useTable(shown, {
+    storageKey: 'prompts',
+    defaultSort: { key: 'prompt', dir: 'asc' },
+    sorters: {
+      prompt: (p) => p.title,
+      category: (p) => CATS.find((c) => c.key === p.category)?.label ?? p.category,
+      inputs: (p) => p.variables.length,
+    },
+  });
+  const filtering = Boolean(query.trim()) || cat !== 'all';
+  const clearFilters = () => {
+    setQuery('');
+    setCat('all');
+  };
 
   return (
     <Page>
@@ -411,38 +422,21 @@ export default function Prompts() {
       />
 
       <Card>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line-soft px-5 py-3">
-          <div className="flex flex-wrap items-center gap-1.5">
-            {CATS.map((c) => (
-              <button
-                key={c.key}
-                onClick={() => setCat(c.key)}
-                className={`focusable rounded-full border px-3 py-1 text-[12.5px] transition-colors ${
-                  cat === c.key
-                    ? 'border-brass bg-brass font-semibold text-white'
-                    : 'border-line bg-surface text-ink-soft hover:text-ink'
-                }`}
-              >
-                {c.label}
-              </button>
-            ))}
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="relative">
-              <IconSearch className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint" />
-              <input
-                className="input input-sm w-56 pl-8"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search prompts"
-                aria-label="Search prompts"
-              />
-            </div>
-            <span className="whitespace-nowrap text-[12px] text-ink-faint">
-              {shown.length === prompts.length ? `${prompts.length} prompts` : `${shown.length} of ${prompts.length}`}
-            </span>
-          </div>
-        </div>
+        <TableToolbar
+          search={<SearchInput value={query} onChange={setQuery} placeholder="Search prompts or inputs" label="Search prompts" />}
+          filters={
+            <FilterSelect
+              label="Filter by category"
+              value={cat}
+              onChange={(v) => setCat(v as PromptCategory | 'all')}
+              options={CATS.map((c) => ({ value: c.key, label: c.key === 'all' ? 'All categories' : c.label }))}
+            />
+          }
+          shown={shown.length}
+          total={prompts.length}
+          noun="prompt"
+          onClear={filtering ? clearFilters : null}
+        />
 
         <div className="overflow-x-auto">
           <table className="w-full table-fixed text-[14px]">
@@ -455,9 +449,9 @@ export default function Prompts() {
             </colgroup>
             <thead>
               <tr className="border-b border-line-soft text-left text-[11.5px] font-semibold uppercase tracking-[0.06em] text-ink-faint">
-                <th className="px-5 py-2.5 font-medium">Prompt</th>
-                <th className="px-3 py-2.5 font-medium">Category</th>
-                <th className="px-3 py-2.5 font-medium">Inputs</th>
+                <SortTh table={pager} col="prompt" className="px-5 py-2.5 font-medium">Prompt</SortTh>
+                <SortTh table={pager} col="category" className="px-3 py-2.5 font-medium">Category</SortTh>
+                <SortTh table={pager} col="inputs" className="px-3 py-2.5 font-medium">Inputs</SortTh>
                 <th className="px-5 py-2.5 text-right font-medium">Run</th>
               </tr>
             </thead>
@@ -521,7 +515,7 @@ export default function Prompts() {
           </table>
         </div>
 
-        <Pager {...pager} count={pager.rows.length} noun="prompt" />
+        <TablePager table={pager} noun="prompt" />
       </Card>
 
       {active && <RunModal prompt={active} onClose={() => setActive(null)} />}

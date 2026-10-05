@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { PoStatus } from '@janelle/shared';
-import { Card, Pill, money, shortDate, usePager, Pager } from './ui';
-import { IconSearch } from './icons';
+import { Card, Pill, money, shortDate } from './ui';
+import { useTable, SortTh, SearchInput, FilterSelect, TableToolbar, TablePager, matches } from './table';
 import type { PoView } from '../lib/queries';
 
 /**
@@ -20,36 +20,6 @@ export const STATUS_TONE: Record<PoStatus, 'neutral' | 'good' | 'warn' | 'crit' 
 };
 
 const label = (s: string) => s.replace(/_/g, ' ');
-
-type SortKey = 'po' | 'vendor' | 'project' | 'status' | 'amount' | 'eta';
-type Sort = { key: SortKey; dir: 'asc' | 'desc' };
-
-function SortHeader({
-  col, label: text, align, sort, onSort,
-}: {
-  col: SortKey; label: string; align?: 'right';
-  sort: Sort;
-  onSort: (k: SortKey) => void;
-}) {
-  const active = sort.key === col;
-  return (
-    <th
-      className={`px-5 py-3 font-medium ${align === 'right' ? 'text-right' : ''}`}
-      aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
-    >
-      <button
-        type="button"
-        onClick={() => onSort(col)}
-        className={`focusable inline-flex items-center gap-1 rounded transition-colors hover:text-ink ${active ? 'text-ink' : ''}`}
-      >
-        {text}
-        <span className={active ? 'opacity-100' : 'opacity-40'} aria-hidden>
-          {active ? (sort.dir === 'asc' ? '▲' : '▼') : '↕'}
-        </span>
-      </button>
-    </th>
-  );
-}
 
 /**
  * A list of orders: search, status filter, sortable columns, paging and a
@@ -74,46 +44,42 @@ export function OrdersPanel({
 }) {
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<PoStatus | 'all' | 'open'>('all');
-  const [sort, setSort] = useState<Sort>({ key: 'amount', dir: 'desc' });
+  const [vendor, setVendor] = useState('all');
+  const [project, setProject] = useState('all');
 
-  const shown = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const CLOSED: PoStatus[] = ['received', 'cancelled'];
-    let rows = orders.filter((o) => {
-      if (status === 'open' && CLOSED.includes(o.status)) return false;
-      if (status !== 'all' && status !== 'open' && o.status !== status) return false;
-      if (q && ![o.po, o.vendor, o.project].some((f) => f.toLowerCase().includes(q))) return false;
-      return true;
-    });
-    const dir = sort.dir === 'asc' ? 1 : -1;
-    rows = [...rows].sort((a, b) => {
-      if (sort.key === 'amount') return (a.amount - b.amount) * dir;
-      // A missing date is not "the earliest" — blanks stay at the bottom
-      // whichever way the column is pointing, or they bury the real ETAs.
-      if (sort.key === 'eta') {
-        if (!a.eta !== !b.eta) return a.eta ? -1 : 1;
-        return a.eta.localeCompare(b.eta) * dir;
-      }
-      return String(a[sort.key]).localeCompare(String(b[sort.key])) * dir;
-    });
-    return rows;
-  }, [orders, query, status, sort]);
+  const CLOSED: PoStatus[] = ['received', 'cancelled'];
+  const shown = useMemo(
+    () =>
+      orders.filter((o) => {
+        if (status === 'open' && CLOSED.includes(o.status)) return false;
+        if (status !== 'all' && status !== 'open' && o.status !== status) return false;
+        if (vendor !== 'all' && o.vendor !== vendor) return false;
+        if (project !== 'all' && o.project !== project) return false;
+        return matches(query, o.po, o.vendor, o.project);
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [orders, query, status, vendor, project],
+  );
 
   // Counts follow the list this panel was given, not the search box, which
   // would make them flicker as you type.
-  const chips = useMemo(() => {
-    const CLOSED: PoStatus[] = ['received', 'cancelled'];
-    const out: { id: PoStatus | 'all' | 'open'; text: string; n: number }[] = [{ id: 'all', text: 'All', n: orders.length }];
-    // "Open" is only worth a chip when it narrows something: with nothing
+  const statusOptions = useMemo(() => {
+    const out: { value: string; label: string }[] = [{ value: 'all', label: `All statuses (${orders.length})` }];
+    // "Open" is only worth offering when it narrows something: with nothing
     // received or cancelled it is the same list as "All" under another name.
     const open = orders.filter((o) => !CLOSED.includes(o.status)).length;
-    if (open !== orders.length) out.push({ id: 'open', text: 'Open', n: open });
+    if (open !== orders.length) out.push({ value: 'open', label: `Open (${open})` });
     for (const st of Object.keys(STATUS_TONE) as PoStatus[]) {
       const n = orders.filter((o) => o.status === st).length;
-      if (n > 0) out.push({ id: st, text: label(st), n });
+      if (n > 0) out.push({ value: st, label: `${label(st).replace(/^./, (c) => c.toUpperCase())} (${n})` });
     }
     return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orders]);
+  const distinct = (pick: (o: PoView) => string) =>
+    [...new Set(orders.map(pick).filter((v) => v.trim() !== ''))].sort((x, y) => x.localeCompare(y));
+  const vendors = useMemo(() => distinct((o) => o.vendor), [orders]); // eslint-disable-line react-hooks/exhaustive-deps
+  const projects = useMemo(() => distinct((o) => o.project), [orders]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A column needs a quarter of the orders to have a value, not just one: with
   // 7 numbered orders in 95, a PO column was 88 rows of nothing around 7 of
@@ -127,61 +93,81 @@ export function OrdersPanel({
   // Status and Amount always render; the others are conditional.
   const cols = 2 + Number(showVendor) + Number(showPo) + Number(showProject) + Number(showEta);
 
-  const pager = usePager(shown, 15);
+  const pager = useTable(shown, {
+    storageKey: 'orders',
+    pageSize: 25,
+    defaultSort: { key: 'amount', dir: 'desc' },
+    sorters: {
+      po: (o) => o.po,
+      vendor: (o) => o.vendor,
+      project: (o) => o.project,
+      status: (o) => label(o.status),
+      amount: (o) => o.amount,
+      // Blanks stay at the bottom whichever way the column points (the kit's rule).
+      eta: (o) => o.eta,
+    },
+  });
   const total = shown.reduce((sum, o) => sum + o.amount, 0);
-  const onSort = (key: SortKey) =>
-    setSort((s) => (s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }));
+  const filtering = Boolean(query.trim()) || status !== 'all' || vendor !== 'all' || project !== 'all';
+  const clearFilters = () => {
+    setQuery('');
+    setStatus('all');
+    setVendor('all');
+    setProject('all');
+  };
 
   return (
     <Card>
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line-soft px-5 py-4">
+      <div className="border-b border-line-soft px-5 py-4">
         <h2 className="text-[16px] font-semibold text-ink">{title}</h2>
-        <div className="relative">
-          <IconSearch className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint" />
-          <input
-            className="input input-sm w-52 pl-8"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search orders"
-            aria-label="Search orders"
-          />
-        </div>
       </div>
 
-      {orders.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 border-b border-line-soft px-5 py-3">
-          <span className="text-[12px] text-ink-faint" id="status-filter-label">Status</span>
-          <div className="flex flex-wrap gap-1.5" role="group" aria-labelledby="status-filter-label">
-            {chips.map((c) => (
-              <button
-                key={c.id}
-                type="button"
-                aria-pressed={status === c.id}
-                onClick={() => setStatus(c.id)}
-                className={`focusable inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[12.5px] transition-colors ${
-                  status === c.id
-                    ? 'border-brass/40 bg-brass/15 font-medium text-ink'
-                    : 'border-line text-ink-soft hover:bg-sunk/60 hover:text-ink'
-                }`}
-              >
-                <span className="capitalize">{c.text}</span>
-                <span className="tabular-nums text-ink-faint">{c.n}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+      <TableToolbar
+        search={<SearchInput value={query} onChange={setQuery} placeholder="Search PO, vendor or project" label="Search orders" />}
+        filters={
+          orders.length > 0 && (
+            <>
+              <FilterSelect
+                label="Filter by status"
+                value={status}
+                onChange={(v) => setStatus(v as PoStatus | 'all' | 'open')}
+                options={statusOptions}
+              />
+              {showVendor && vendors.length > 1 && (
+                <FilterSelect
+                  label="Filter by vendor"
+                  value={vendor}
+                  onChange={setVendor}
+                  options={[{ value: 'all', label: 'All vendors' }, ...vendors.map((v) => ({ value: v, label: v }))]}
+                />
+              )}
+              {projects.length > 1 && (
+                <FilterSelect
+                  label="Filter by project"
+                  value={project}
+                  onChange={setProject}
+                  options={[{ value: 'all', label: 'All projects' }, ...projects.map((v) => ({ value: v, label: v }))]}
+                />
+              )}
+            </>
+          )
+        }
+        shown={shown.length}
+        total={orders.length}
+        noun="order"
+        onClear={filtering ? clearFilters : null}
+      />
 
       <div className="overflow-x-auto">
         <table className="w-full text-[14px]">
           <thead>
             <tr className="border-b border-line-soft text-left text-[11.5px] font-semibold uppercase tracking-[0.06em] text-ink-faint">
-              {showPo && <SortHeader col="po" label="PO" sort={sort} onSort={onSort} />}
-              {showVendor && <SortHeader col="vendor" label="Vendor" sort={sort} onSort={onSort} />}
-              {showProject && <SortHeader col="project" label="Project" sort={sort} onSort={onSort} />}
-              <SortHeader col="status" label="Status" sort={sort} onSort={onSort} />
-              <SortHeader col="amount" label="Amount" align="right" sort={sort} onSort={onSort} />
-              {showEta && <SortHeader col="eta" label="ETA" align="right" sort={sort} onSort={onSort} />}
+              {showPo && <SortTh table={pager} col="po" className="px-5 py-3 font-medium">PO</SortTh>}
+              {showVendor && <SortTh table={pager} col="vendor" className="px-5 py-3 font-medium">Vendor</SortTh>}
+              {showProject && <SortTh table={pager} col="project" className="px-5 py-3 font-medium">Project</SortTh>}
+              <SortTh table={pager} col="status" className="px-5 py-3 font-medium">Status</SortTh>
+              <SortTh table={pager} col="amount" align="right" className="px-5 py-3 font-medium">Amount</SortTh>
+              {showEta && <SortTh table={pager} col="eta" align="right" className="px-5 py-3 font-medium">ETA</SortTh>}
             </tr>
           </thead>
           <tbody className="divide-y divide-line-soft">
@@ -244,7 +230,7 @@ export function OrdersPanel({
         </table>
       </div>
 
-      <Pager {...pager} count={pager.rows.length} noun="order" />
+      <TablePager table={pager} noun="order" />
     </Card>
   );
 }

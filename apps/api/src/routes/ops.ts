@@ -13,44 +13,37 @@ import { keepGoogleAlive } from '../services/googleKeepalive.js';
 import { runMiddayReminder, reminderSlotNow, type ReminderSlot } from '../services/middayReminder.js';
 import { runSlackSync } from '../services/slackSync.js';
 import { runSlackDigest } from '../services/slackDigest.js';
+import { runSlackReport } from '../services/slackReport.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { readIngestSettings } from '../lib/ingestSettings.js';
 import { claimCronSlot } from '../lib/cronSlot.js';
 import { pacificHourNow } from '../lib/pacificTime.js';
-
-/** When the scheduled ingest last started each studio's read. */
-const INGEST_RAN_FIELD = 'ingest_ran_at';
-/** When the scheduled task review last started for each studio. */
-const TASK_REVIEW_RAN_FIELD = 'task_review_ran_at';
-/** When the task reminder email last went out for each studio. */
-const MIDDAY_REMINDER_RAN_FIELD = 'midday_reminder_ran_at';
-/** The Pacific hours the task reminder email is allowed to fire in — morning and end of day. */
-const MIDDAY_REMINDER_HOURS = [9, 17];
-/**
- * The claim cooldown between sends. Shorter than the 8h gap between the two
- * daily hours above (so the evening send isn't blocked by the morning one),
- * longer than the ~1h a Pacific hour stays current across the 15-minute
- * polls (so one hour's window can't claim twice).
- */
-const MIDDAY_REMINDER_COOLDOWN_MS = 4 * 3600_000;
-/** When the Slack daily reminder last went out for each studio. */
-const SLACK_DIGEST_RAN_FIELD = 'slack_digest_ran_at';
-/** The Pacific hour the Slack daily reminder posts in — the start of the working day. */
-const SLACK_DIGEST_HOUR = 9;
-/** Once a day: longer than any hour's window, shorter than the day, so it never skips one. */
-const SLACK_DIGEST_COOLDOWN_MS = 20 * 3600_000;
+import {
+  INGEST_RAN_FIELD,
+  MIDDAY_REMINDER_COOLDOWN_MS,
+  MIDDAY_REMINDER_HOURS,
+  MIDDAY_REMINDER_RAN_FIELD,
+  SLACK_DIGEST_COOLDOWN_MS,
+  SLACK_DIGEST_HOUR,
+  SLACK_DIGEST_RAN_FIELD,
+  SLACK_REPORT_COOLDOWN_MS,
+  SLACK_REPORT_HOURS,
+  SLACK_REPORT_RAN_FIELD,
+  TASK_REVIEW_RAN_FIELD,
+} from '../lib/cronJobs.js';
 
 export const opsRouter = Router();
 
 // ── Scheduled jobs ──────────────────────────────────────────
-// Vercel Cron and Supabase pg_cron call these; there is no long-running process to hold the
-// node-cron timers that `services/scheduler.ts` uses when self-hosted.
+// The self-hosted server runs these jobs itself with node-cron
+// (services/scheduler.ts). These endpoints remain for running a job by hand
+// (`?force=1`) and for an external caller such as Supabase pg_cron.
 // They authenticate with CRON_SECRET rather than a user session, so they
 // are declared BEFORE `requireAuth` is applied to the rest of the router.
 
 const cronRouter = Router();
 
-/** Vercel Cron sends `Authorization: Bearer $CRON_SECRET`. Denies when unset. */
+/** Callers send `Authorization: Bearer $CRON_SECRET`. Denies when unset. */
 cronRouter.use((req, res, next) => {
   const secret = process.env.CRON_SECRET ?? '';
   if (!secret) {
@@ -107,9 +100,10 @@ async function forEachOrg<T>(fn: (orgId: string, budgetMs: number) => Promise<T>
   return { ok: true, results, skipped };
 }
 
-// Vercel Cron issues GET requests; POST is allowed for manual curl testing.
+// GET or POST, so a job can be run by hand with curl.
 //
-// Supabase pg_cron calls this every minute (migration 0022), and each studio
+// The server's node-cron (services/scheduler.ts) runs this job; the endpoint is for
+// running it by hand or from an outside clock. Each studio
 // is read only as often as it asked in Settings → Reading email — "Only when
 // I ask" is never read here. `?force=1` reads every studio now.
 cronRouter.all(
@@ -136,7 +130,7 @@ cronRouter.all(
   }),
 );
 // Close the tasks the mail since they were raised shows are done. Called
-// every five minutes (migration 0021); each studio is reviewed only as often
+// by node-cron, or by hand here; each studio is reviewed only as often
 // as it chose in Settings → Reading email. `?force=1` reviews every studio now.
 cronRouter.all(
   '/tasks',
@@ -160,8 +154,8 @@ cronRouter.all(
     });
   }),
 );
-// Twice a day, at 9am and 5pm Pacific (migration 0024). Polled every 15
-// minutes like the others; the Pacific-hour check is the real gate, and
+// Twice a day, at 9am and 5pm Pacific (migration 0024). Polled at :05 of the
+// 9am/5pm Pacific hours; the hour check is the gate, and
 // claimCronSlot's cooldown keeps a studio from getting either send twice in
 // the same hour without drifting across the PST/PDT change, since the gate
 // is the wall-clock hour rather than a fixed UTC cron time. `?force=1` sends
@@ -187,13 +181,35 @@ cronRouter.all(
     });
   }),
 );
-// Bring Slack up to date with the board (migration 0027, every 5 minutes).
+// Bring Slack up to date with the board (migration 0027). No longer scheduled —
+// the task reports below replaced it — but kept for running by hand.
 // Does nothing for a studio that has not connected Slack.
 cronRouter.all(
   '/slack-sync',
   asyncHandler(async (_req, res) => res.json({ data: await forEachOrg((id, budgetMs) => runSlackSync(id, { budgetMs })) })),
 );
-// The daily Slack reminder (migration 0028). Polled every 15 minutes; the
+// The completed / pending / overdue task reports, at 9am, midday and 5pm
+// Pacific (node-cron, services/scheduler.ts). The Pacific-hour gate and the claim keep each
+// slot to one post. `?force=1` posts now.
+cronRouter.all(
+  '/slack-report',
+  asyncHandler(async (req, res) => {
+    const force = req.query.force === '1';
+    res.json({
+      data: await forEachOrg(async (id) => {
+        if (!force) {
+          if (!SLACK_REPORT_HOURS.includes(pacificHourNow())) return { ok: true, skipped: 'not_report_hour' };
+          if (!(await claimCronSlot(id, SLACK_REPORT_RAN_FIELD, SLACK_REPORT_COOLDOWN_MS))) {
+            return { ok: true, skipped: 'already_sent' };
+          }
+        }
+        return runSlackReport(id);
+      }),
+    });
+  }),
+);
+// The daily Slack reminder (migration 0028). No longer scheduled — the task reports
+// replaced it — but kept for running by hand. The
 // Pacific-hour gate and the claim keep it to one post a day, and the hour is
 // wall-clock so it stays at 9am across the PST/PDT change. `?force=1` posts now.
 cronRouter.all(

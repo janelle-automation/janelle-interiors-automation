@@ -1,5 +1,5 @@
-import type { ReactNode } from 'react';
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { useEffect, useRef, type ReactNode } from 'react';
+import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { canSupervise, type Action, type Resource } from '@janelle/shared';
 import { useAuth } from './context/AuthContext';
 import { AppShell } from './components/AppShell';
@@ -13,8 +13,6 @@ import Prompts from './pages/Prompts';
 import FollowUps from './pages/FollowUps';
 import Tasks from './pages/Tasks';
 import Assistant from './pages/Assistant';
-import Team from './pages/Team';
-import Permissions from './pages/Permissions';
 import Drafts from './pages/Drafts';
 import Reports from './pages/Reports';
 import Activity from './pages/Activity';
@@ -89,9 +87,37 @@ function Viewable({
   );
 }
 
+/**
+ * Where a person starts the day: Follow-ups, or Tasks for a role that cannot
+ * see Follow-ups, or the Dashboard when neither is open to them.
+ *
+ * Only on arrival — opening the app or signing in at `/`. Clicking Dashboard
+ * in the menu afterwards still shows the Dashboard, and a `/?google=…` return
+ * from connecting Google is left alone for the Dashboard to read.
+ */
+function useLandOnFollowUps() {
+  const { session, user, may } = useAuth();
+  const { pathname, search } = useLocation();
+  const navigate = useNavigate();
+  const landed = useRef(false);
+
+  useEffect(() => {
+    if (!session) {
+      landed.current = false; // signed out: the next sign-in lands again
+      return;
+    }
+    if (!user || landed.current) return;
+    landed.current = true;
+    if (pathname !== '/' || search) return;
+    if (may('follow_ups')) navigate('/follow-ups', { replace: true });
+    else if (may('tasks')) navigate('/tasks', { replace: true });
+  }, [session, user, may, pathname, search, navigate]);
+}
+
 export default function App() {
   const { configured, loading, session, user, profileError, refresh, signOut, recovery } = useAuth();
   const { pathname } = useLocation();
+  useLandOnFollowUps();
 
   // The shared AI usage report is reachable by its link alone: no sidebar,
   // no sign-in, and no wait on the session — whoever holds the URL is not
@@ -136,8 +162,9 @@ export default function App() {
         <Route path="/drafts" element={<Viewable needs="drafts"><Drafts /></Viewable>} />
         <Route path="/reports" element={<Viewable needs="reports"><Reports /></Viewable>} />
         <Route path="/activity" element={<Viewable supervisorOnly><Activity /></Viewable>} />
-        <Route path="/team" element={<Viewable needs="team" action="update"><Team /></Viewable>} />
-        <Route path="/permissions" element={<Viewable principalOnly><Permissions /></Viewable>} />
+        {/* Moved under Settings; the old addresses still land there. */}
+        <Route path="/team" element={<Navigate to="/settings?tab=team" replace />} />
+        <Route path="/permissions" element={<Navigate to="/settings?tab=permissions" replace />} />
         <Route path="/settings" element={<Viewable needs="settings"><Settings /></Viewable>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

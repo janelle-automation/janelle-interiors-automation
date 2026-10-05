@@ -89,5 +89,5 @@ export async function endImpersonation(): Promise<void> {
   } else {
     await supabase.auth.signOut();
   }
-  window.location.assign('/team');
+  window.location.assign('/settings?tab=team');
 }

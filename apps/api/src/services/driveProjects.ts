@@ -1,4 +1,4 @@
-import type { drive_v3 } from 'googleapis';
+import type { drive_v3 } from '@googleapis/drive';
 import { PROJECT_STAGES, type ProjectStage } from '@janelle/shared';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { forgetStudioNames } from '../lib/studioNames.js';

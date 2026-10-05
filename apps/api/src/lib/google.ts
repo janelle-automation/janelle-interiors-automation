@@ -1,4 +1,4 @@
-import { google } from 'googleapis';
+import { OAuth2Client } from 'google-auth-library';
 import { env } from '../env.js';
 
 /** The two Google services the studio can connect independently. */
@@ -27,7 +27,7 @@ export function servicesGranted(scopes: string | null | undefined): Record<Googl
 
 /** Build a fresh Google OAuth2 client from configured credentials. */
 export function oauthClient() {
-  return new google.auth.OAuth2(
+  return new OAuth2Client(
     env.google.clientId,
     env.google.clientSecret,
     env.google.redirectUri,

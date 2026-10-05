@@ -5,10 +5,9 @@ import { startScheduler } from './services/scheduler.js';
 /**
  * Local / self-hosted entry point: a long-running Node server.
  *
- * On Vercel this file is never loaded — a serverless function cannot listen
- * on a port or hold cron timers. There, `api/[...path].mjs` serves the same
- * app and the scheduled work runs from Vercel Cron instead
- * (see docs/DEPLOY-VERCEL.md).
+ * This process owns the schedule: startScheduler() runs every background job
+ * with node-cron (see deploy/README.md). Nothing else is needed — no Vercel
+ * Cron, no Supabase pg_cron.
  */
 app.listen(env.port, env.host, () => {
   console.log(`  ▸ Janelle API listening on http://${env.host}:${env.port}`);
