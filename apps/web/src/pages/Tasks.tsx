@@ -1234,7 +1234,7 @@ export default function Tasks() {
         // card.
         sub={view === 'board' ? 'Drag a card to Done, or use its ✓✓ button, to complete it.' : undefined}
         action={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <div className="relative">
               <IconSearch
                 width={15}
@@ -1415,7 +1415,7 @@ export default function Tasks() {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 self-start sm:self-auto">
+                  <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
                     {t.assignedTo ? (
                       <Avatar name={t.assignee} size={28} />
                     ) : (
@@ -1424,7 +1424,7 @@ export default function Tasks() {
 
                     {supervisor ? (
                       <select
-                        className="input"
+                        className="input w-auto max-w-[9rem]"
                         value={t.assignedTo ?? ''}
                         onChange={(e) => update.mutate({ id: t.id, assigned_to: e.target.value || null })}
                       >
@@ -1447,7 +1447,7 @@ export default function Tasks() {
                     )}
 
                     <select
-                      className="input"
+                      className="input w-auto max-w-[9rem]"
                       value={t.status}
                       disabled={!mayEdit(t.assignedTo)}
                       title={mayEdit(t.assignedTo) ? undefined : "Only a principal or coordinator can change someone else's task"}

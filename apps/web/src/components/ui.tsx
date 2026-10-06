@@ -73,31 +73,25 @@ export function Page({ children, className = '' }: { children: ReactNode; classN
 
 export function PageHeading({
   eyebrow,
-  title,
+  title: _title,
   sub,
   action,
 }: {
   eyebrow?: string;
-  title: string;
+  title?: string;
   sub?: string;
   action?: ReactNode;
 }) {
+  const hasLeft = eyebrow || sub;
+  if (!hasLeft && !action) return null;
   return (
-    // No bottom margin: the gap below a heading is the Page container's, so
-    // that it is the same gap the rest of the page is built on.
-    //
-    // `items-start`, not `items-end`: bottom-aligning the buttons dropped
-    // them to the foot of a two-line subtitle and left a band of nothing
-    // beside the title, which is the widest part of the page. Level with the
-    // title they read as belonging to it, and the empty band is gone.
     <header className="flex flex-wrap items-start justify-between gap-4">
-      <div>
-        {eyebrow && <Eyebrow>{eyebrow}</Eyebrow>}
-        <h1 className="mt-0.5 text-[26px] font-bold leading-tight tracking-[-0.01em] text-ink">
-          {title}
-        </h1>
-        {sub && <p className="mt-1 max-w-2xl text-[14px] text-ink-soft">{sub}</p>}
-      </div>
+      {hasLeft && (
+        <div>
+          {eyebrow && <Eyebrow>{eyebrow}</Eyebrow>}
+          {sub && <p className="mt-0.5 max-w-2xl text-[14px] text-ink-soft">{sub}</p>}
+        </div>
+      )}
       {action}
     </header>
   );

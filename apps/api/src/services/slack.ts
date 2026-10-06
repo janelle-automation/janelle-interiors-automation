@@ -184,6 +184,7 @@ export async function postMessage(
     text: msg.text,
     blocks: msg.blocks,
     thread_ts: threadTs,
+    username: 'Janelle Interiors',
     // A task title is not a link to unfurl.
     unfurl_links: false,
     unfurl_media: false,

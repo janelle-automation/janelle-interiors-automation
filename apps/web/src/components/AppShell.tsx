@@ -14,8 +14,32 @@ import { ASSISTANT_NAME, ROLE_LABELS, canSupervise, type Resource } from '@janel
 import {
   IconDashboard, IconProjects, IconVendors, IconDoc,
   IconPrompt, IconBell, IconInbox, IconTask, IconAssistant, IconSettings, IconDraft, IconSun, IconMoon,
-  IconLogout, IconArrow,
+  IconLogout, IconArrow, IconActivity,
 } from './icons';
+
+const PINNED_KEY = 'janelle.sidebar.pinned';
+const PINNED_CHANGE = 'janelle.sidebar.change';
+
+/** Pages that are not in the default nav but can be pinned by the user. */
+const PINNABLE_PAGES: Record<string, NavItem> = {
+  audit: { to: '/audit', label: 'Audit Chat', Icon: IconActivity, hue: 'indigo' },
+};
+
+function readPinnedKeys(): string[] {
+  try { return JSON.parse(localStorage.getItem(PINNED_KEY) ?? '[]'); } catch { return []; }
+}
+
+export function toggleSidebarPin(key: string) {
+  const current = readPinnedKeys();
+  const next = current.includes(key) ? current.filter((k) => k !== key) : [...current, key];
+  try { localStorage.setItem(PINNED_KEY, JSON.stringify(next)); } catch {}
+  window.dispatchEvent(new Event(PINNED_CHANGE));
+  return next.includes(key);
+}
+
+export function isSidebarPinned(key: string) {
+  return readPinnedKeys().includes(key);
+}
 
 type NavItem = {
   to: string;
@@ -58,6 +82,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { to: '/tasks', label: 'Tasks', Icon: IconTask, needs: 'tasks', hue: 'sky' },
       { to: '/inbox', label: 'Inbox', Icon: IconInbox, needs: 'emails', hue: 'teal' },
       { to: '/drafts', label: 'Drafts', Icon: IconDraft, needs: 'drafts', hue: 'pink' },
+      // Audit Chat is pinnable from the /audit page — hidden here by default.
       // Reports and Audit Log are out of the menu on purpose. The pages still work at
       // /reports and /activity; add the lines back to show them:
       //   { to: '/reports', label: 'Reports', Icon: IconReport, needs: 'reports' },
@@ -92,6 +117,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/drafts': 'Drafts',
   '/reports': 'Reports',
   '/activity': 'Audit Log',
+  '/audit': 'Audit Chat',
   '/team': 'Team & Roles',
   '/permissions': 'Permissions',
   '/settings': 'Settings',
@@ -194,6 +220,18 @@ function Sidebar({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: (
     .map((g) => ({ ...g, items: g.items.filter(allowed) }))
     .filter((g) => g.items.length > 0);
 
+  const [pinnedKeys, setPinnedKeys] = useState(readPinnedKeys);
+  useEffect(() => {
+    const refresh = () => setPinnedKeys(readPinnedKeys());
+    window.addEventListener('storage', refresh);
+    window.addEventListener(PINNED_CHANGE, refresh);
+    return () => {
+      window.removeEventListener('storage', refresh);
+      window.removeEventListener(PINNED_CHANGE, refresh);
+    };
+  }, []);
+  const pinnedItems = pinnedKeys.map((k) => PINNABLE_PAGES[k]).filter(Boolean) as NavItem[];
+
   return (
     <div className="flex h-full flex-col bg-nav">
       <div className={`flex items-center border-b border-white/10 px-3 py-3 ${collapsed ? 'justify-center' : ''}`}>
@@ -215,6 +253,20 @@ function Sidebar({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: (
             </div>
           </div>
         ))}
+        {pinnedItems.length > 0 && (
+          <div>
+            {collapsed ? (
+              <div className="mx-auto mb-2 h-px w-6 bg-white/10" aria-hidden="true" />
+            ) : (
+              <div className="mb-1.5 px-3 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-nav-muted/70">Pinned</div>
+            )}
+            <div className="space-y-0.5">
+              {pinnedItems.map((item) => (
+                <NavItemLink key={item.to} item={item} collapsed={collapsed} onNavigate={onNavigate} />
+              ))}
+            </div>
+          </div>
+        )}
       </nav>
 
       {may('settings') && (
@@ -543,7 +595,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, [docked]);
 
   return (
-    <div className={`flex min-h-screen transition-[padding] duration-200 ${docked ? 'xl:pr-[440px]' : ''}`}>
+    <div className={`flex min-h-screen overflow-x-hidden transition-[padding] duration-200 ${docked ? 'xl:pr-[440px]' : ''}`}>
       {/* Sidebar — desktop */}
       <aside
         className={`relative z-40 hidden shrink-0 bg-nav transition-[width] duration-200 ease-out lg:block ${collapsed ? 'w-[68px]' : 'w-60'}`}

@@ -22,11 +22,96 @@ import ResetPassword from './pages/ResetPassword';
 import ConfigNeeded from './pages/ConfigNeeded';
 import UsageReport from './pages/UsageReport';
 import { Inbox, Documents } from './pages/Simple';
+import AuditChat from './pages/AuditChat';
+
+function FloorPlanSVG() {
+  return (
+    <svg width="220" height="170" viewBox="0 0 220 170" fill="none" aria-hidden="true">
+      {/* Outer boundary */}
+      <rect className="fp-outer" x="12" y="12" width="196" height="146" rx="2"
+        stroke="rgba(255,255,255,0.55)" strokeWidth="1.5" />
+      {/* Vertical divider — bedroom / living split */}
+      <line className="fp-wall-v" x1="130" y1="12" x2="130" y2="108"
+        stroke="rgba(255,255,255,0.45)" strokeWidth="1.5" />
+      {/* Horizontal — bedroom / bath split */}
+      <line className="fp-wall-h1" x1="130" y1="88" x2="208" y2="88"
+        stroke="rgba(255,255,255,0.45)" strokeWidth="1.5" />
+      {/* Horizontal — kitchen / living split */}
+      <line className="fp-wall-h2" x1="12" y1="108" x2="82" y2="108"
+        stroke="rgba(255,255,255,0.45)" strokeWidth="1.5" />
+
+      {/* Sofa — living room */}
+      <g className="fp-furniture">
+        <rect x="22" y="60" width="50" height="22" rx="4"
+          stroke="rgba(255,255,255,0.30)" strokeWidth="1" />
+        <rect x="22" y="60" width="12" height="22" rx="3"
+          stroke="rgba(255,255,255,0.20)" strokeWidth="1" />
+        <rect x="60" y="60" width="12" height="22" rx="3"
+          stroke="rgba(255,255,255,0.20)" strokeWidth="1" />
+        {/* Coffee table */}
+        <rect x="30" y="46" width="34" height="12" rx="2"
+          stroke="rgba(255,255,255,0.22)" strokeWidth="1" />
+      </g>
+
+      {/* Bed — bedroom */}
+      <g className="fp-furniture">
+        <rect x="140" y="20" width="60" height="58" rx="4"
+          stroke="rgba(255,255,255,0.28)" strokeWidth="1" />
+        {/* Pillow left */}
+        <rect x="145" y="24" width="20" height="12" rx="3"
+          stroke="rgba(255,255,255,0.18)" strokeWidth="1" />
+        {/* Pillow right */}
+        <rect x="170" y="24" width="20" height="12" rx="3"
+          stroke="rgba(255,255,255,0.18)" strokeWidth="1" />
+        {/* Headboard line */}
+        <line x1="140" y1="40" x2="200" y2="40"
+          stroke="rgba(255,255,255,0.15)" strokeWidth="1" />
+      </g>
+
+      {/* Dining table — kitchen */}
+      <g className="fp-furniture">
+        <rect x="20" y="118" width="54" height="32" rx="3"
+          stroke="rgba(255,255,255,0.24)" strokeWidth="1" />
+        <circle cx="32" cy="118" r="4" stroke="rgba(255,255,255,0.15)" strokeWidth="1" />
+        <circle cx="62" cy="118" r="4" stroke="rgba(255,255,255,0.15)" strokeWidth="1" />
+        <circle cx="32" cy="150" r="4" stroke="rgba(255,255,255,0.15)" strokeWidth="1" />
+        <circle cx="62" cy="150" r="4" stroke="rgba(255,255,255,0.15)" strokeWidth="1" />
+      </g>
+
+      {/* Bath fixtures */}
+      <g className="fp-furniture">
+        <rect x="138" y="96" width="64" height="62" rx="2"
+          stroke="rgba(255,255,255,0.20)" strokeWidth="1" />
+        <rect x="142" y="100" width="56" height="34" rx="12"
+          stroke="rgba(255,255,255,0.18)" strokeWidth="1" />
+      </g>
+
+      {/* Room labels */}
+      <g className="fp-label" fill="rgba(255,255,255,0.28)" fontSize="8" fontFamily="system-ui,sans-serif">
+        <text x="65" y="30" textAnchor="middle">LIVING</text>
+        <text x="165" y="10" textAnchor="middle" dy="12">BEDROOM</text>
+        <text x="46" y="105" textAnchor="middle" dy="-2">KITCHEN</text>
+        <text x="170" y="128" textAnchor="middle" dy="-2">BATH</text>
+      </g>
+    </svg>
+  );
+}
 
 function FullScreen({ label }: { label: string }) {
   return (
-    <div className="grid min-h-screen place-items-center">
-      <div className="text-[13px] font-medium text-ink-faint">{label}</div>
+    <div className="flex min-h-screen flex-col items-center justify-center bg-[var(--color-nav)] pt-16">
+      <div className="loader-enter flex flex-col items-center gap-7">
+        <FloorPlanSVG />
+        <div className="flex flex-col items-center gap-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.15em] text-white/40">
+            Janelle Interiors
+          </p>
+          <div className="relative h-[2px] w-40 overflow-hidden rounded-full bg-white/10">
+            <div className="loader-bar-sweep absolute inset-y-0 left-0 w-1/3 rounded-full bg-gradient-to-r from-transparent via-white/50 to-transparent" />
+          </div>
+          <p className="text-[12px] text-white/30">{label}</p>
+        </div>
+      </div>
     </div>
   );
 }
@@ -144,31 +229,41 @@ export default function App() {
   }
 
   return (
-    // Above the pages, so the conversation outlives any one of them.
     <AssistantProvider>
-    <AppShell>
       <Routes>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/projects" element={<Viewable needs="projects"><Projects /></Viewable>} />
-        <Route path="/projects/:id" element={<Viewable needs="projects"><ProjectDetail /></Viewable>} />
-        <Route path="/vendors" element={<Viewable needs="vendors"><Vendors /></Viewable>} />
-        <Route path="/vendors/:id" element={<Viewable needs="vendors"><VendorDetail /></Viewable>} />
-        <Route path="/inbox" element={<Viewable needs="emails"><Inbox /></Viewable>} />
-        <Route path="/documents" element={<Viewable needs="documents"><Documents /></Viewable>} />
-        <Route path="/prompts" element={<Viewable needs="prompts"><Prompts /></Viewable>} />
-        <Route path="/assistant" element={<Assistant />} />
-        <Route path="/tasks" element={<Viewable needs="tasks"><Tasks /></Viewable>} />
-        <Route path="/follow-ups" element={<Viewable needs="follow_ups"><FollowUps /></Viewable>} />
-        <Route path="/drafts" element={<Viewable needs="drafts"><Drafts /></Viewable>} />
-        <Route path="/reports" element={<Viewable needs="reports"><Reports /></Viewable>} />
-        <Route path="/activity" element={<Viewable supervisorOnly><Activity /></Viewable>} />
-        {/* Moved under Settings; the old addresses still land there. */}
-        <Route path="/team" element={<Navigate to="/settings?tab=team" replace />} />
-        <Route path="/permissions" element={<Navigate to="/settings?tab=permissions" replace />} />
-        <Route path="/settings" element={<Viewable needs="settings"><Settings /></Viewable>} />
-        <Route path="*" element={<Navigate to="/" replace />} />
+        {/* Standalone — no sidebar, no top bar; has its own shell */}
+        <Route path="/audit" element={<AuditChat />} />
+
+        {/* Everything else lives inside the normal AppShell */}
+        <Route
+          path="*"
+          element={
+            <AppShell>
+              <Routes>
+                <Route path="/" element={<Dashboard />} />
+                <Route path="/projects" element={<Viewable needs="projects"><Projects /></Viewable>} />
+                <Route path="/projects/:id" element={<Viewable needs="projects"><ProjectDetail /></Viewable>} />
+                <Route path="/vendors" element={<Viewable needs="vendors"><Vendors /></Viewable>} />
+                <Route path="/vendors/:id" element={<Viewable needs="vendors"><VendorDetail /></Viewable>} />
+                <Route path="/inbox" element={<Viewable needs="emails"><Inbox /></Viewable>} />
+                <Route path="/documents" element={<Viewable needs="documents"><Documents /></Viewable>} />
+                <Route path="/prompts" element={<Viewable needs="prompts"><Prompts /></Viewable>} />
+                <Route path="/assistant" element={<Assistant />} />
+                <Route path="/tasks" element={<Viewable needs="tasks"><Tasks /></Viewable>} />
+                <Route path="/follow-ups" element={<Viewable needs="follow_ups"><FollowUps /></Viewable>} />
+                <Route path="/drafts" element={<Viewable needs="drafts"><Drafts /></Viewable>} />
+                <Route path="/reports" element={<Viewable needs="reports"><Reports /></Viewable>} />
+                <Route path="/activity" element={<Viewable supervisorOnly><Activity /></Viewable>} />
+                {/* Moved under Settings; the old addresses still land there. */}
+                <Route path="/team" element={<Navigate to="/settings?tab=team" replace />} />
+                <Route path="/permissions" element={<Navigate to="/settings?tab=permissions" replace />} />
+                <Route path="/settings" element={<Viewable needs="settings"><Settings /></Viewable>} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </AppShell>
+          }
+        />
       </Routes>
-    </AppShell>
     </AssistantProvider>
   );
 }

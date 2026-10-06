@@ -331,7 +331,7 @@ function HeroTile({
             </span>
             <span className="truncate text-[12.5px] font-medium text-ink-soft">{label}</span>
           </div>
-          <div className={`mt-2.5 text-[34px] font-bold leading-none tracking-[-0.02em] tabular-nums ${s.value}`}>
+          <div className={`mt-2.5 text-[26px] font-bold leading-none tracking-[-0.02em] tabular-nums sm:text-[34px] ${s.value}`}>
             {value}
           </div>
           <div className="mt-1.5 text-[12px] text-ink-faint">{hint}</div>
@@ -749,11 +749,11 @@ export default function Dashboard() {
                   <div className="text-[14px] font-semibold text-ink">{f.who}</div>
                   <div className="truncate text-[13px] text-ink-soft">{f.reason}</div>
                 </div>
-                <div className="whitespace-nowrap text-right">
-                  <div className="text-[12.5px] font-medium text-ink-soft">{f.age}</div>
+                <div className="w-24 shrink-0 text-right">
+                  <div className="whitespace-nowrap text-[12.5px] font-medium text-ink-soft">{f.age}</div>
                   <div className="flex items-center justify-end gap-1.5 text-[11.5px] text-ink-faint">
                     {f.project && f.project !== '—' && <HueDot hue={hueFor(f.project)} />}
-                    {f.project}
+                    <span className="truncate">{f.project}</span>
                   </div>
                 </div>
               </li>
