@@ -29,7 +29,6 @@ function TopBar({
   showTip,
   setShowTip,
   installed,
-  installPrompt,
 }: {
   onInstall: () => void;
   showTip: boolean;

@@ -11,6 +11,7 @@ import { sweepJobs } from './mediaJobs.js';
 import { keepGoogleAlive } from './googleKeepalive.js';
 import { runMiddayReminder } from './middayReminder.js';
 import { runSlackReport } from './slackReport.js';
+import { runSlackSync } from './slackSync.js';
 import { pacificHourNow } from '../lib/pacificTime.js';
 import {
   INGEST_RAN_FIELD,
@@ -120,9 +121,15 @@ export function startScheduler(): void {
     }, 'task reminder');
   });
 
+  // Per-task sync: post new/changed tasks to their project channel and keep
+  // existing messages in step. Runs every 5 minutes; the sync's own cursor
+  // and task-level claim handle concurrency safely.
+  every('*/5 * * * *', 'slack sync', () =>
+    forEachOrg((id) => runSlackSync(id, { budgetMs: 35_000 }), 'slack sync'),
+  );
+
   // The completed / pending / overdue reports to their Slack channels, at
-  // 9am, midday and 5pm Pacific. They replaced the per-task posts and the
-  // daily reminder, which flooded one channel.
+  // 9am, midday and 5pm Pacific.
   every('*/15 * * * *', 'slack report', async () => {
     if (!SLACK_REPORT_HOURS.includes(pacificHourNow())) return;
     await forEachOrg(async (id) => {
