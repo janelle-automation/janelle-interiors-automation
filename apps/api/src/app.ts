@@ -24,6 +24,7 @@ import { usageRouter } from './routes/usage.js';
 import { publicUsageRouter } from './routes/publicUsage.js';
 import { permissionsRouter } from './routes/permissions.js';
 import { settingsRouter } from './routes/settings.js';
+import { auditRouter } from './routes/audit.js';
 import { errorHandler, notFound } from './middleware/error.js';
 
 /**
@@ -89,6 +90,7 @@ app.use('/api/assistant', assistantRouter);
 app.use('/api/usage', usageRouter);
 app.use('/api/permissions', permissionsRouter);
 app.use('/api/settings', settingsRouter);
+app.use('/api/audit', auditRouter);
 
 // No session required — the token in the URL is the credential.
 app.use('/api/public', publicUsageRouter);

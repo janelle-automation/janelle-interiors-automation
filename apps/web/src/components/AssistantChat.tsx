@@ -5,12 +5,11 @@ import { useAssistant, type AttachedFile, type ChatMessage } from '../context/As
 import { api } from '../lib/api';
 import { useConfirmAction } from '../lib/queries';
 import { bestHearing, listen, speak, type MicLevel, type StopListening } from '../lib/speech';
-import { AssistantAnswerView, AttachedFiles, answerIsPictures, answerIsWide, sizeLabel } from './AssistantAnswer';
+import { AssistantAnswerView, BriefingAnswerView, AttachedFiles, answerIsPictures, answerIsWide, sizeLabel } from './AssistantAnswer';
 import { useImagineOptions } from '../lib/queries';
 import { readableAttachment } from '../lib/attachments';
-import { AssistantGuide } from './AssistantGuide';
-import { ActiveAgents } from './AgentPicker';
 import { IconMic, IconPlus, IconSend, IconStop } from './icons';
+import { IconTalk } from './AssistantPanel';
 
 /**
  * The conversation with Jenny: what was said, what she is doing now, and
@@ -40,6 +39,17 @@ const IconX = (p: IconProps) => <svg {...stroke} {...p}><path d="M18 6 6 18M6 6l
 const IconRetry = (p: IconProps) => (
   <svg {...stroke} {...p}><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /></svg>
 );
+const IconActivity = (p: IconProps) => (
+  <svg {...stroke} {...p}><polyline points="22 12 18 12 15 21 9 3 6 12 2 12" /></svg>
+);
+
+const QUICK_SUGGESTIONS = [
+  'What tasks are overdue right now?',
+  'Which projects have the most open tasks?',
+  'What activity happened in the last 24 hours?',
+  'Show me pending vendor follow-ups',
+  'What did the team work on this week?',
+];
 
 
 export function JennyAvatar({ size = 28 }: { size?: number }) {
@@ -396,10 +406,12 @@ function MessageView({ message, compact }: { message: ChatMessage; compact: bool
           }`}
         >
           {briefing && (
-            <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-brass-deep">Your briefing</div>
+            <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-brass-deep">Your briefing</div>
           )}
           {message.answer ? (
-            <AssistantAnswerView answer={message.answer} compact={compact} />
+            briefing
+              ? <BriefingAnswerView answer={message.answer} />
+              : <AssistantAnswerView answer={message.answer} compact={compact} />
           ) : (
             <p className="whitespace-pre-line">{message.content}</p>
           )}
@@ -624,7 +636,7 @@ function ModeMenu({ mode, options, onChange }: { mode: ComposeMode; options: Mod
 function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.MutableRefObject<((files: File[]) => void) | null> }) {
   const {
     send, imagine, pending, stop, canListen, lookingAt, focusRequest, setMicError, vocabulary, uploadFile, prefill, attachRequest,
-    agents, setAgents, newConversation, messages,
+    newConversation, messages, handsFree, setHandsFree,
   } = useAssistant();
   const { data: canMake } = useImagineOptions();
   const [text, setText] = useState('');
@@ -639,6 +651,9 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
+  const cameraRef = useRef<HTMLInputElement>(null);
+  const photosRef = useRef<HTMLInputElement>(null);
+  const [attachMenu, setAttachMenu] = useState(false);
   const [listening, setListening] = useState(false);
   // What the microphone is actually picking up. Without it, a person talking
   // too quietly watched the button pulse away as though it were working.
@@ -663,6 +678,15 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
   }, [text]);
 
   useEffect(() => () => stopListening.current?.({ discard: true }), []);
+
+  useEffect(() => {
+    if (!attachMenu) return;
+    const close = (e: MouseEvent) => {
+      if (!(e.target as Element).closest('[data-attach-menu]')) setAttachMenu(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [attachMenu]);
 
   // "Create a task for …" from the guide: in the box, cursor at the end.
   useEffect(() => {
@@ -815,7 +839,7 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
   }
 
   return (
-    <div className="border-t border-line px-4 pb-4 pt-3">
+    <div className="border-t border-line px-4 pb-4 pt-3" data-attach-menu>
       {/* A live meter while listening. It answers the question the old
           "Listening…" placeholder could not: is it hearing ME? A voice too
           quiet to transcribe is told so while there is still time to move
@@ -889,67 +913,99 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
           {`${attachments.length > 0 ? 'Transforms what you attached' : 'Drawn from your words'} · no tokens spent`}
         </p>
       )}
+      <div className="flex items-end gap-2">
       <form
         onSubmit={(e) => {
           e.preventDefault();
           submit();
         }}
-        className="flex items-end gap-1.5 rounded-xl border border-line bg-surface px-2 py-1.5 transition-colors focus-within:border-brass"
+        className="flex flex-1 items-end gap-1.5 rounded-xl border border-line bg-surface px-2 py-1.5 transition-colors focus-within:border-brass"
       >
-        <input
-          ref={picker}
-          type="file"
-          accept={ACCEPT_ATTR}
-          multiple
-          hidden
-          onChange={(e) => {
-            addFiles(Array.from(e.target.files ?? []));
-            e.target.value = '';
-          }}
-        />
+        {/* File inputs: main (desktop + Files option), camera, photos */}
+        <input ref={picker} type="file" accept={ACCEPT_ATTR} multiple hidden onChange={(e) => { addFiles(Array.from(e.target.files ?? [])); e.target.value = ''; }} />
+        <input ref={cameraRef} type="file" accept="image/*" capture="environment" hidden onChange={(e) => { addFiles(Array.from(e.target.files ?? [])); e.target.value = ''; }} />
+        <input ref={photosRef} type="file" accept="image/*" multiple hidden onChange={(e) => { addFiles(Array.from(e.target.files ?? [])); e.target.value = ''; }} />
+
+        {/* Mobile: + opens Camera / Photos / Files popup */}
+        <div className="relative shrink-0 sm:hidden" data-attach-menu>
+          <button
+            type="button"
+            onClick={() => setAttachMenu((v) => !v)}
+            disabled={attachments.length >= MAX_FILES}
+            aria-label="Attach"
+            aria-expanded={attachMenu}
+            className="focusable grid h-9 w-9 place-items-center rounded-lg text-ink-soft transition-colors hover:bg-sunk hover:text-ink disabled:opacity-40"
+          >
+            <IconPlus width={18} height={18} />
+          </button>
+          {attachMenu && (
+            <div className="absolute bottom-full left-0 z-50 mb-2 w-44 overflow-hidden rounded-2xl border border-line bg-surface shadow-pop">
+              {[
+                { label: 'Camera', ref: cameraRef, icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg> },
+                { label: 'Photos', ref: photosRef, icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg> },
+                { label: 'Files', ref: picker, icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> },
+              ].map(({ label, ref: inputRef, icon }) => (
+                <button
+                  key={label}
+                  type="button"
+                  onClick={() => { inputRef.current?.click(); setAttachMenu(false); }}
+                  className="focusable flex w-full items-center gap-3 px-4 py-3 text-left text-[14px] text-ink transition-colors hover:bg-sunk"
+                >
+                  <span className="text-ink-soft">{icon}</span>
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Mobile: Talk hands-free toggle */}
+        {canListen && (
+          <button
+            type="button"
+            onClick={() => setHandsFree(!handsFree)}
+            aria-pressed={handsFree}
+            aria-label={handsFree ? 'End hands-free conversation' : 'Talk hands-free'}
+            title={handsFree ? 'End hands-free conversation' : 'Talk hands-free'}
+            className={`focusable grid h-9 w-9 shrink-0 place-items-center rounded-lg transition-colors sm:hidden ${
+              handsFree ? 'bg-brass/15 text-brass-deep' : 'text-ink-soft hover:bg-sunk hover:text-ink'
+            }`}
+          >
+            <IconTalk width={17} height={17} />
+          </button>
+        )}
+
+        {/* Desktop: New conversation button */}
         <button
           type="button"
-          onClick={() => {
-            newConversation();
-            setText('');
-            setAttachments([]);
-            ref.current?.focus();
-          }}
+          onClick={() => { newConversation(); setText(''); setAttachments([]); ref.current?.focus(); }}
           disabled={messages.length === 0 || pending}
           aria-label="Start a new conversation"
           title={messages.length === 0 ? 'This conversation has not started yet' : 'Start a new conversation'}
-          className="focusable flex h-9 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[12.5px] font-medium text-ink-soft transition-colors hover:bg-sunk hover:text-ink disabled:opacity-40"
+          className="focusable hidden h-9 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[12.5px] font-medium text-ink-soft transition-colors hover:bg-sunk hover:text-ink disabled:opacity-40 sm:flex"
         >
           <IconPlus width={16} height={16} />
           {!compact && <span>New</span>}
         </button>
         {canMake && canMake.image.ready && (
-          <ModeMenu
-            mode={mode}
-            onChange={(next) => {
-              setMode(next);
-              ref.current?.focus();
-            }}
-            options={[
-              { key: 'ask', label: 'Ask', hint: `${ASSISTANT_NAME} answers from the studio's records, mail and Drive`, enabled: true },
-              {
-                key: 'image',
-                label: 'Image',
-                hint: `${attachments.length > 0 ? 'Transforms what you attached' : 'Drawn from your words'} · no tokens spent`,
-                enabled: canMake.image.ready,
-                unavailable: 'Needs an image key in Settings',
-              },
-            ]}
-          />
+          <div className="hidden shrink-0 sm:block">
+            <ModeMenu
+              mode={mode}
+              onChange={(next) => { setMode(next); ref.current?.focus(); }}
+              options={[
+                { key: 'ask', label: 'Ask', hint: `${ASSISTANT_NAME} answers from the studio's records, mail and Drive`, enabled: true },
+                { key: 'image', label: 'Image', hint: `${attachments.length > 0 ? 'Transforms what you attached' : 'Drawn from your words'} · no tokens spent`, enabled: canMake.image.ready, unavailable: 'Needs an image key in Settings' },
+              ]}
+            />
+          </div>
         )}
-        {mode === 'ask' && <ActiveAgents agents={agents} onClear={() => setAgents([])} />}
         <button
           type="button"
           onClick={() => picker.current?.click()}
           disabled={attachments.length >= MAX_FILES}
           aria-label="Attach a PDF or an image"
           title="Attach a PDF or an image"
-          className="focusable grid h-9 w-9 shrink-0 place-items-center rounded-lg text-ink-soft transition-colors hover:bg-sunk hover:text-ink disabled:opacity-40"
+          className="focusable hidden h-9 w-9 shrink-0 place-items-center rounded-lg text-ink-soft transition-colors hover:bg-sunk hover:text-ink disabled:opacity-40 sm:grid"
         >
           <IconClip width={17} height={17} />
         </button>
@@ -1024,6 +1080,22 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
           </button>
         )}
       </form>
+      {canListen && (
+        <button
+          type="button"
+          onClick={() => setHandsFree(!handsFree)}
+          aria-pressed={handsFree}
+          aria-label={handsFree ? 'End hands-free conversation' : 'Talk hands-free'}
+          title={handsFree ? 'End hands-free conversation' : 'Talk hands-free'}
+          className={`focusable hidden h-9 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-[12.5px] font-medium transition-colors sm:flex ${
+            handsFree ? 'bg-brass/15 text-brass-deep' : 'text-ink-soft hover:bg-sunk hover:text-ink'
+          }`}
+        >
+          <IconTalk width={15} height={15} />
+          {handsFree ? 'End' : 'Talk'}
+        </button>
+      )}
+      </div>
       {attachError && (
         <p className="mt-1.5 px-1 text-[11.5px] text-crit" role="alert">
           {attachError}
@@ -1181,22 +1253,37 @@ export function AssistantChat({ compact = false }: { compact?: boolean }) {
           const el = e.currentTarget;
           pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
         }}
-        className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-5"
+        className={`min-h-0 flex-1 overflow-y-auto ${
+          messages.length === 0 && !briefingLoading
+            ? 'flex flex-col items-center justify-center px-4 py-8'
+            : 'space-y-4 px-4 py-5'
+        }`}
       >
         {messages.length === 0 &&
           (briefingLoading ? (
             <Working status="Getting today's briefing" />
           ) : (
-            <div className="space-y-4">
-              <div className="flex gap-2.5">
-                <JennyAvatar />
-                <div className="rounded-2xl rounded-tl-md bg-sunk px-4 py-3 text-[14px] leading-relaxed text-ink">
-                  Hi — I'm {ASSISTANT_NAME}. Ask me about any project, task, order, email or file, attach a PDF or a
-                  photo, or tell me what you need done. Here is what I can do:
+            <div className="flex w-full max-w-2xl flex-col items-center gap-5 text-center">
+              <div>
+                <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-brass/10 ring-1 ring-brass/20">
+                  <IconActivity width={26} height={26} className="text-brass-deep" />
                 </div>
+                <h2 className="text-[17px] font-semibold text-ink">{ASSISTANT_NAME}</h2>
+                <p className="mt-1.5 text-[13px] text-ink-soft">
+                  Ask about tasks, emails, projects, or tell me what you need done.
+                </p>
               </div>
-              <div className={compact ? 'pl-[38px]' : 'pl-[38px] pr-2'}>
-                <AssistantGuide compact={compact} />
+              <div className="flex flex-wrap justify-center gap-2">
+                {QUICK_SUGGESTIONS.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => send(s)}
+                    className="focusable rounded-full border border-line bg-surface px-3.5 py-1.5 text-[12.5px] text-ink-soft transition-colors hover:border-brass/50 hover:bg-brass/5 hover:text-ink"
+                  >
+                    {s}
+                  </button>
+                ))}
               </div>
             </div>
           ))}

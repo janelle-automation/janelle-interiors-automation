@@ -267,26 +267,50 @@ function Reminder({ userId, admin }: { userId: string; admin: boolean }) {
 
   if (!open) {
     return (
-      <button
-        type="button"
-        onClick={() => setManualOpen(true)}
-        aria-label={`Show pending tasks (${pressing.length} overdue or due today)`}
-        className="dock-aware focusable fixed right-0 top-1/2 z-40 flex -translate-y-1/2 flex-col items-center gap-1.5 rounded-l-lg border border-r-0 border-line bg-surface px-2 py-3 text-ink-soft shadow-pop transition-colors hover:text-ink"
-      >
-        <IconBell width={17} height={17} />
-        {pressing.length > 0 && (
-          <span
-            className={`grid h-5 min-w-5 place-items-center rounded-full px-1 text-[11px] font-bold text-white ${
-              late > 0 ? 'bg-crit' : 'bg-warn'
-            }`}
-          >
-            {pressing.length}
+      <>
+        {/* Mobile: small round pill centred vertically on the right edge —
+            sits in the scrollable content zone, away from both the composer
+            at the bottom and the header at the top */}
+        <button
+          type="button"
+          onClick={() => setManualOpen(true)}
+          aria-label={`Show pending tasks (${pressing.length} overdue or due today)`}
+          className="focusable fixed right-0 top-1/2 z-40 -translate-y-1/2 flex-col items-center gap-1 rounded-l-lg border border-r-0 border-line bg-surface px-1.5 py-2.5 text-ink-soft shadow-pop transition-colors hover:text-ink sm:hidden"
+        >
+          <IconBell width={16} height={16} />
+          {pressing.length > 0 && (
+            <span
+              className={`grid h-5 min-w-5 place-items-center rounded-full px-1 text-[10px] font-bold text-white ${
+                late > 0 ? 'bg-crit' : 'bg-warn'
+              }`}
+            >
+              {pressing.length > 99 ? '99+' : pressing.length}
+            </span>
+          )}
+        </button>
+
+        {/* Desktop: vertical side tab centred in the viewport */}
+        <button
+          type="button"
+          onClick={() => setManualOpen(true)}
+          aria-label={`Show pending tasks (${pressing.length} overdue or due today)`}
+          className="dock-aware focusable fixed right-0 top-1/2 z-40 hidden -translate-y-1/2 flex-col items-center gap-1.5 rounded-l-lg border border-r-0 border-line bg-surface px-2 py-3 text-ink-soft shadow-pop transition-colors hover:text-ink sm:flex"
+        >
+          <IconBell width={17} height={17} />
+          {pressing.length > 0 && (
+            <span
+              className={`grid h-5 min-w-5 place-items-center rounded-full px-1 text-[11px] font-bold text-white ${
+                late > 0 ? 'bg-crit' : 'bg-warn'
+              }`}
+            >
+              {pressing.length}
+            </span>
+          )}
+          <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] [writing-mode:vertical-rl]">
+            Pending
           </span>
-        )}
-        <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] [writing-mode:vertical-rl]">
-          Pending
-        </span>
-      </button>
+        </button>
+      </>
     );
   }
 

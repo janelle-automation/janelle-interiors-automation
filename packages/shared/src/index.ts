@@ -711,12 +711,13 @@ export type AiFeature =
   | 'assistant.answer'
   | 'document.read'
   | 'image.render'
-  | 'video.render';
+  | 'video.render'
+  | 'audit.chat';
 
 export const AI_FEATURES: AiFeature[] = [
   'email.extract', 'task.extract', 'document.extract', 'followup.draft',
   'reply.draft', 'digest.summary', 'report.narrative', 'prompt.run', 'assistant.answer', 'document.read',
-  'image.render', 'video.render',
+  'image.render', 'video.render', 'audit.chat',
 ];
 
 export const AI_FEATURE_LABELS: Record<AiFeature, string> = {
@@ -732,6 +733,7 @@ export const AI_FEATURE_LABELS: Record<AiFeature, string> = {
   'document.read': 'Reading documents on request',
   'image.render': 'Presentation boards',
   'video.render': 'Video clips',
+  'audit.chat': 'Audit Chat',
 };
 
 /** Whether the spend was the agent working, or a person pressing a button. */
@@ -748,6 +750,7 @@ export const AI_FEATURE_TRIGGER: Record<AiFeature, 'agent' | 'person'> = {
   'document.read': 'person',
   'image.render': 'person',
   'video.render': 'person',
+  'audit.chat': 'person',
 };
 
 /**

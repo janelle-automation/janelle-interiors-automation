@@ -821,6 +821,91 @@ function AnswerDocument({ title, body }: { title?: string | null; body: string }
   );
 }
 
+// ── Briefing tiles ──────────────────────────────────────────
+
+const STATUS_STYLE: Record<string, string> = {
+  'in progress': 'bg-brass/15 text-brass-deep',
+  open: 'bg-sky-500/10 text-sky-400',
+  completed: 'bg-good/15 text-good',
+  overdue: 'bg-crit/15 text-crit',
+};
+
+function statusStyle(s: string): string {
+  return STATUS_STYLE[s.toLowerCase()] ?? 'bg-sunk text-ink-soft';
+}
+
+function BriefingTile({ item }: { item: AssistantItem }) {
+  const label = KIND_LABELS[item.kind];
+  const fields = (item.fields ?? []).filter((f) => f.value !== '—');
+
+  const inner = (
+    <div className="flex h-full flex-col gap-2">
+      <div className="flex items-start justify-between gap-2">
+        {label && (
+          <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-faint">{label}</span>
+        )}
+        {item.meta && (
+          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${statusStyle(item.meta)}`}>
+            {item.meta}
+          </span>
+        )}
+      </div>
+      <p className="flex-1 text-[13.5px] font-semibold leading-snug text-ink">{item.title}</p>
+      {item.detail && (
+        <p className="text-[12px] leading-snug text-ink-soft">{item.detail}</p>
+      )}
+      {fields.length > 0 && (
+        <div className="mt-auto border-t border-line pt-2">
+          {fields.map((f) => (
+            <div key={f.label} className="flex gap-1 text-[11.5px]">
+              <span className="shrink-0 text-ink-faint">{f.label}</span>
+              <span className="min-w-0 truncate text-ink-soft">{f.value}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  const href = assistantItemHref(item);
+  const cls = `block rounded-xl border border-line bg-surface p-3.5 transition-colors ${href ? 'hover:border-brass/40 hover:bg-brass/5' : ''}`;
+  return <Target item={item} className={cls}>{inner}</Target>;
+}
+
+export function BriefingAnswerView({ answer }: { answer: AssistantAnswer }) {
+  const followUps = answer.items.filter((i) => i.kind === 'follow_up');
+  const tasks = answer.items.filter((i) => i.kind === 'task');
+  const rest = answer.items.filter((i) => i.kind !== 'follow_up' && i.kind !== 'task');
+
+  return (
+    <div className="space-y-4">
+      <p className="text-[14px] leading-relaxed text-ink">{answer.lead}</p>
+
+      {followUps.length > 0 && (
+        <div className={`grid gap-2.5 ${followUps.length === 1 ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2'}`}>
+          {followUps.map((item, i) => <BriefingTile key={i} item={item} />)}
+        </div>
+      )}
+
+      {tasks.length > 0 && (
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+          {tasks.map((item, i) => <BriefingTile key={i} item={item} />)}
+        </div>
+      )}
+
+      {rest.length > 0 && (
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+          {rest.map((item, i) => <BriefingTile key={i} item={item} />)}
+        </div>
+      )}
+
+      {answer.caveat && (
+        <p className="border-l-2 border-warn/50 pl-2.5 text-[12.5px] text-ink-soft">{answer.caveat}</p>
+      )}
+    </div>
+  );
+}
+
 export function AssistantAnswerView({
   answer,
   compact = false,

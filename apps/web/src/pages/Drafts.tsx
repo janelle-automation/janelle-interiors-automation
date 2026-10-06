@@ -205,7 +205,7 @@ export default function Drafts() {
             const isLinked = d.id === openId;
             return (
               <Card key={d.id} className={`overflow-hidden ${isLinked ? 'ring-2 ring-brass' : ''}`}>
-                <div id={`draft-${d.id}`} className="flex items-start gap-4 px-5 py-4">
+                <div id={`draft-${d.id}`} className="flex flex-wrap items-start gap-x-4 gap-y-3 px-5 py-4">
                   <button
                     onClick={() => toggle(d.id)}
                     aria-expanded={isOpen}
@@ -218,7 +218,7 @@ export default function Drafts() {
                       {to && <span className="mt-0.5 block text-[11px] text-ink-faint">to {to}</span>}
                     </span>
                   </button>
-                  <div className="flex shrink-0 items-center gap-2">
+                  <div className="ml-auto flex items-center gap-2">
                     <span className="mr-1 whitespace-nowrap text-[11px] text-ink-faint">{ageFrom(d.created_at)}</span>
                     {!isEditing && (
                       <button onClick={() => startEdit(d.id)} className="btn-secondary btn-sm" title="Edit this draft">

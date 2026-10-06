@@ -22,7 +22,10 @@ import {
   LogOut,
   MailSearch,
   Mic,
+  Monitor,
   Moon,
+  Pin,
+  PinOff,
   Plus,
   Search,
   SendHorizontal,
@@ -89,3 +92,6 @@ export const IconMailScan = icon(MailSearch);
 export const IconCalendar = icon(CalendarDays);
 export const IconChevronLeft = icon(ChevronLeft, 2);
 export const IconChevronRight = icon(ChevronRight, 2);
+export const IconMonitor = icon(Monitor);
+export const IconPin = icon(Pin);
+export const IconPinOff = icon(PinOff);
