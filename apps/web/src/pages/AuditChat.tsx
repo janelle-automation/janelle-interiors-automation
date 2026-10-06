@@ -35,7 +35,6 @@ function TopBar({
   showTip: boolean;
   setShowTip: (v: boolean) => void;
   installed: boolean;
-  installPrompt: BeforeInstallPromptEvent | null;
 }) {
   const { user } = useAuth();
   const initial = (user?.name ?? '?').slice(0, 1).toUpperCase();
@@ -172,7 +171,6 @@ export default function AuditChat() {
         showTip={showTip}
         setShowTip={setShowTip}
         installed={installed}
-        installPrompt={installPrompt}
       />
 
       <div

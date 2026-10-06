@@ -1,5 +1,4 @@
 import { useState, type CSSProperties, type FormEvent } from 'react';
-import { BrandLogo } from '../components/BrandLogo';
 import { supabase } from '../lib/supabase';
 import { SIGNED_OUT_REASON } from '../lib/api';
 import { PasswordInput } from '../components/ui';
