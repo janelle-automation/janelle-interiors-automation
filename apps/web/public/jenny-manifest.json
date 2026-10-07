@@ -1,12 +1,13 @@
 {
-  "name": "Janelle Interiors",
-  "short_name": "Janelle",
-  "description": "Janelle Interiors Workflow System",
-  "start_url": "/",
+  "id": "/jenny-assistant",
+  "name": "Jenny — Janelle Interiors",
+  "short_name": "Jenny",
+  "description": "Ask Jenny anything, or say what you need done.",
+  "start_url": "/jenny-assistant",
+  "scope": "/jenny-assistant",
   "display": "standalone",
   "background_color": "#0d1117",
   "theme_color": "#0d1117",
-  "orientation": "portrait-primary",
   "icons": [
     {
       "src": "/icons/icon-192.png",
@@ -19,14 +20,6 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"
-    }
-  ],
-  "shortcuts": [
-    {
-      "name": "Jenny — Audit Chat",
-      "short_name": "Jenny",
-      "url": "/jenny-assistant",
-      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }]
     }
   ]
 }

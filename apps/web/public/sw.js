@@ -1,5 +1,9 @@
-const CACHE = 'janelle-shell-v1';
-const SHELL = ['/'];
+const CACHE = 'janelle-shell-v2';
+// Two installable apps, two cold-start URLs. Both resolve to the same
+// index.html through the SPA rewrite, so caching the pair costs one extra
+// entry and lets Jenny open offline at her own address instead of the
+// studio's dashboard.
+const SHELL = ['/', '/jenny-assistant'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
@@ -29,6 +33,10 @@ self.addEventListener('fetch', (e) => {
         }
         return res;
       })
-      .catch(() => caches.match(e.request).then((r) => r || caches.match('/')))
+      .catch(() =>
+        caches.match(e.request).then(
+          (r) => r || caches.match(url.pathname.startsWith('/jenny-assistant') ? '/jenny-assistant' : '/')
+        )
+      )
   );
 });

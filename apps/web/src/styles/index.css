@@ -212,6 +212,26 @@ table,
   }
 }
 
+/* Chrome paints an open <select> list from the control's own background, so a
+   control that is translucent (an active filter's tint) or transparent (a
+   quiet control on a card) gives the list nothing to paint and it falls back
+   to the platform's light menu — while the options go on inheriting the
+   theme's near-white ink. White on white. Naming an opaque, themed pair on
+   the options themselves keeps the list readable however the control that
+   opens it happens to be styled. */
+select option,
+select optgroup {
+  background-color: rgb(var(--surface));
+  color: rgb(var(--ink));
+}
+
+/* Firefox stops drawing its own row highlight once the options are coloured,
+   so the current row says so itself. Chrome and Safari keep the system
+   highlight and ignore this. */
+select option:checked {
+  background-color: rgb(var(--sunk));
+}
+
 /* The native chevron is drawn by the platform and cannot be themed, so it is
    removed and re-drawn as an SVG sibling that inherits our colours. */
 select.control-quiet {
@@ -371,6 +391,37 @@ input[type='date'].control-quiet:not(:hover):not(:focus):invalid {
   }
 }
 
+/* ── Jenny as an installed app ───────────────────────────────
+   `viewport-fit=cover` and a translucent iOS status bar mean the page really
+   does reach the notch and the home indicator, and Jenny has no header left
+   to absorb either. These hold her controls and her conversation inside the
+   safe area; on a screen without insets every value is 0 and they read as
+   the plain margins they replace. */
+.jenny-chip { top: calc(1rem + env(safe-area-inset-top)); }
+.jenny-chip-left { left: calc(1rem + env(safe-area-inset-left)); }
+.jenny-chip-right { right: calc(1rem + env(safe-area-inset-right)); }
+.jenny-body {
+  padding-top: calc(0.75rem + env(safe-area-inset-top));
+  padding-bottom: calc(1rem + env(safe-area-inset-bottom));
+  padding-left: calc(1rem + env(safe-area-inset-left));
+  padding-right: calc(1rem + env(safe-area-inset-right));
+}
+.jenny-drawer {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+}
+@media (min-width: 640px) {
+  .jenny-chip { top: calc(1.5rem + env(safe-area-inset-top)); }
+  .jenny-chip-left { left: calc(1.5rem + env(safe-area-inset-left)); }
+  .jenny-chip-right { right: calc(1.5rem + env(safe-area-inset-right)); }
+  .jenny-body {
+    padding-left: calc(1.5rem + env(safe-area-inset-left));
+    padding-right: calc(1.5rem + env(safe-area-inset-right));
+    padding-bottom: calc(1.5rem + env(safe-area-inset-bottom));
+  }
+}
+
 /* ── Jenny ─────────────────────────────────────────────────── */
 
 /* The panel slides in from the edge it lives on. */
@@ -379,6 +430,15 @@ input[type='date'].control-quiet:not(:hover):not(:focus):invalid {
 }
 @keyframes drawer-in {
   from { transform: translateX(24px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+/* Jenny's history comes from the other edge, so it leans the other way. */
+.assistant-drawer-left {
+  animation: drawer-in-left 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes drawer-in-left {
+  from { transform: translateX(-24px); opacity: 0; }
   to { transform: translateX(0); opacity: 1; }
 }
 

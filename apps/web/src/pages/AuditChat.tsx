@@ -1,10 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { Card } from '../components/ui';
-import { IconMonitor, IconChevronLeft } from '../components/icons';
+import { IconMonitor, IconPlus, IconList } from '../components/icons';
 import { AssistantChat } from '../components/AssistantChat';
-import { BrandLogo } from '../components/BrandLogo';
-import { useAuth } from '../context/AuthContext';
+import { AssistantHistory } from '../components/AssistantHistory';
 
 /* ── PWA install prompt type ─────────────────────────────────── */
 interface BeforeInstallPromptEvent extends Event {
@@ -23,96 +21,161 @@ const isStandalone =
   (window.matchMedia('(display-mode: standalone)').matches ||
     !!(navigator as Navigator & { standalone?: boolean }).standalone);
 
-/* ── Minimal top bar ─────────────────────────────────────────── */
-function TopBar({
-  onInstall,
-  showTip,
-  setShowTip,
-  installed,
-}: {
-  onInstall: () => void;
-  showTip: boolean;
-  setShowTip: (v: boolean) => void;
-  installed: boolean;
-}) {
-  const { user } = useAuth();
-  const initial = (user?.name ?? '?').slice(0, 1).toUpperCase();
+// Waved away once, stays away: the chip floats over the conversation and has
+// no title bar to retreat into, so it must not be askable twice.
+const DISMISSED_KEY = 'jenny-install-dismissed';
+
+/* ── The one affordance ──────────────────────────────────────────
+   Jenny carries no chrome of her own, so the offer to install her floats
+   above the conversation and leaves for good once it has been taken,
+   waved away, or made redundant by already running as an app. */
+function InstallChip() {
+  const [prompt, setPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [installed, setInstalled] = useState(isStandalone);
+  const [showTip, setShowTip] = useState(false);
+  const [dismissed, setDismissed] = useState(() => {
+    try {
+      return localStorage.getItem(DISMISSED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    const onPrompt = (e: Event) => {
+      e.preventDefault();
+      setPrompt(e as BeforeInstallPromptEvent);
+    };
+    const onInstalled = () => setInstalled(true);
+    window.addEventListener('beforeinstallprompt', onPrompt);
+    window.addEventListener('appinstalled', onInstalled);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', onPrompt);
+      window.removeEventListener('appinstalled', onInstalled);
+    };
+  }, []);
+
+  if (installed || dismissed) return null;
+
+  const dismiss = () => {
+    setDismissed(true);
+    try {
+      localStorage.setItem(DISMISSED_KEY, '1');
+    } catch {
+      /* storage may be blocked; the chip simply returns next visit */
+    }
+  };
+
+  // Chrome and Edge hand us a real prompt. Safari and Firefox never will, so
+  // there the button opens the instructions for doing it by hand instead.
+  const install = async () => {
+    if (!prompt) {
+      setShowTip((v) => !v);
+      return;
+    }
+    await prompt.prompt();
+    const { outcome } = await prompt.userChoice;
+    if (outcome === 'accepted') setInstalled(true);
+    setPrompt(null);
+  };
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-surface px-4">
-      <Link
-        to="/"
-        className="focusable flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-ink-soft transition-colors hover:bg-sunk hover:text-ink"
-        title="Back to studio"
-      >
-        <IconChevronLeft width={16} height={16} />
-        <span className="hidden sm:inline">Studio</span>
-      </Link>
-
-      <span className="h-4 w-px bg-line" aria-hidden="true" />
-
-      <div className="flex items-center gap-2">
-        <BrandLogo variant="mark" className="w-7 shrink-0 text-ink-soft" />
-        <span className="text-[14px] font-semibold text-ink">Jenny</span>
-      </div>
-
-      <div className="ml-auto flex items-center gap-2">
-        {!installed && (
-          <div className="relative">
-            <button
-              type="button"
-              onClick={onInstall}
-              className="btn-secondary btn-sm"
-              title="Add to Home Screen"
-            >
-              <IconMonitor width={14} height={14} />
-              <span className="hidden sm:inline">
-                {isIOS || isAndroid ? 'Add to Home Screen' : 'Pin to desktop'}
-              </span>
-            </button>
-
-            {showTip && (
-              <div className="absolute right-0 top-full z-50 mt-2 w-64 rounded-xl border border-line bg-surface p-4 shadow-xl text-[12.5px] text-ink-soft leading-relaxed">
-                <p className="font-semibold text-ink mb-2">Add to Home Screen</p>
-                {isIOS ? (
-                  <ol className="list-decimal list-inside space-y-1.5">
-                    <li>Tap the <span className="font-medium text-ink">Share</span> <span className="text-[11px]">(&#x2191;)</span> button in Safari</li>
-                    <li>Scroll and tap <span className="font-medium text-ink">Add to Home Screen</span></li>
-                    <li>Tap <span className="font-medium text-ink">Add</span></li>
-                  </ol>
-                ) : isAndroid ? (
-                  <ol className="list-decimal list-inside space-y-1.5">
-                    <li>Tap the <span className="font-medium text-ink">&#8942; menu</span> in Chrome</li>
-                    <li>Tap <span className="font-medium text-ink">Add to Home screen</span></li>
-                    <li>Tap <span className="font-medium text-ink">Add</span></li>
-                  </ol>
-                ) : (
-                  <ol className="list-decimal list-inside space-y-1.5">
-                    <li>Click the <span className="font-medium text-ink">&#8942; menu</span> in Chrome</li>
-                    <li>Click <span className="font-medium text-ink">Save and share</span></li>
-                    <li>Click <span className="font-medium text-ink">Install page as app</span></li>
-                  </ol>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setShowTip(false)}
-                  className="mt-3 text-brass-deep font-medium hover:underline"
-                >
-                  Got it
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-
-        <div
-          className="grid h-8 w-8 place-items-center rounded-full bg-brass text-[13px] font-bold text-white"
-          title={user?.name ?? ''}
+    <div className="jenny-chip jenny-chip-right fixed z-50">
+      <div className="flex items-center gap-0.5 rounded-full border border-line bg-surface/90 py-0.5 pl-1 pr-1 shadow-pop backdrop-blur">
+        <button
+          type="button"
+          onClick={install}
+          className="focusable flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12.5px] font-medium text-ink-soft transition-colors hover:text-ink"
         >
-          {initial}
-        </div>
+          <IconMonitor width={14} height={14} />
+          <span>{isIOS || isAndroid ? 'Add to Home Screen' : 'Install Jenny'}</span>
+        </button>
+        <button
+          type="button"
+          onClick={dismiss}
+          aria-label="Not now"
+          title="Not now"
+          className="focusable grid h-6 w-6 shrink-0 place-items-center rounded-full text-ink-faint transition-colors hover:bg-sunk hover:text-ink"
+        >
+          <IconPlus width={12} height={12} className="rotate-45" />
+        </button>
       </div>
-    </header>
+
+      {showTip && (
+        <div className="absolute right-0 top-full z-50 mt-2 w-64 rounded-xl border border-line bg-surface p-4 text-[12.5px] leading-relaxed text-ink-soft shadow-pop">
+          <p className="mb-2 font-semibold text-ink">Add to Home Screen</p>
+          {isIOS ? (
+            <ol className="list-inside list-decimal space-y-1.5">
+              <li>Tap the <span className="font-medium text-ink">Share</span> <span className="text-[11px]">(&#x2191;)</span> button in Safari</li>
+              <li>Scroll and tap <span className="font-medium text-ink">Add to Home Screen</span></li>
+              <li>Tap <span className="font-medium text-ink">Add</span></li>
+            </ol>
+          ) : isAndroid ? (
+            <ol className="list-inside list-decimal space-y-1.5">
+              <li>Tap the <span className="font-medium text-ink">&#8942; menu</span> in Chrome</li>
+              <li>Tap <span className="font-medium text-ink">Add to Home screen</span></li>
+              <li>Tap <span className="font-medium text-ink">Add</span></li>
+            </ol>
+          ) : (
+            <ol className="list-inside list-decimal space-y-1.5">
+              <li>Click the <span className="font-medium text-ink">&#8942; menu</span> in Chrome</li>
+              <li>Click <span className="font-medium text-ink">Save and share</span></li>
+              <li>Click <span className="font-medium text-ink">Install page as app</span></li>
+            </ol>
+          )}
+          <button
+            type="button"
+            onClick={() => setShowTip(false)}
+            className="mt-3 font-medium text-brass-deep hover:underline"
+          >
+            Got it
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Past conversations ─────────────────────────────────────────
+   In the studio the history hangs off the panel's own header. Here there is
+   no header to hang it from, so it arrives as a drawer over the conversation
+   and leaves the moment a conversation is picked — the chat behind it is the
+   point of the page, and the list is only how you get back to one. */
+function HistoryDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <>
+      <div
+        className="fixed inset-0 z-40 bg-black/40"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <aside
+        aria-label="Past conversations"
+        className="assistant-drawer-left jenny-drawer fixed inset-y-0 left-0 z-50 flex w-full flex-col border-r border-line bg-surface shadow-pop sm:w-[340px]"
+      >
+        <header className="flex h-12 shrink-0 items-center justify-between border-b border-line px-3">
+          <span className="text-[13px] font-semibold text-ink">Conversations</span>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="focusable grid h-7 w-7 place-items-center rounded-lg text-ink-faint transition-colors hover:bg-sunk hover:text-ink"
+          >
+            <IconPlus width={14} height={14} className="rotate-45" />
+          </button>
+        </header>
+        <AssistantHistory onOpened={onClose} onNew={onClose} />
+      </aside>
+    </>
   );
 }
 
@@ -120,6 +183,7 @@ function TopBar({
 export default function AuditChat() {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [chatHeight, setChatHeight] = useState<number | null>(null);
+  const [history, setHistory] = useState(false);
 
   useLayoutEffect(() => {
     const measure = () => {
@@ -136,45 +200,41 @@ export default function AuditChat() {
     return () => { window.removeEventListener('resize', measure); ro.disconnect(); };
   }, []);
 
-  /* PWA install */
-  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
-  const [installed, setInstalled] = useState(isStandalone);
-  const [showTip, setShowTip] = useState(false);
-
+  /*
+   * index.html picks the manifest on a cold load, which is the path that
+   * matters for installing. Reaching Jenny from the studio's sidebar is a
+   * client-side navigation the browser never sees, so the swap is repeated
+   * here — and undone on the way out, so the studio does not offer itself
+   * as Jenny afterwards.
+   */
   useEffect(() => {
-    const onPrompt = (e: Event) => { e.preventDefault(); setInstallPrompt(e as BeforeInstallPromptEvent); };
-    const onInstalled = () => setInstalled(true);
-    window.addEventListener('beforeinstallprompt', onPrompt);
-    window.addEventListener('appinstalled', onInstalled);
-    return () => {
-      window.removeEventListener('beforeinstallprompt', onPrompt);
-      window.removeEventListener('appinstalled', onInstalled);
-    };
+    const link = document.getElementById('app-manifest') as HTMLLinkElement | null;
+    if (!link) return;
+    const previous = link.getAttribute('href');
+    link.setAttribute('href', '/jenny-manifest.json');
+    return () => { if (previous) link.setAttribute('href', previous); };
   }, []);
 
-  const handleInstall = async () => {
-    if (installPrompt) {
-      await installPrompt.prompt();
-      const { outcome } = await installPrompt.userChoice;
-      if (outcome === 'accepted') setInstalled(true);
-      setInstallPrompt(null);
-    } else {
-      setShowTip((v) => !v);
-    }
-  };
-
   return (
-    <div className="flex min-h-screen flex-col bg-[var(--color-bg)]">
-      <TopBar
-        onInstall={handleInstall}
-        showTip={showTip}
-        setShowTip={setShowTip}
-        installed={installed}
-      />
+    <div className="flex min-h-screen flex-col bg-paper">
+      <button
+        type="button"
+        onClick={() => setHistory(true)}
+        aria-label="Past conversations"
+        title="Past conversations"
+        className="focusable jenny-chip jenny-chip-left fixed z-30 flex items-center gap-1.5 rounded-full border border-line bg-surface/90 py-1.5 pl-2.5 pr-3 text-[12.5px] font-medium text-ink-soft shadow-pop backdrop-blur transition-colors hover:text-ink"
+      >
+        <IconList width={14} height={14} />
+        <span>History</span>
+      </button>
+
+      <HistoryDrawer open={history} onClose={() => setHistory(false)} />
+
+      <InstallChip />
 
       <div
         ref={wrapRef}
-        className="flex-1 px-4 pb-4 pt-3 sm:px-6 sm:pb-6"
+        className="jenny-body flex-1"
         style={chatHeight ? { height: chatHeight } : undefined}
       >
         <Card className="mx-auto flex h-full min-h-0 max-w-3xl flex-col overflow-hidden">
