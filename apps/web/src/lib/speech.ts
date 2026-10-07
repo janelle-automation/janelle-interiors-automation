@@ -52,6 +52,45 @@ export function speechInputSupported(): boolean {
   return recognitionCtor() !== null;
 }
 
+/** Android and iOS: one microphone, and a platform speech stack of its own. */
+function isHandheld(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /android|iphone|ipad|ipod/i.test(navigator.userAgent);
+}
+
+/**
+ * Whether this device lets only one thing hold the microphone at a time.
+ *
+ * A desktop browser is happy to let the level meter's `getUserMedia` stream
+ * and the recogniser share it. Android Chrome is not: with a stream already
+ * open the recogniser is handed audio but returns no transcript at all —
+ * you speak, the meter draws your voice perfectly, and nothing is ever
+ * heard. So on a phone the meter is opened only far enough to settle the
+ * permission and then released, and the one microphone goes to the
+ * recogniser, which is the part that cannot be done without.
+ */
+function micIsExclusive(): boolean {
+  return isHandheld();
+}
+
+/**
+ * Whether `continuous` can be relied on to hold a session open.
+ *
+ * Android's speech provider does not implement continuous recognition, and
+ * Chrome ends a session on its own regardless of the flag — after a stretch
+ * of silence, and periodically even mid-sentence. Asked for a continuous
+ * session on a phone it can return nothing at all, rather than the one
+ * utterance it would otherwise have heard.
+ *
+ * Turned off, the recogniser itself decides when a sentence has ended and
+ * `onend` delivers what it heard. Nothing else has to change: the
+ * hands-free loop already listens again from there, which is the restart
+ * the platform needs either way.
+ */
+function continuousIsReliable(): boolean {
+  return !isHandheld();
+}
+
 export function speechOutputSupported(): boolean {
   return typeof window !== 'undefined' && 'speechSynthesis' in window;
 }
@@ -427,8 +466,18 @@ export function listen(opts: ListenOptions): StopListening {
       meter,
       new Promise<null>((r) => { setTimeout(() => r(null), MIC_GRANT_MS); }),
     ]);
-    if (close) closeMic = close;
-    else void meter.then((c) => { if (ended || finished) c(); else closeMic = c; });
+    if (micIsExclusive()) {
+      // Permission is settled; give the microphone up before the recogniser
+      // asks for it. No live level on a phone, which costs the "I can barely
+      // hear you" hint and nothing else.
+      close?.();
+      void meter.then((c) => c());
+      closeMic = null;
+    } else if (close) {
+      closeMic = close;
+    } else {
+      void meter.then((c) => { if (ended || finished) c(); else closeMic = c; });
+    }
     if (cancelled || ended || finished) {
       closeMic?.();
       closeMic = null;
@@ -439,7 +488,7 @@ export function listen(opts: ListenOptions): StopListening {
     const r = new Ctor();
     rec = r;
     r.lang = LANG;
-    r.continuous = true;
+    r.continuous = continuousIsReliable();
     r.interimResults = true;
     r.maxAlternatives = 5;
 

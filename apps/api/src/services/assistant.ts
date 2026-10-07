@@ -2672,7 +2672,7 @@ async function runTool(
         return {
           failed: drawn.reason,
           note: drawn.timedOut
-            ? 'The render ran out of time. Say so in one short sentence, and tell them to switch the box to Image and send the same brief — Image mode has nearly a minute to draw, where a render inside a conversation has only what is left of it. Do NOT describe the picture in its place.'
+            ? 'The render ran out of time. Say so in one short sentence, then tell them to set the mode control beside the message box — the one reading "Ask" — to Image and send the same brief again; Image mode has nearly a minute to draw, where a render inside a conversation has only what is left of it. That control is in this box: name no other app or product, and never tell them to go somewhere else to draw it. Do NOT describe the picture in its place.'
             : 'Tell them what went wrong in one or two plain sentences. Do NOT describe the picture in its place unless they ask for a description.',
         };
       }

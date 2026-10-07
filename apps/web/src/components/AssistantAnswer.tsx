@@ -246,16 +246,25 @@ function RecordTable({
       <div className={`mt-2.5 space-y-2 ${compact ? '' : 'sm:hidden'}`}>
         {items.map((item, r) => (
           <Target key={r} item={item} className="block rounded-lg border border-line bg-surface px-3 py-2.5">
-            <span className="flex items-center gap-2">
-              <Dot tone={item.tone} />
-              <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium text-ink">{item.title}</span>
-              {item.meta && <span className="shrink-0 text-[12px] text-ink-soft">{item.meta}</span>}
+            {/* The title wraps rather than truncating: on a phone it is the
+                one line that has to be readable, and "Review updated Lemon
+                Resid…" names no task anybody can act on. */}
+            <span className="flex items-start gap-2">
+              <span className="mt-[5px] shrink-0">
+                <Dot tone={item.tone} />
+              </span>
+              <span className="min-w-0 flex-1 text-[13.5px] font-medium leading-snug text-ink">{item.title}</span>
+              {item.meta && <span className="shrink-0 pt-px text-[12px] text-ink-soft">{item.meta}</span>}
             </span>
-            <span className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1">
+            {/* Label beside value, not above it, and one pair per line. Two
+                columns split an already narrow screen in half and every
+                value landed on an ellipsis — a project and an owner you
+                cannot read are worth less than the room they took. */}
+            <span className="mt-2 block space-y-1">
               {(item.fields ?? []).map((f) => (
-                <span key={f.label} className="min-w-0 text-[12px]">
-                  <span className="block text-[10.5px] uppercase tracking-wide text-ink-faint">{f.label}</span>
-                  <span className="block truncate text-ink-soft">{f.value}</span>
+                <span key={f.label} className="flex gap-2 text-[12px] leading-snug">
+                  <span className="w-[4.25rem] shrink-0 text-ink-faint">{f.label}</span>
+                  <span className="min-w-0 flex-1 text-ink-soft">{f.value}</span>
                 </span>
               ))}
             </span>
@@ -540,7 +549,7 @@ function ImageDownloadMenu({ file, name }: { file: AssistantFile; name: string }
       {open && (
         <span
           role="menu"
-          className="absolute right-0 top-full z-30 mt-1 w-56 overflow-hidden rounded-xl border border-line bg-surface py-1 text-left shadow-pop"
+          className="absolute right-0 top-full z-30 mt-1 w-56 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-line bg-surface py-1 text-left shadow-pop"
         >
           {EXPORT_FORMATS.map((f) => (
             <button
@@ -673,7 +682,7 @@ function PagePreview({ item, compact }: { item: AssistantItem; compact: boolean 
 
   return (
     <div className="px-3 py-3">
-      <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+      <div className="mb-2.5 flex items-center justify-between gap-2">
         <span className="min-w-0 truncate text-[13.5px] font-medium text-ink" title={item.title}>
           {item.title}
         </span>
