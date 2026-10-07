@@ -30,10 +30,13 @@
         var jenny = /^\/jenny-assistant(\/|$)/.test(location.pathname);
         document.getElementById('app-manifest').href =
           jenny ? '/jenny-manifest.json' : '/manifest.json';
-        // iOS takes the home-screen name from this meta, never the manifest.
+        // iOS reads neither the name nor the icon from the manifest: the
+        // home-screen tile comes from these two tags alone.
         if (jenny) {
           var t = document.querySelector('meta[name="apple-mobile-web-app-title"]');
           if (t) t.content = 'Jenny';
+          var i = document.querySelector('link[rel="apple-touch-icon"]');
+          if (i) i.href = '/jenny-icon-192.png';
         }
       })();
     </script>
