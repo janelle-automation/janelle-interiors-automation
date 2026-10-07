@@ -68,8 +68,13 @@ const MIN_OUTPUT_TOKENS = 512;
  */
 function estimateTokens(params: { system?: unknown; messages?: unknown; tools?: unknown }): number {
   let chars = 0;
-  const withoutPayloads = (_key: string, value: unknown) =>
-    typeof value === 'string' && value.length > 2_000 ? '' : value;
+  // A base64 payload is excluded by WHERE it sits, not by how long it is.
+  // Keyed on length, any brief past two thousand characters counted as
+  // nothing at all — so the longest requests, which are precisely the
+  // expensive ones, were the only requests the budget could not see, and the
+  // cap never closed on them. `data` is where an image or document rides.
+  const withoutPayloads = (key: string, value: unknown) =>
+    key === 'data' && typeof value === 'string' ? '' : value;
   for (const part of [params.system, params.messages, params.tools]) {
     if (typeof part === 'string') chars += part.length;
     else if (part) chars += JSON.stringify(part, withoutPayloads).length;

@@ -315,6 +315,18 @@ const IMAGINE_BUDGET_MS = Number(process.env.IMAGINE_BUDGET_MS || 56_000);
  * anywhere without that limit it now finishes.
  */
 const IMAGINE_LONG_BUDGET_MS = Number(process.env.IMAGINE_LONG_BUDGET_MS || 110_000);
+/**
+ * Briefs that draw a whole sheet rather than a picture.
+ *
+ * The flooring plan was only the first of these. An architectural floor
+ * plan, a site plan or an elevation is the same job and the same 45–55
+ * seconds of drawing, so matching the word "flooring" alone handed "a full
+ * site plan with room dimensions in feet" the ordinary clock and let it run
+ * out — a timeout on the one kind of brief that most needed the long one.
+ */
+const SHEET_BRIEF =
+  /\b(?:floor|site|roof|ceiling|elevation|lighting|furniture|landscape|reflected\s+ceiling)\s+plans?\b|\bfloorplans?\b|\belevations?\b|\bpresentation\s+sheet\b/i;
+
 /** Held back for the upload, the job row and the reply once the picture is in. */
 const IMAGINE_STORE_RESERVE_MS = 4_000;
 
@@ -388,7 +400,9 @@ assistantRouter.post(
       // Whatever reading the attachments left of the budget.
       timeoutMs: Math.max(
         15_000,
-        (FLOORING_PLAN.test(prompt) ? IMAGINE_LONG_BUDGET_MS : IMAGINE_BUDGET_MS) - (Date.now() - startedAt) - IMAGINE_STORE_RESERVE_MS,
+        (FLOORING_PLAN.test(prompt) || SHEET_BRIEF.test(prompt) ? IMAGINE_LONG_BUDGET_MS : IMAGINE_BUDGET_MS) -
+          (Date.now() - startedAt) -
+          IMAGINE_STORE_RESERVE_MS,
       ),
     });
     // `timedOut` lets the page offer the same brief again as it stands;

@@ -261,6 +261,7 @@ function UserMessage({ message }: { message: ChatMessage }) {
   }, [editing]);
 
   const canSend = !pending && (!!draft.trim() || !!message.files?.length);
+  const sendLabel = message.made === 'image' ? 'Draw it' : message.made === 'video' ? 'Make it' : 'Send';
   const submit = () => {
     if (!canSend) return;
     setEditing(false);
@@ -304,17 +305,40 @@ function UserMessage({ message }: { message: ChatMessage }) {
             className="block max-h-60 w-full resize-none bg-transparent px-1.5 py-1 text-[14px] leading-relaxed text-ink outline-none"
           />
           {message.files?.length ? <AttachedFiles files={message.files} /> : null}
-          <div className="mt-2 flex flex-wrap items-center justify-end gap-2">
+          {/*
+            * Icons on a phone, words where there is room for them. Two
+            * worded buttons and the warning never fitted one line on a
+            * narrow screen: the buttons stacked and the warning they were
+            * stacked under got clipped mid-sentence. The label survives as
+            * the tooltip and the accessible name, so nothing is lost but the
+            * space it was taking.
+            */}
+          <div className="mt-2 flex items-center justify-end gap-2">
             {after > 0 && (
-              <span className="mr-auto px-1.5 text-[11.5px] text-ink-faint">
+              <span className="mr-auto min-w-0 px-1.5 text-[11.5px] leading-snug text-ink-faint">
                 Sending replaces {after === 1 ? 'the answer' : 'everything'} below
               </span>
             )}
-            <button type="button" onClick={cancel} className="btn-secondary btn-sm">
-              Cancel
+            <button
+              type="button"
+              onClick={cancel}
+              aria-label="Cancel"
+              title="Cancel"
+              className="btn-secondary btn-sm shrink-0 px-2 sm:px-3"
+            >
+              <IconX width={15} height={15} className="sm:hidden" />
+              <span className="hidden sm:inline">Cancel</span>
             </button>
-            <button type="button" onClick={submit} disabled={!canSend} className="btn-primary btn-sm">
-              {message.made === 'image' ? 'Draw it' : message.made === 'video' ? 'Make it' : 'Send'}
+            <button
+              type="button"
+              onClick={submit}
+              disabled={!canSend}
+              aria-label={sendLabel}
+              title={sendLabel}
+              className="btn-primary btn-sm shrink-0 px-2 sm:px-3"
+            >
+              <IconSend width={15} height={15} className="sm:hidden" />
+              <span className="hidden sm:inline">{sendLabel}</span>
             </button>
           </div>
         </div>
@@ -355,15 +379,24 @@ function UserMessage({ message }: { message: ChatMessage }) {
   );
 }
 
-function MessageView({ message, compact }: { message: ChatMessage; compact: boolean }) {
+/*
+ * `app` is the standalone page — Jenny installed and opened on her own.
+ * There she reads as a messaging app rather than a panel in a workflow
+ * system: her words sit plainly on the page instead of inside a tinted
+ * card, and the avatar goes, because in a conversation with exactly one
+ * other party every message is already attributed by which side it is on.
+ * The panel and the studio's own page keep the card treatment, which is
+ * what tells them apart from the page behind them.
+ */
+function MessageView({ message, compact, app = false }: { message: ChatMessage; compact: boolean; app?: boolean }) {
   const { send, imagine, pending } = useAssistant();
 
   if (message.role === 'user') return <UserMessage message={message} />;
 
   if (message.kind === 'error') {
     return (
-      <div className="flex gap-2.5">
-        <JennyAvatar />
+      <div className={`flex ${app ? '' : 'gap-2.5'}`}>
+        {!app && <JennyAvatar />}
         <div className="min-w-0 max-w-[85%] rounded-2xl rounded-tl-md border border-crit/30 bg-crit/5 px-4 py-2.5">
           <p className="text-[13.5px] text-ink">That didn't work: {message.content}</p>
           {(message.retry || message.retryFiles?.length) && (
@@ -397,13 +430,17 @@ function MessageView({ message, compact }: { message: ChatMessage; compact: bool
         : 'max-w-[85%]';
 
   return (
-    <div className="group flex gap-2.5">
-      <JennyAvatar />
-      <div className={`min-w-0 ${width}`}>
+    <div className={`group flex ${app ? '' : 'gap-2.5'}`}>
+      {!app && <JennyAvatar />}
+      <div className={`min-w-0 ${app ? 'w-full' : width}`}>
         <div
-          className={`rounded-2xl rounded-tl-md px-4 py-3 text-[14px] leading-relaxed text-ink ${
-            briefing ? 'border border-brass/25 bg-brass/[0.06]' : 'bg-sunk'
-          }`}
+          className={
+            app
+              ? 'text-[15px] leading-relaxed text-ink'
+              : `rounded-2xl rounded-tl-md px-4 py-3 text-[14px] leading-relaxed text-ink ${
+                  briefing ? 'border border-brass/25 bg-brass/[0.06]' : 'bg-sunk'
+                }`
+          }
         >
           {briefing && (
             <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-brass-deep">Your briefing</div>
@@ -593,7 +630,10 @@ function ModeMenu({ mode, options, onChange }: { mode: ComposeMode; options: Mod
         }`}
       >
         <Icon width={16} height={16} />
-        <span>{current.label}</span>
+        {/* Narrow composers have no room for the word. The icon carries it,
+            and Image mode also tints the whole control, so which one is on
+            is still legible without it. */}
+        <span className="hidden sm:inline">{current.label}</span>
         <IconChevron width={13} height={13} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && (
@@ -633,7 +673,7 @@ function ModeMenu({ mode, options, onChange }: { mode: ComposeMode; options: Mod
   );
 }
 
-function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.MutableRefObject<((files: File[]) => void) | null> }) {
+function Composer({ compact, app = false, dropInto }: { compact: boolean; app?: boolean; dropInto: React.MutableRefObject<((files: File[]) => void) | null> }) {
   const {
     send, imagine, pending, stop, canListen, lookingAt, focusRequest, setMicError, vocabulary, uploadFile, prefill, attachRequest,
     newConversation, messages, handsFree, setHandsFree,
@@ -919,7 +959,11 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
           e.preventDefault();
           submit();
         }}
-        className="flex flex-1 items-end gap-1.5 rounded-xl border border-line bg-surface px-2 py-1.5 transition-colors focus-within:border-brass"
+        className={`flex flex-1 gap-1.5 border border-line bg-surface transition-colors focus-within:border-brass ${
+          app
+            ? 'flex-wrap items-center rounded-3xl px-2.5 py-2 shadow-pop'
+            : 'items-end rounded-xl px-2 py-1.5'
+        }`}
       >
         {/* File inputs: main (desktop + Files option), camera, photos */}
         <input ref={picker} type="file" accept={ACCEPT_ATTR} multiple hidden onChange={(e) => { addFiles(Array.from(e.target.files ?? [])); e.target.value = ''; }} />
@@ -988,7 +1032,7 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
           {!compact && <span>New</span>}
         </button>
         {canMake && canMake.image.ready && (
-          <div className="hidden shrink-0 sm:block">
+          <div className="shrink-0">
             <ModeMenu
               mode={mode}
               onChange={(next) => { setMode(next); ref.current?.focus(); }}
@@ -1056,7 +1100,9 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
                   : `Ask ${ASSISTANT_NAME} anything, or say what you need done`
           }
           aria-label={`Message ${ASSISTANT_NAME}`}
-          className="max-h-36 min-h-[36px] flex-1 resize-none bg-transparent px-1.5 py-2 text-[14px] leading-5 text-ink outline-none placeholder:text-ink-faint"
+          className={`max-h-36 min-h-[36px] resize-none bg-transparent px-1.5 py-2 text-[14px] leading-5 text-ink outline-none placeholder:text-ink-faint ${
+            app ? 'order-first w-full basis-full' : 'flex-1'
+          }`}
         />
         {pending ? (
           <button
@@ -1064,7 +1110,9 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
             onClick={stop}
             aria-label="Stop"
             title="Stop waiting for this answer"
-            className="focusable grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-ink text-surface transition-opacity hover:opacity-85"
+            className={`focusable grid h-9 w-9 shrink-0 place-items-center rounded-full bg-ink text-surface transition-opacity hover:opacity-85 ${
+              app ? 'order-last ml-auto' : ''
+            }`}
           >
             <IconStop width={16} height={16} />
           </button>
@@ -1074,7 +1122,9 @@ function Composer({ compact, dropInto }: { compact: boolean; dropInto: React.Mut
             aria-label="Send"
             title="Send (Enter)"
             disabled={!canSend}
-            className="focusable grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brass text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+            className={`focusable grid h-9 w-9 shrink-0 place-items-center rounded-full bg-brass text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 ${
+              app ? 'order-last ml-auto' : ''
+            }`}
           >
             <IconSend width={18} height={18} />
           </button>
@@ -1185,7 +1235,7 @@ function VoiceBar() {
 
 // ── The conversation ────────────────────────────────────────
 
-export function AssistantChat({ compact = false }: { compact?: boolean }) {
+export function AssistantChat({ compact = false, app = false }: { compact?: boolean; app?: boolean }) {
   const { messages, pending, status, send, briefingLoading, handsFree, micError, setMicError } = useAssistant();
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
@@ -1291,7 +1341,7 @@ export function AssistantChat({ compact = false }: { compact?: boolean }) {
         {messages.map((m, i) => (
           <div key={m.id} className="space-y-4">
             {(i === 0 || dayLabel(messages[i - 1].at) !== dayLabel(m.at)) && <DayDivider at={m.at} />}
-            <MessageView message={m} compact={compact} />
+            <MessageView message={m} compact={compact} app={app} />
           </div>
         ))}
 
@@ -1300,16 +1350,37 @@ export function AssistantChat({ compact = false }: { compact?: boolean }) {
         {pending && <Working status={status} />}
       </div>
 
+      {/*
+        * Everything that reaches here is about the microphone — not heard,
+        * heard faintly, stopped listening — and it arrives while someone is
+        * looking at the orb, not at the page. As a full-width strip it read
+        * as another row of the conversation. An inset card with the mic on
+        * it, announced to screen readers and moving slightly as it lands,
+        * reads as something that just happened and wants answering.
+        */}
       {micError && (
-        <div className="flex items-start justify-between gap-3 border-t border-line bg-crit/5 px-4 py-2 text-[12.5px] text-crit">
-          <span>{micError}</span>
-          <button type="button" onClick={() => setMicError(null)} className="shrink-0 underline">
-            Dismiss
-          </button>
+        <div className="px-3 pb-0.5 pt-2">
+          <div
+            role="alert"
+            aria-live="assertive"
+            className="assistant-alert flex items-start gap-2.5 rounded-xl border border-crit/35 bg-crit/10 py-2.5 pl-3 pr-2 text-[12.5px] leading-snug text-crit"
+          >
+            <IconMic width={15} height={15} className="mt-px shrink-0" />
+            <p className="min-w-0 flex-1">{micError}</p>
+            <button
+              type="button"
+              onClick={() => setMicError(null)}
+              aria-label="Dismiss"
+              title="Dismiss"
+              className="focusable grid h-6 w-6 shrink-0 place-items-center rounded-md text-crit/70 transition-colors hover:bg-crit/15 hover:text-crit"
+            >
+              <IconPlus width={12} height={12} className="rotate-45" />
+            </button>
+          </div>
         </div>
       )}
 
-      {handsFree ? <VoiceBar /> : <Composer compact={compact} dropInto={dropInto} />}
+      {handsFree ? <VoiceBar /> : <Composer compact={compact} app={app} dropInto={dropInto} />}
     </div>
   );
 }
