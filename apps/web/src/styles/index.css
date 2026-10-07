@@ -397,11 +397,35 @@ input[type='date'].control-quiet:not(:hover):not(:focus):invalid {
    to absorb either. These hold her controls and her conversation inside the
    safe area; on a screen without insets every value is 0 and they read as
    the plain margins they replace. */
+/*
+ * Exactly one viewport tall, and it keeps its own overflow — so the only
+ * thing that scrolls on this page is the conversation.
+ *
+ * `100dvh`, not `100vh`: on a phone the address bar collapses as you scroll,
+ * and `vh` is measured against the LARGE viewport — the taller one you only
+ * see once it has collapsed. A shell sized that way overhangs what is
+ * actually visible, and that overhang is page scroll. `dvh` tracks the real
+ * one, including when the keyboard opens. `vh` stays first as the fallback.
+ */
+.jenny-shell {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+html.jenny-locked,
+html.jenny-locked body {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 .jenny-chip { top: calc(1rem + env(safe-area-inset-top)); }
 .jenny-chip-left { left: calc(1rem + env(safe-area-inset-left)); }
 .jenny-chip-right { right: calc(1rem + env(safe-area-inset-right)); }
 .jenny-body {
-  padding-top: calc(0.75rem + env(safe-area-inset-top));
+  /* Clears the floating History and Install chips, which sit 1rem below
+     the safe-area top and stand about 2.1rem tall, so the conversation
+     scrolls past them rather than under them. */
+  padding-top: calc(3.75rem + env(safe-area-inset-top));
   padding-bottom: calc(1rem + env(safe-area-inset-bottom));
   padding-left: calc(1rem + env(safe-area-inset-left));
   padding-right: calc(1rem + env(safe-area-inset-right));
@@ -416,6 +440,7 @@ input[type='date'].control-quiet:not(:hover):not(:focus):invalid {
   .jenny-chip-left { left: calc(1.5rem + env(safe-area-inset-left)); }
   .jenny-chip-right { right: calc(1.5rem + env(safe-area-inset-right)); }
   .jenny-body {
+    padding-top: calc(4.25rem + env(safe-area-inset-top));
     padding-left: calc(1.5rem + env(safe-area-inset-left));
     padding-right: calc(1.5rem + env(safe-area-inset-right));
     padding-bottom: calc(1.5rem + env(safe-area-inset-bottom));

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Card } from '../components/ui';
 import { IconMonitor, IconPlus, IconList } from '../components/icons';
 import { AssistantChat } from '../components/AssistantChat';
@@ -181,23 +181,16 @@ function HistoryDrawer({ open, onClose }: { open: boolean; onClose: () => void }
 
 /* ── Page ────────────────────────────────────────────────────── */
 export default function AuditChat() {
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const [chatHeight, setChatHeight] = useState<number | null>(null);
   const [history, setHistory] = useState(false);
 
-  useLayoutEffect(() => {
-    const measure = () => {
-      const el = wrapRef.current;
-      if (!el) return;
-      const top = el.getBoundingClientRect().top + window.scrollY;
-      const next = Math.max(320, Math.floor(window.innerHeight - top - 16));
-      setChatHeight((prev) => (prev !== null && Math.abs(prev - next) < 2 ? prev : next));
-    };
-    measure();
-    window.addEventListener('resize', measure);
-    const ro = new ResizeObserver(measure);
-    ro.observe(document.body);
-    return () => { window.removeEventListener('resize', measure); ro.disconnect(); };
+  /*
+   * Nothing behind the conversation scrolls while Jenny is open, so the
+   * message list owns the only scrollbar on the page — and a pull past the
+   * end of it cannot drag the document or trigger pull-to-refresh.
+   */
+  useEffect(() => {
+    document.documentElement.classList.add('jenny-locked');
+    return () => document.documentElement.classList.remove('jenny-locked');
   }, []);
 
   /*
@@ -216,7 +209,7 @@ export default function AuditChat() {
   }, []);
 
   return (
-    <div className="flex min-h-screen flex-col bg-paper">
+    <div className="jenny-shell flex flex-col bg-paper">
       <button
         type="button"
         onClick={() => setHistory(true)}
@@ -232,12 +225,8 @@ export default function AuditChat() {
 
       <InstallChip />
 
-      <div
-        ref={wrapRef}
-        className="jenny-body flex-1"
-        style={chatHeight ? { height: chatHeight } : undefined}
-      >
-        <Card className="mx-auto flex h-full min-h-0 max-w-3xl flex-col overflow-hidden">
+      <div className="jenny-body flex min-h-0 flex-1 flex-col">
+        <Card className="mx-auto flex w-full min-h-0 flex-1 max-w-3xl flex-col overflow-hidden">
           <AssistantChat />
         </Card>
       </div>
