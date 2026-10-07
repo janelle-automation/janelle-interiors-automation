@@ -3,6 +3,7 @@ import { Card } from '../components/ui';
 import { IconMonitor, IconPlus, IconList } from '../components/icons';
 import { AssistantChat } from '../components/AssistantChat';
 import { AssistantHistory } from '../components/AssistantHistory';
+import { useAssistant } from '../context/AssistantContext';
 
 /* ── PWA install prompt type ─────────────────────────────────── */
 interface BeforeInstallPromptEvent extends Event {
@@ -179,6 +180,59 @@ function HistoryDrawer({ open, onClose }: { open: boolean; onClose: () => void }
   );
 }
 
+/* ── Voice diagnostics ──────────────────────────────────────────
+   Reachable only at ?debug=voice, so it costs an ordinary visit nothing.
+   Talk can fail without saying anything — a click that never lands, a
+   recogniser that errors, or a speech engine that reports itself busy for
+   ever — and those look identical on screen. This puts the state that
+   decides it where it can be read, or photographed, without a console. */
+function VoiceDebug() {
+  const { canListen, canSpeak, handsFree, voice, status, micError, interim } = useAssistant();
+  const [synth, setSynth] = useState({ speaking: false, pending: false });
+  const [clicks, setClicks] = useState(0);
+
+  useEffect(() => {
+    const tick = setInterval(() => {
+      const s = typeof window !== 'undefined' ? window.speechSynthesis : null;
+      if (s) setSynth({ speaking: s.speaking, pending: s.pending });
+    }, 250);
+    // Did the press reach the page at all? Counted in the capture phase, so
+    // it registers even if something above swallows the click.
+    const onDown = (e: Event) => {
+      const el = (e.target as HTMLElement | null)?.closest('button');
+      if (el?.getAttribute('aria-label')?.includes('hands-free')) setClicks((n) => n + 1);
+    };
+    window.addEventListener('pointerdown', onDown, true);
+    return () => { clearInterval(tick); window.removeEventListener('pointerdown', onDown, true); };
+  }, []);
+
+  const row = (k: string, v: unknown, bad = false) => (
+    <div key={k} className="flex justify-between gap-3">
+      <span className="text-ink-faint">{k}</span>
+      <span className={bad ? 'font-semibold text-crit' : 'text-ink'}>{String(v)}</span>
+    </div>
+  );
+
+  return (
+    <div className="jenny-chip fixed left-1/2 z-[60] w-[230px] -translate-x-1/2 rounded-xl border border-line bg-surface/95 p-3 font-mono text-[11px] leading-[1.6] shadow-pop backdrop-blur">
+      <div className="mb-1.5 font-sans text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-faint">Talk diagnostics</div>
+      {row('talk presses', clicks, clicks === 0)}
+      {row('canListen', canListen, !canListen)}
+      {row('canSpeak', canSpeak)}
+      {row('handsFree', handsFree)}
+      {row('voice', voice)}
+      {row('synth.speaking', synth.speaking, synth.speaking)}
+      {row('synth.pending', synth.pending, synth.pending)}
+      {row('status', status ?? '—')}
+      {row('interim', interim ? `"${interim.slice(0, 18)}"` : '—')}
+      <div className="mt-1.5 border-t border-line pt-1.5">
+        <span className="text-ink-faint">micError</span>
+        <div className={micError ? 'text-crit' : 'text-ink'}>{micError ?? '—'}</div>
+      </div>
+    </div>
+  );
+}
+
 /* ── Page ────────────────────────────────────────────────────── */
 export default function AuditChat() {
   const [history, setHistory] = useState(false);
@@ -220,6 +274,8 @@ export default function AuditChat() {
         <IconList width={14} height={14} />
         <span>History</span>
       </button>
+
+      {new URLSearchParams(window.location.search).get('debug') === 'voice' && <VoiceDebug />}
 
       <HistoryDrawer open={history} onClose={() => setHistory(false)} />
 

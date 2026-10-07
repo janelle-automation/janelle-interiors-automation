@@ -1283,20 +1283,32 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     [update, endHandsFree],
   );
 
+  // Routes where Jenny IS the page, rather than a panel over one.
+  //
+  // This was a `startsWith('/assistant')` test written when the full page
+  // was the only one. The standalone page does not start with `/assistant`
+  // — it starts with `/jenny-` — so it failed the test, and the effect
+  // below shut a spoken conversation down the instant it began there:
+  // hands-free off, voice off, and no message, because that is the one path
+  // that ends it without saying why.
+  const onJennyPage = ['/assistant', '/jenny-assistant'].some(
+    (r) => location.pathname === r || location.pathname.startsWith(`${r}/`),
+  );
+
   // The full page is Jenny too: arriving there counts as having seen her.
   useEffect(() => {
-    if (location.pathname.startsWith('/assistant')) {
+    if (onJennyPage) {
       setOpenState(false);
       update((s) => (s.unseen ? { ...s, unseen: 0 } : s));
     }
-  }, [location.pathname, update]);
+  }, [onJennyPage, update]);
 
   // A spoken conversation needs somewhere it can be seen. Leaving the full
   // page with the panel shut would leave the microphone listening with
   // nothing on screen to say so, or to turn it off.
   useEffect(() => {
-    if (handsFree && !open && !location.pathname.startsWith('/assistant')) endHandsFree();
-  }, [handsFree, open, location.pathname, endHandsFree]);
+    if (handsFree && !open && !onJennyPage) endHandsFree();
+  }, [handsFree, open, onJennyPage, endHandsFree]);
 
   const requestFocus = useCallback(() => setFocusRequest((n) => n + 1), []);
 

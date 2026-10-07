@@ -90,8 +90,21 @@ export interface ListenOptions {
  */
 export type StopListening = (how?: { discard?: boolean }) => void;
 
-/** Resolves once nothing is being spoken, plus a moment for the room to go quiet. */
-function silence(maxWaitMs = 20_000): Promise<void> {
+/**
+ * Resolves once nothing is being spoken, plus a moment for the room to go
+ * quiet.
+ *
+ * The cap is deliberately short. Chrome can leave `speaking` — and
+ * `pending` — true after `cancel()`, a flag that then never clears on its
+ * own, and every path into listening cancels first: entering hands-free
+ * calls `stopSpeaking()` before it calls this. Polling a stuck flag for
+ * twenty seconds meant pressing Talk put "Listening" on screen and then did
+ * nothing whatsoever — no microphone, no error, no way to tell it had hung.
+ * Past the cap the microphone opens regardless; if she somehow were still
+ * talking, `soundsLikeEcho` already drops her own words out of what comes
+ * back, which is the same protection this wait was reaching for.
+ */
+function silence(maxWaitMs = 1_200): Promise<void> {
   return new Promise((resolve) => {
     if (!speechOutputSupported()) return resolve();
     const started = Date.now();
@@ -117,6 +130,8 @@ const HANGING_MS = 1_800;
 const UNSETTLED_MS = 1_000;
 /** Nothing at all said for this long is silence. */
 const NO_SPEECH_MS = 8_000;
+/** Longest we hold the recogniser back waiting on a microphone grant. */
+const MIC_GRANT_MS = 10_000;
 
 /**
  * The ways "nothing was transcribed" is reported.
@@ -378,21 +393,48 @@ export function listen(opts: ListenOptions): StopListening {
 
   if (opts.interrupt) stopSpeaking();
 
-  void silence().then(() => {
+  void silence().then(async () => {
     if (cancelled) {
       end();
       return;
     }
-    // Opened before the recogniser so the browser has applied its gain and
-    // noise handling to the device by the time words start arriving.
-    void openMicMeter((l) => {
+    /*
+     * Opened — and waited for — before the recogniser, for two reasons.
+     *
+     * The browser must have applied its gain and noise handling to the
+     * device by the time words start arriving. And neither this nor the
+     * recogniser holds microphone permission the first time an installed
+     * app runs: a tab inherits the grant the site already had, a freshly
+     * installed app has a permission scope of its own and starts with
+     * nothing. Firing both in the same tick then puts two requests up at
+     * once and the second is dismissed unanswered, which reads on screen as
+     * Talk simply doing nothing. Waiting means the grant is in hand before
+     * the recogniser asks for it.
+     *
+     * `openMicMeter` resolves even when it was refused, so a blocked or
+     * missing meter still falls through to the recogniser, which reports
+     * the problem in its own words.
+     */
+    const meter = openMicMeter((l) => {
       if (l.speaking) sawSpeech = true;
       else if (l.faint) sawFaint = true;
       opts.onLevel?.(l);
-    }).then((close) => {
-      if (ended || finished) close();
-      else closeMic = close;
     });
+    // Waited for, but never indefinitely: a permission prompt nobody answers
+    // leaves getUserMedia pending for good, and the recogniser still deserves
+    // its own chance to ask rather than the whole thing hanging in silence.
+    const close = await Promise.race([
+      meter,
+      new Promise<null>((r) => { setTimeout(() => r(null), MIC_GRANT_MS); }),
+    ]);
+    if (close) closeMic = close;
+    else void meter.then((c) => { if (ended || finished) c(); else closeMic = c; });
+    if (cancelled || ended || finished) {
+      closeMic?.();
+      closeMic = null;
+      end();
+      return;
+    }
 
     const r = new Ctor();
     rec = r;
