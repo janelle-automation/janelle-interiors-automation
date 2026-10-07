@@ -218,7 +218,6 @@ export function FilterSelect({
   return (
     <select
       className={`input input-sm w-auto max-w-[220px] ${active ? 'border-brass/60 bg-brass/10 text-ink' : ''}`}
-      style={{ colorScheme: 'dark' }}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       aria-label={label}

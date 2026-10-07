@@ -22,7 +22,7 @@ const PINNED_CHANGE = 'janelle.sidebar.change';
 
 /** Pages that are not in the default nav but can be pinned by the user. */
 const PINNABLE_PAGES: Record<string, NavItem> = {
-  audit: { to: '/audit', label: 'Audit Chat', Icon: IconActivity, hue: 'indigo' },
+  audit: { to: '/jenny-assistant', label: 'Audit Chat', Icon: IconActivity, hue: 'indigo' },
 };
 
 function readPinnedKeys(): string[] {
@@ -82,7 +82,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { to: '/tasks', label: 'Tasks', Icon: IconTask, needs: 'tasks', hue: 'sky' },
       { to: '/inbox', label: 'Inbox', Icon: IconInbox, needs: 'emails', hue: 'teal' },
       { to: '/drafts', label: 'Drafts', Icon: IconDraft, needs: 'drafts', hue: 'pink' },
-      // Audit Chat is pinnable from the /audit page — hidden here by default.
+      // Audit Chat is pinnable from the /jenny-assistant page — hidden here by default.
       // Reports and Audit Log are out of the menu on purpose. The pages still work at
       // /reports and /activity; add the lines back to show them:
       //   { to: '/reports', label: 'Reports', Icon: IconReport, needs: 'reports' },
@@ -117,7 +117,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/drafts': 'Drafts',
   '/reports': 'Reports',
   '/activity': 'Audit Log',
-  '/audit': 'Audit Chat',
+  '/jenny-assistant': 'Audit Chat',
   '/team': 'Team & Roles',
   '/permissions': 'Permissions',
   '/settings': 'Settings',

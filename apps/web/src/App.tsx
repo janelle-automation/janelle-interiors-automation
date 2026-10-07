@@ -232,7 +232,9 @@ export default function App() {
     <AssistantProvider>
       <Routes>
         {/* Standalone — no sidebar, no top bar; has its own shell */}
-        <Route path="/audit" element={<AuditChat />} />
+        <Route path="/jenny-assistant" element={<AuditChat />} />
+        {/* Where she used to live. Kept so old links still arrive. */}
+        <Route path="/audit" element={<Navigate to="/jenny-assistant" replace />} />
 
         {/* Everything else lives inside the normal AppShell */}
         <Route

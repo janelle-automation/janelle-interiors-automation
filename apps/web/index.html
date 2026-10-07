@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <link rel="icon" type="image/png" href="/logo.png" />
-    <link rel="manifest" href="/manifest.json" />
+    <link rel="manifest" id="app-manifest" />
 
     <!-- iOS PWA -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -15,6 +15,28 @@
     <!-- Android / general -->
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="theme-color" content="#0d1117" />
+
+    <!--
+      Two apps live on this origin. The studio installs from the root as
+      "Janelle Interiors"; Jenny installs from /jenny-assistant as herself, with her
+      id, name and scope, so someone can keep the assistant on a home screen
+      without the whole workflow system coming with it. The href is set here
+      rather than in the markup because a manifest already named in HTML is
+      fetched before any script could correct it — an unset link is not
+      fetched at all, so this is the browser's first and only read.
+    -->
+    <script>
+      (function () {
+        var jenny = /^\/jenny-assistant(\/|$)/.test(location.pathname);
+        document.getElementById('app-manifest').href =
+          jenny ? '/jenny-manifest.json' : '/manifest.json';
+        // iOS takes the home-screen name from this meta, never the manifest.
+        if (jenny) {
+          var t = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+          if (t) t.content = 'Jenny';
+        }
+      })();
+    </script>
 
     <title>Janelle Interiors · Workflow System</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
