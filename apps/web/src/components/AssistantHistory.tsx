@@ -1,6 +1,45 @@
 import { useEffect, useMemo, useRef, useState, type SVGProps } from 'react';
 import { useAssistant, type ConversationSummary } from '../context/AssistantContext';
 import { AgentList } from './AgentPicker';
+import { SPEECH_LANGS, speechLang, setSpeechLang, type SpeechLang } from '../lib/speech';
+
+/**
+ * Which English the microphone is listening for.
+ *
+ * Beside the agent list because both are "who am I talking to and how",
+ * and because the alternative — the studio Settings page — is the wrong
+ * home twice over: it is principal-only, and this is a property of the
+ * person and their microphone rather than of the studio.
+ *
+ * It matters more than a locale menu usually does. The recogniser decodes
+ * against one accent model and cannot detect which to use, so an Indian or
+ * British speaker left on the US model gets back real English words that
+ * are not the ones they said.
+ */
+function SpeechLangPicker() {
+  const [lang, setLang] = useState<SpeechLang>(() => speechLang());
+  return (
+    <label className="block rounded-lg border border-line px-2.5 py-2">
+      <span className="block text-[12.5px] font-medium text-ink">Your English</span>
+      <span className="mt-0.5 block text-[11.5px] leading-snug text-ink-faint">
+        The accent the microphone listens for. Saved on this computer.
+      </span>
+      <select
+        className="input mt-1.5 h-8 py-0 text-[12.5px]"
+        value={lang}
+        onChange={(e) => {
+          const next = e.target.value as SpeechLang;
+          setSpeechLang(next);
+          setLang(next);
+        }}
+      >
+        {SPEECH_LANGS.map((l) => (
+          <option key={l.code} value={l.code}>{l.label}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
 
 /**
  * Past conversations: find one, go back to it, and keep the list tidy —
@@ -181,7 +220,7 @@ function Row({ c, active, onOpened }: { c: ConversationSummary; active: boolean;
 }
 
 export function AssistantHistory({ onOpened, onNew, showAgents = true }: { onOpened?: () => void; onNew?: () => void; showAgents?: boolean }) {
-  const { conversations, activeConversationId, newConversation, messages, agents, setAgents } = useAssistant();
+  const { conversations, activeConversationId, newConversation, messages, agents, setAgents, canListen } = useAssistant();
   const [query, setQuery] = useState('');
 
   const groups = useMemo(() => {
@@ -215,6 +254,7 @@ export function AssistantHistory({ onOpened, onNew, showAgents = true }: { onOpe
           New conversation
         </button>
         {showAgents && <AgentList agents={agents} onChange={setAgents} />}
+        {canListen && <SpeechLangPicker />}
         <label className="relative block">
           <IconSearch className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-faint" width={14} height={14} />
           <input
