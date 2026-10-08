@@ -381,6 +381,53 @@ export async function resolveFollowUps(orgId: string): Promise<number> {
 }
 
 /**
+ * Close the nudges about one task, the moment that task is finished.
+ *
+ * `resolveFollowUps` already knows a task-linked nudge dies with its task,
+ * but it is a whole-org sweep — every open follow-up, plus a read of the
+ * mailbox — and it only runs on the ingest and task-review passes. So
+ * ticking a task off left its escalation sitting on Top Priority Actions
+ * for up to an hour, still saying the work was "still open". The studio
+ * reasonably read that as the page being wrong, because it was.
+ *
+ * This is the same rule applied to one task and nothing else: two queries,
+ * cheap enough to run on every completion, including the thirty in a row
+ * somebody files on a Monday morning. The sweep stays as it is and remains
+ * the thing that catches everything else.
+ */
+export async function resolveFollowUpsForTask(orgId: string, taskId: string): Promise<number> {
+  if (!supabaseAdmin) return 0;
+
+  const { data } = await supabaseAdmin
+    .from('follow_ups')
+    .select('id, draft_id')
+    .eq('org_id', orgId)
+    .eq('task_id', taskId)
+    .in('status', ['open', 'drafted']);
+  const rows = (data ?? []) as { id: string; draft_id: string | null }[];
+  if (!rows.length) return 0;
+
+  await supabaseAdmin
+    .from('follow_ups')
+    .update({ status: 'done' })
+    .in('id', rows.map((r) => r.id));
+
+  // Same reasoning as the sweep: a drafted chase about finished work is an
+  // answer to a conversation that has moved on, and Drafts fills up with
+  // them if they are left behind.
+  const draftIds = rows.map((r) => r.draft_id).filter((id): id is string => !!id);
+  if (draftIds.length) await supabaseAdmin.from('drafts').delete().in('id', draftIds);
+
+  await supabaseAdmin.from('activity_log').insert({
+    org_id: orgId,
+    action: 'followups.resolved',
+    entity: 'follow_ups',
+    meta: { done: rows.length, sent: 0, task_id: taskId, reason: 'task closed' },
+  });
+  return rows.length;
+}
+
+/**
  * Scan an org for overdue/quiet items, raise follow-ups (deduped), and
  * draft Gmail messages where a recipient is known. Nothing is sent.
  */

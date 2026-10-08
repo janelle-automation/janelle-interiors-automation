@@ -30,8 +30,17 @@ export const AGENT_ICON: Record<AgentKey, (p: IconProps) => JSX.Element> = {
 };
 
 /** What the choice is, in a line: nothing on means everything is. */
+/**
+ * Every agent on is the default, and reaches every tool Jenny has — so it is
+ * not a narrowing and must not be described as one. Saying "declines anything
+ * outside them" under five switches that between them cover everything is a
+ * warning about a restriction that does not exist.
+ */
+const allOn = (agents: AgentKey[]): boolean => agents.length === AGENT_KEYS.length;
+
 function summaryOf(agents: AgentKey[]): string {
   if (agents.length === 0) return 'None on — Jenny does everything';
+  if (allOn(agents)) return `All ${agents.length} on — Jenny does everything`;
   if (agents.length === 1) return `${AGENT_LABELS[agents[0]]} only`;
   return `${agents.length} on: ${agents.map((a) => AGENT_LABELS[a]).join(', ')}`;
 }
@@ -139,7 +148,8 @@ export function AgentList({ agents, onChange }: { agents: AgentKey[]; onChange: 
  * surprises someone who set it up in the side panel an hour ago.
  */
 export function ActiveAgents({ agents, onClear }: { agents: AgentKey[]; onClear: () => void }) {
-  if (agents.length === 0) return null;
+  // Nothing to warn about when none — or all — are on: both reach everything.
+  if (agents.length === 0 || allOn(agents)) return null;
   const text = agents.length === 1 ? AGENT_LABELS[agents[0]] : `${agents.length} agents`;
   return (
     <button
@@ -170,7 +180,9 @@ export function AgentCards({ agents, onChange }: { agents: AgentKey[]; onChange:
         <p className="text-[13px] text-ink-soft">
           {agents.length === 0
             ? 'No agent is on, so Jenny does everything. Switch one on to narrow her to that job, or several to work across just those.'
-            : `${summaryOf(agents)}. Jenny declines anything outside ${agents.length === 1 ? 'it' : 'them'}, by name.`}
+            : allOn(agents)
+              ? 'All five are on, which is how Jenny starts: between them they cover everything she can do. Switch some off to narrow her to the rest.'
+              : `${summaryOf(agents)}. Jenny declines anything outside ${agents.length === 1 ? 'it' : 'them'}, by name.`}
         </p>
         {agents.length > 0 && (
           <button type="button" onClick={() => onChange([])} className="btn-secondary btn-sm">

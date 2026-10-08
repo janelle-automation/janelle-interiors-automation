@@ -1,4 +1,5 @@
 import { Fragment, memo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   TASK_CATEGORIES,
@@ -19,8 +20,8 @@ import { IconBoard, IconSearch, IconList } from '../components/icons';
 import { Avatar, CATEGORY_HUE, HUE, HueDot, ProjectName } from '../components/hue';
 import { useAuth } from '../context/AuthContext';
 import {
-  daysEarly, useAddSubtask, useDeleteTask, useTaskDetail, useTasks, useTeam, useUpdateTask,
-  type TaskView, type TeamMember,
+  daysEarly, useAddComment, useDeleteTask, useTaskDetail, useTasks, useTeam, useUpdateTask,
+  type TaskComment, type TaskView, type TeamMember,
 } from '../lib/queries';
 import { DatePicker } from '../components/DatePicker';
 
@@ -113,6 +114,175 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 }
 
 /**
+ * The conversation on a task.
+ *
+ * Replaces subtasks, which asked the studio to break work into steps and was
+ * used for almost nothing — the thing people actually needed to record was
+ * what had just happened: the vendor called back, this is blocked on Carlos,
+ * someone else should pick it up. That went into Slack and email, where the
+ * task could not see it and nobody reading the task later could find it.
+ *
+ * @mentions are chosen from the roster, not typed: the composer keeps the
+ * picked ids beside the text and sends both. Matching names out of prose is
+ * how a mention reaches the wrong Joanna, or nobody.
+ */
+function CommentThread({
+  taskId, comments, available,
+}: { taskId: string; comments: TaskComment[]; available: boolean }) {
+  const team = useTeam().data;
+  const add = useAddComment(taskId);
+  const [draft, setDraft] = useState('');
+  const [picked, setPicked] = useState<string[]>([]);
+  const boxRef = useRef<HTMLTextAreaElement>(null);
+
+  /*
+   * The word being typed after an "@", if the caret is still inside it.
+   * Null closes the picker — which is what a space does, since a mention is
+   * one token and "@carissa and" should not keep offering names.
+   */
+  const [query, setQuery] = useState<string | null>(null);
+  const onType = (value: string, caret: number) => {
+    setDraft(value);
+    const upto = value.slice(0, caret);
+    const at = upto.lastIndexOf('@');
+    const word = at === -1 ? null : upto.slice(at + 1);
+    setQuery(word !== null && !/\s/.test(word) ? word.toLowerCase() : null);
+  };
+
+  const matches =
+    query === null
+      ? []
+      : team
+          .filter((m) => !picked.includes(m.id))
+          .filter((m) => (m.full_name ?? m.email ?? '').toLowerCase().includes(query))
+          .slice(0, 5);
+
+  /** Swap the half-typed "@wha" for the chosen name, and remember the id. */
+  const choose = (id: string, name: string) => {
+    const caret = boxRef.current?.selectionStart ?? draft.length;
+    const upto = draft.slice(0, caret);
+    const at = upto.lastIndexOf('@');
+    if (at === -1) return;
+    const next = `${draft.slice(0, at)}@${name} ${draft.slice(caret)}`;
+    setDraft(next);
+    setPicked((p) => (p.includes(id) ? p : [...p, id]));
+    setQuery(null);
+    boxRef.current?.focus();
+  };
+
+  const submit = () => {
+    const body = draft.trim();
+    if (!body || add.isPending) return;
+    // Only the people still named in the text: picking someone and then
+    // deleting their name is a change of mind, not a mention.
+    const still = picked.filter((id) => {
+      const m = team.find((t) => t.id === id);
+      return !!m && draft.includes(`@${m.full_name ?? m.email ?? ''}`);
+    });
+    add.mutate(
+      { body, mentions: still },
+      { onSuccess: () => { setDraft(''); setPicked([]); setQuery(null); } },
+    );
+  };
+
+  return (
+    <section>
+      <div className="mb-2 flex items-baseline justify-between">
+        <h3 className="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-faint">Comments</h3>
+        {comments.length > 0 && (
+          <span className="text-[11.5px] text-ink-faint">{comments.length}</span>
+        )}
+      </div>
+
+      {comments.length > 0 && (
+        <ul className="mb-2 flex flex-col gap-2">
+          {comments.map((c) => (
+            <li key={c.id} className="rounded-lg border border-line-soft bg-surface px-3 py-2">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-[12.5px] font-semibold text-ink">
+                  {c.profiles?.full_name ?? 'A former teammate'}
+                </span>
+                <span className="shrink-0 text-[11.5px] text-ink-faint">{shortDate(c.created_at)}</span>
+              </div>
+              {/* whitespace-pre-wrap: people write these in lines, and a
+                  paragraph collapsed into one run is unreadable. */}
+              <p className="mt-0.5 whitespace-pre-wrap text-[13px] leading-relaxed text-ink-soft">{c.body}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {!available ? (
+        <p className="text-[12.5px] text-ink-faint">
+          Comments need migration 0033 applied before they can be added.
+        </p>
+      ) : (
+        <div className="relative">
+          <textarea
+            ref={boxRef}
+            className="input min-h-[64px] resize-y"
+            placeholder="Add a comment… @ someone to notify them"
+            value={draft}
+            onChange={(e) => onType(e.target.value, e.target.selectionStart ?? e.target.value.length)}
+            onKeyDown={(e) => {
+              // Enter sends, Shift+Enter is a new line — a comment is short
+              // far more often than it is a paragraph.
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                submit();
+              }
+              if (e.key === 'Escape' && query !== null) {
+                e.stopPropagation();
+                setQuery(null);
+              }
+            }}
+          />
+
+          {matches.length > 0 && (
+            <ul
+              role="listbox"
+              aria-label="People you can mention"
+              className="popover absolute bottom-full left-0 z-20 mb-1 w-56 overflow-hidden rounded-lg border border-line bg-surface py-1 shadow-pop"
+            >
+              {matches.map((m) => (
+                <li key={m.id}>
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={false}
+                    onClick={() => choose(m.id, m.full_name ?? m.email ?? '')}
+                    className="focusable block w-full px-3 py-1.5 text-left text-[13px] text-ink transition-colors hover:bg-sunk"
+                  >
+                    {m.full_name ?? m.email}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="mt-2 flex items-center gap-2">
+            {picked.length > 0 && (
+              <span className="text-[11.5px] text-ink-faint">
+                Notifies {picked.length} {picked.length === 1 ? 'person' : 'people'}
+              </span>
+            )}
+            <button
+              onClick={submit}
+              disabled={!draft.trim() || add.isPending}
+              className="btn-secondary btn-sm ml-auto shrink-0"
+            >
+              {add.isPending ? 'Posting…' : 'Comment'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {add.isError && <p className="mt-2 text-[12.5px] text-crit">{(add.error as Error).message}</p>}
+    </section>
+  );
+}
+
+/**
  * Everything behind one task.
  *
  * The board answers "where is this"; the card cannot answer "what is it,
@@ -122,9 +292,8 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
  */
 function TaskPanel({ id, onClose }: { id: string; onClose: () => void }) {
   const { data, isLoading, isError, error } = useTaskDetail(id);
-  const addSubtask = useAddSubtask(id);
+  const team = useTeam().data;
   const updateTask = useUpdateTask();
-  const [draft, setDraft] = useState('');
 
   // Escape closes it, like every other overlay the studio uses.
   useEffect(() => {
@@ -137,26 +306,31 @@ function TaskPanel({ id, onClose }: { id: string; onClose: () => void }) {
 
   const t = data?.task;
   const finishedAt = t?.status === 'done' ? t.completed_at ?? t.updated_at : null;
+  // Migration 0032 stores the id; the roster that fills the owner dropdown
+  // turns it into a name. Unknown ids (someone since removed from the team)
+  // fall back to saying a person did it, which is still the fact that matters.
+  const closedBy = t?.completed_by ? team.find((p) => p.id === t.completed_by)?.full_name ?? 'someone since removed' : null;
   const finished = finishedLabel(daysEarly(t?.due_date ?? null, finishedAt ?? null));
-  const done = (data?.subtasks ?? []).filter((s) => s.status === 'done').length;
-  const total = data?.subtasks.length ?? 0;
 
-  const submit = () => {
-    const title = draft.trim();
-    if (!title) return;
-    addSubtask.mutate(title, { onSuccess: () => setDraft('') });
-  };
-
-  return (
+  /*
+   * Portalled to <body>, like every other full-screen overlay in this app.
+   *
+   * z-50 beat the top bar's z-30 only as long as nothing between this and
+   * <body> opened a stacking context of its own — and this is the one
+   * overlay that renders from inside the page, under AppShell's <main>. The
+   * moment anything up that chain got a z-index, a transform or an
+   * `isolate`, the whole panel dropped behind a z-30 header and its top
+   * strip came out underneath the bell and the avatar. A z-index raised
+   * higher would not have helped: inside a trapped stacking context the
+   * number means nothing.
+   *
+   * AppShell already solves this for ConnectGooglePrompt and TaskReminder by
+   * mounting them outside the main column. A page cannot do that, so it
+   * portals instead — same guarantee, reached from where the panel lives.
+   */
+  return createPortal(
     // `dock-aware`: when Jenny's panel is docked on a wide screen, this stops
     // at her edge instead of sliding underneath her.
-    //
-    // z-50, not z-40: the sidebar (AppShell) is ALSO z-40, and on equal
-    // z-index the later element in the DOM merely happens to win — which is
-    // how the sidebar and header ended up visually competing with this
-    // panel's own top row instead of sitting cleanly underneath it. Every
-    // other full-screen overlay in this app (ConnectGooglePrompt, Prompts)
-    // already uses z-50 for exactly this reason.
     <div className="dock-aware fixed inset-0 z-50 flex justify-end">
       {/* Black, not ink: in dark mode ink is near-white, and a backdrop made
           from it washed the page grey instead of dimming it. */}
@@ -272,71 +446,12 @@ function TaskPanel({ id, onClose }: { id: string; onClose: () => void }) {
               )}
             </section>
 
-            {/* Subtasks: the steps the one-line title actually stands for. */}
-            <section>
-              <div className="mb-2 flex items-baseline justify-between">
-                <h3 className="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-faint">
-                  Subtasks
-                </h3>
-                {total > 0 && (
-                  <span className="text-[11.5px] text-ink-faint">{done} of {total} done</span>
-                )}
-              </div>
-
-              {total > 0 && (
-                <div className="mb-2 h-1.5 overflow-hidden rounded-full bg-sunk">
-                  <div
-                    className="h-full rounded-full bg-brass transition-[width]"
-                    style={{ width: `${Math.round((done / total) * 100)}%` }}
-                  />
-                </div>
-              )}
-
-              <ul className="flex flex-col gap-1.5">
-                {data?.subtasks.map((sub) => (
-                  <li
-                    key={sub.id}
-                    className="flex items-center gap-2 rounded-lg border border-line-soft bg-surface px-3 py-2 text-[13px]"
-                  >
-                    <span className={sub.status === 'done' ? 'text-ink-faint line-through' : 'text-ink'}>
-                      {sub.title}
-                    </span>
-                    <span className="ml-auto shrink-0 text-[11.5px] text-ink-faint">
-                      {sub.profiles?.full_name ?? 'Unassigned'}
-                      {sub.due_date && <> · {shortDate(sub.due_date)}</>}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-
-              {data?.subtasksAvailable === false ? (
-                <p className="mt-2 text-[12.5px] text-ink-faint">
-                  Subtasks need migration 0009 applied before they can be added.
-                </p>
-              ) : (
-                <div className="mt-2 flex gap-2">
-                  <input
-                    className="input"
-                    placeholder="Add a step…"
-                    value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') submit();
-                    }}
-                  />
-                  <button
-                    onClick={submit}
-                    disabled={!draft.trim() || addSubtask.isPending}
-                    className="btn-secondary btn-sm shrink-0"
-                  >
-                    {addSubtask.isPending ? 'Adding…' : 'Add'}
-                  </button>
-                </div>
-              )}
-              {addSubtask.isError && (
-                <p className="mt-2 text-[12.5px] text-crit">{(addSubtask.error as Error).message}</p>
-              )}
-            </section>
+            {/* The conversation on the task — what replaced subtasks. */}
+            <CommentThread
+              taskId={id}
+              comments={data?.comments ?? []}
+              available={data?.commentsAvailable !== false}
+            />
 
             {/* What has happened since. Reminders and escalations are the
                 system acting on its own, so they are worth showing plainly. */}
@@ -359,7 +474,7 @@ function TaskPanel({ id, onClose }: { id: string; onClose: () => void }) {
                 {t.status === 'done' && (
                   <li className="relative text-[13px] text-ink-soft">
                     <span className="absolute -left-[21px] top-1.5 h-2 w-2 rounded-full bg-good" />
-                    {t.completion_note ? 'Closed automatically' : 'Closed'}
+                    {t.completion_note ? 'Closed automatically' : closedBy ? `Closed by ${closedBy}` : 'Closed'}
                     {finishedAt && <> · {shortDate(finishedAt)}</>}
                     {finished && <> · {finished}</>}
                     {/* The system's reason, in full: which email, and the words
@@ -375,7 +490,8 @@ function TaskPanel({ id, onClose }: { id: string; onClose: () => void }) {
           </div>
         )}
       </aside>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
