@@ -3,7 +3,7 @@ import { BrandLogo } from './BrandLogo';
 import { NavLink, Link, useLocation } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
-import { useFollowUps, useDrafts, ageFrom } from '../lib/queries';
+import { useFollowUps, useDrafts, useMentions, useMarkMentionsRead, ageFrom } from '../lib/queries';
 import { useAssistant } from '../context/AssistantContext';
 import { AssistantLauncher, AssistantPanel } from './AssistantPanel';
 import { TaskReminder } from './TaskReminder';
@@ -343,17 +343,32 @@ function EmptyRow({ title, body }: { title: string; body: string }) {
 function NotificationsMenu() {
   const { data: followUps } = useFollowUps();
   const { data: drafts } = useDrafts();
+  const { data: mentions } = useMentions();
+  const markRead = useMarkMentionsRead();
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<'followups' | 'drafts'>('followups');
+  const [tab, setTab] = useState<'mentions' | 'followups' | 'drafts'>('followups');
   const ref = useRef<HTMLDivElement>(null);
   const close = useCallback(() => setOpen(false), []);
   useDismiss(open, close, ref);
 
-  const count = followUps.length + drafts.length;
+  const count = followUps.length + drafts.length + mentions.length;
   const badge = count > 9 ? '9+' : String(count);
   const summary = count === 0 ? 'All caught up' : count === 1 ? '1 needs a person' : `${count} need a person`;
 
+  /*
+   * Mentions lead when there are any.
+   *
+   * The other two tabs are the studio's queue — true of everybody, never
+   * finished, and there whether or not you look. A mention is addressed to
+   * one person by name and is the only thing in here that is waiting on
+   * them specifically, so it should not be a tab behind.
+   */
+  useEffect(() => {
+    if (open && mentions.length) setTab('mentions');
+  }, [open, mentions.length]);
+
   const tabs = [
+    ...(mentions.length ? [{ key: 'mentions' as const, label: 'Mentions', n: mentions.length }] : []),
     { key: 'followups' as const, label: 'Follow-ups', n: followUps.length },
     { key: 'drafts' as const, label: 'Drafts', n: drafts.length },
   ];
@@ -422,6 +437,35 @@ function NotificationsMenu() {
                   </Link>
                 </li>
               ))}
+            {tab === 'mentions' && mentions.length === 0 && (
+              <EmptyRow title="No one is waiting on you" body="When a teammate names you in a task comment, it appears here." />
+            )}
+            {tab === 'mentions' &&
+              mentions.map((m) => (
+                <li key={m.id}>
+                  <Link
+                    to={`/tasks?task=${m.task_id}`}
+                    // Read on the way through: opening the task IS seeing it,
+                    // and a badge still sitting there afterwards trains people
+                    // to ignore the bell.
+                    onClick={() => { markRead.mutate([m.id]); close(); }}
+                    className="focusable flex gap-3 px-4 py-3 transition-colors hover:bg-sunk/60"
+                  >
+                    <span className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-md bg-crit/10 text-[12px] font-bold text-crit">@</span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13.5px] font-semibold text-ink">
+                        {m.task_comments?.profiles?.full_name ?? 'A teammate'} mentioned you
+                      </span>
+                      {m.task_comments?.body && (
+                        <span className="block truncate text-[12.5px] text-ink-soft">{m.task_comments.body}</span>
+                      )}
+                      <span className="mt-0.5 block truncate text-[11.5px] text-ink-faint">
+                        {m.tasks?.title ?? 'A task'} · {ageFrom(m.created_at)}
+                      </span>
+                    </span>
+                  </Link>
+                </li>
+              ))}
             {tab === 'drafts' && drafts.length === 0 && (
               <EmptyRow title="No drafts waiting" body="Reply drafts appear here after Gmail is read." />
             )}
@@ -442,14 +486,32 @@ function NotificationsMenu() {
               ))}
           </ul>
 
-          <div className="border-t border-line-soft bg-sunk/40 px-4 py-2.5">
-            <Link
-              to={tab === 'followups' ? '/follow-ups' : '/drafts'}
-              onClick={close}
-              className="focusable inline-flex items-center gap-1 text-[13px] font-semibold text-brass-deep hover:underline"
-            >
-              {tab === 'followups' ? 'Open follow-up inbox' : 'Open all drafts'} <IconArrow width={14} height={14} />
-            </Link>
+          <div className="flex items-center justify-between gap-3 border-t border-line-soft bg-sunk/40 px-4 py-2.5">
+            {tab === 'mentions' ? (
+              <>
+                <Link to="/tasks" onClick={close} className="focusable inline-flex items-center gap-1 text-[13px] font-semibold text-brass-deep hover:underline">
+                  Open the task board <IconArrow width={14} height={14} />
+                </Link>
+                {mentions.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => markRead.mutate(undefined)}
+                    disabled={markRead.isPending}
+                    className="focusable text-[12.5px] text-ink-soft hover:text-ink"
+                  >
+                    Mark all read
+                  </button>
+                )}
+              </>
+            ) : (
+              <Link
+                to={tab === 'followups' ? '/follow-ups' : '/drafts'}
+                onClick={close}
+                className="focusable inline-flex items-center gap-1 text-[13px] font-semibold text-brass-deep hover:underline"
+              >
+                {tab === 'followups' ? 'Open follow-up inbox' : 'Open all drafts'} <IconArrow width={14} height={14} />
+              </Link>
+            )}
           </div>
         </div>
       )}
@@ -595,7 +657,18 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, [docked]);
 
   return (
-    <div className={`flex min-h-screen overflow-x-hidden transition-[padding] duration-200 ${docked ? 'xl:pr-[440px]' : ''}`}>
+    /*
+     * `overflow-x-clip`, not `overflow-x-hidden`.
+     *
+     * They look identical and are not. `overflow-x: hidden` forces the other
+     * axis to compute to `auto`, which makes this div a scroll container —
+     * and a scroll container is what `position: sticky` inside it measures
+     * against. This one never scrolls (the document does), so the sidebar and
+     * the top bar had nothing to stick to and rode up out of the window.
+     * `clip` crops the same overflow without creating a scrollport, so both
+     * go back to sticking to the viewport.
+     */
+    <div className={`flex min-h-screen overflow-x-clip transition-[padding] duration-200 ${docked ? 'xl:pr-[440px]' : ''}`}>
       {/* Sidebar — desktop */}
       <aside
         className={`relative z-40 hidden shrink-0 bg-nav transition-[width] duration-200 ease-out lg:block ${collapsed ? 'w-[68px]' : 'w-60'}`}

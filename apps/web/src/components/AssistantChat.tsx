@@ -695,6 +695,15 @@ function Composer({ compact, app = false, dropInto }: { compact: boolean; app?: 
   const photosRef = useRef<HTMLInputElement>(null);
   const [attachMenu, setAttachMenu] = useState(false);
   const [listening, setListening] = useState(false);
+  /*
+   * Live, as opposed to merely asked for.
+   *
+   * `listening` goes true the moment the button is pressed; the microphone
+   * is not recording until the recogniser's own `onstart` fires, which on a
+   * Bluetooth headset is seconds later. Saying "Listening…" in between is
+   * what made people start talking into a microphone that was not on yet.
+   */
+  const [micLive, setMicLive] = useState(false);
   // What the microphone is actually picking up. Without it, a person talking
   // too quietly watched the button pulse away as though it were working.
   const [mic, setMic] = useState<MicLevel | null>(null);
@@ -845,6 +854,7 @@ function Composer({ compact, app = false, dropInto }: { compact: boolean; app?: 
     setMicError(null);
     setHeard(null);
     setListening(true);
+    setMicLive(false);
     const before = text;
     const withBefore = (words: string) => [before.trim(), words.trim()].filter(Boolean).join(' ');
     stopListening.current = listen({
@@ -853,6 +863,7 @@ function Composer({ compact, app = false, dropInto }: { compact: boolean; app?: 
       // Nothing is sent without Enter, so a thinking pause can be longer.
       pauseMs: 2_600,
       onLevel: setMic,
+      onStart: () => setMicLive(true),
       onInterim: (words) => setText(withBefore(words)),
       onResult: (hearings) => {
         const ranked = bestHearing(hearings, vocabulary);
@@ -872,6 +883,7 @@ function Composer({ compact, app = false, dropInto }: { compact: boolean; app?: 
       },
       onEnd: () => {
         setListening(false);
+        setMicLive(false);
         setMic(null);
         stopListening.current = null;
       },
@@ -899,7 +911,13 @@ function Composer({ compact, app = false, dropInto }: { compact: boolean; app?: 
             role="status"
             aria-live="polite"
           >
-            {mic.faint ? 'Too quiet — move closer' : mic.speaking ? 'Hearing you' : 'Listening…'}
+            {!micLive
+              ? 'Starting the microphone…'
+              : mic.faint
+                ? 'Too quiet — move closer'
+                : mic.speaking
+                  ? 'Hearing you'
+                  : 'Listening…'}
           </span>
         </div>
       )}
@@ -1092,7 +1110,7 @@ function Composer({ compact, app = false, dropInto }: { compact: boolean; app?: 
           // Short in the panel: a placeholder that wraps makes an empty box two lines tall.
           placeholder={
             listening
-              ? 'Listening…'
+              ? micLive ? 'Listening…' : 'Starting the microphone — wait for the prompt'
               : mode === 'image'
                 ? 'Describe the picture — the room, the materials, the light'
                 : compact
@@ -1168,21 +1186,26 @@ function Composer({ compact, app = false, dropInto }: { compact: boolean; app?: 
  * it is. Typing is still a tap away — "Type instead" ends the loop.
  */
 function VoiceBar() {
-  const { voice, status, setHandsFree, skipSpeaking, doneTalking, interim, micLevel } = useAssistant();
+  const { voice, status, setHandsFree, skipSpeaking, doneTalking, interim, micLevel, micLive } = useAssistant();
 
-  const faint = voice === 'listening' && micLevel?.faint && !interim;
+  // Waiting on the recogniser, not on the person. "Go ahead" here is an
+  // instruction to talk into a microphone that is not recording yet.
+  const starting = voice === 'listening' && !micLive;
+  const faint = voice === 'listening' && micLive && micLevel?.faint && !interim;
 
-  const label = faint
-    ? 'I can barely hear you — move closer or speak up'
-    : voice === 'listening'
-      ? interim
-        ? 'Listening — pause when you’re done'
-        : micLevel?.speaking
-          ? 'Hearing you — keep going'
-          : 'Listening — go ahead'
-      : voice === 'speaking'
-        ? 'Speaking'
-        : `${status ?? 'Thinking'}…`;
+  const label = starting
+    ? 'Starting the microphone…'
+    : faint
+      ? 'I can barely hear you — move closer or speak up'
+      : voice === 'listening'
+        ? interim
+          ? 'Listening — pause when you’re done'
+          : micLevel?.speaking
+            ? 'Hearing you — keep going'
+            : 'Listening — go ahead'
+        : voice === 'speaking'
+          ? 'Speaking'
+          : `${status ?? 'Thinking'}…`;
 
   return (
     <div className="border-t border-line px-4 pb-4 pt-4">
@@ -1203,7 +1226,7 @@ function VoiceBar() {
           {voice === 'listening' ? <IconMic width={22} height={22} /> : <JennyAvatar size={40} />}
         </span>
         <p
-          className={`text-[13.5px] font-medium ${faint ? 'text-warn' : 'text-ink'}`}
+          className={`text-[13.5px] font-medium ${faint ? 'text-warn' : starting ? 'text-ink-faint' : 'text-ink'}`}
           role="status"
           aria-live="polite"
         >

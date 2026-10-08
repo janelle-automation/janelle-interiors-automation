@@ -6,6 +6,7 @@ import {
   BellRing,
   Bot,
   CalendarDays,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   ClipboardCheck,
@@ -90,6 +91,7 @@ export const IconEye = icon(Eye);
 export const IconEyeOff = icon(EyeOff);
 export const IconMailScan = icon(MailSearch);
 export const IconCalendar = icon(CalendarDays);
+export const IconChevronDown = icon(ChevronDown, 2);
 export const IconChevronLeft = icon(ChevronLeft, 2);
 export const IconChevronRight = icon(ChevronRight, 2);
 export const IconMonitor = icon(Monitor);

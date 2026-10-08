@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { servicesGranted } from '../lib/google.js';
-import { profileColumns } from '../lib/columns.js';
+import { hasTaskComments, profileColumns } from '../lib/columns.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { RESOURCES, canWith } from '@janelle/shared';
 
@@ -59,5 +59,61 @@ meRouter.get(
         },
       },
     });
+  }),
+);
+
+/**
+ * What I have been pulled into and not yet looked at.
+ *
+ * The bell is a derived view — it counts open follow-ups and waiting drafts,
+ * neither of which has a read state, so neither can ever be "seen". A
+ * mention is different: it is addressed to one person and it is finished
+ * with once they have read it. Hence `read_at` rather than a status, and
+ * hence this being the only thing in the panel that can go back to zero.
+ */
+meRouter.get(
+  '/mentions',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    if (!(await hasTaskComments())) return res.json({ data: [] });
+    const { db, userId } = req.auth!;
+
+    const { data, error } = await db
+      .from('task_comment_mentions')
+      .select('id, task_id, created_at, task_comments(body, profiles(full_name)), tasks(title)')
+      .eq('user_id', userId)
+      .is('read_at', null)
+      .order('created_at', { ascending: false })
+      .limit(20);
+    if (error) throw new Error(error.message);
+    res.json({ data });
+  }),
+);
+
+/**
+ * Mark mentions read — the ones listed, or everything when none are named.
+ *
+ * Scoped to the caller in the filter as well as by RLS: "mark read" that
+ * could be aimed at somebody else's bell is a way to make their mentions
+ * disappear unseen.
+ */
+meRouter.post(
+  '/mentions/read',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    if (!(await hasTaskComments())) return res.json({ data: { read: 0 } });
+    const { db, userId } = req.auth!;
+
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String).slice(0, 100) : null;
+    let q = db
+      .from('task_comment_mentions')
+      .update({ read_at: new Date().toISOString() })
+      .eq('user_id', userId)
+      .is('read_at', null);
+    if (ids?.length) q = q.in('id', ids);
+
+    const { data, error } = await q.select('id');
+    if (error) throw new Error(error.message);
+    res.json({ data: { read: data?.length ?? 0 } });
   }),
 );

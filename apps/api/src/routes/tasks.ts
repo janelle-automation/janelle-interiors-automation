@@ -2,9 +2,10 @@ import { Router } from 'express';
 import { TASK_CATEGORIES, TASK_KINDS, TASK_STATUSES, canManageTasks } from '@janelle/shared';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
-import { hasEmailOwner, hasSubtasks, hasTaskAssignment, hasTaskCategory, hasTaskCompletion } from '../lib/columns.js';
+import { hasEmailOwner, hasTaskAssignment, hasTaskCategory, hasTaskComments, hasTaskCompletedBy, hasTaskCompletion } from '../lib/columns.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { closeCopiesOfFinishedTasks, markTaskChecked } from '../services/tasks.js';
+import { resolveFollowUpsForTask } from '../services/followups.js';
 
 export const tasksRouter = Router();
 tasksRouter.use(requireAuth);
@@ -17,7 +18,12 @@ tasksRouter.use(requirePermission('tasks', 'read'));
 // When a task was finished, and the system's note when it closed it — only
 // once migration 0015 has added them. `updated_at` stands in until then.
 async function completionColumns(): Promise<string> {
-  return (await hasTaskCompletion()) ? ', completed_at, completion_note' : '';
+  const when = (await hasTaskCompletion()) ? ', completed_at, completion_note' : '';
+  // And who moved it there — migration 0032. A plain uuid, not an embed: a
+  // second foreign key to profiles would make the implicit `profiles(...)`
+  // join on this table ambiguous. The board matches it against the team
+  // roster it already has.
+  return when + ((await hasTaskCompletedBy()) ? ', completed_by' : '');
 }
 
 // When the current owner got it — migration 0016. Absent before that, and
@@ -60,7 +66,6 @@ tasksRouter.get(
   asyncHandler(async (req, res) => {
     const db = req.auth!.db;
 
-    const subtasksReady = await hasSubtasks();
     const { data: task, error } = await db
       .from('tasks')
       .select(
@@ -94,18 +99,22 @@ tasksRouter.get(
       .eq('task_id', req.params.id)
       .order('created_at', { ascending: true });
 
-    const subtaskQuery = subtasksReady
+    // The thread on this task, oldest first — migration 0033. Author names
+    // come from its own single relationship to profiles, which is why the
+    // embed here can stay implicit while the one on `tasks` could not.
+    const commentsReady = await hasTaskComments();
+    const commentQuery = commentsReady
       ? db
-          .from('tasks')
-          .select('id, title, status, assigned_to, due_date, created_at, profiles(full_name)')
-          .eq('parent_task_id', req.params.id)
+          .from('task_comments')
+          .select('id, body, created_at, author, profiles(full_name)')
+          .eq('task_id', req.params.id)
           .order('created_at', { ascending: true })
       : null;
 
-    const [emailRes, historyRes, subtaskRes] = await Promise.all([
+    const [emailRes, historyRes, commentRes] = await Promise.all([
       emailQuery,
       historyQuery,
-      subtaskQuery,
+      commentQuery,
     ]);
 
     const email = emailRes?.data ?? null;
@@ -138,65 +147,98 @@ tasksRouter.get(
         // lets the panel say why, instead of the false "added by hand".
         emailHiddenFrom,
         history: historyRes.data ?? [],
-        subtasks: subtaskRes?.data ?? [],
-        // So the panel can say why it is not offering subtasks, rather than
-        // pretending the task simply has none.
-        subtasksAvailable: subtasksReady,
+        comments: commentRes?.data ?? [],
+        // So the panel can say why it is not offering the box, rather than
+        // pretending nobody has said anything.
+        commentsAvailable: commentsReady,
       },
     });
   }),
 );
 
 /**
- * Break a task into a step of its own.
+ * Say something on a task.
  *
- * A subtask is a task: same table, same columns, same rules. It inherits
- * the parent's project and kind so it lands in the right place without
- * asking, and starts unassigned and undated because the point of writing
- * it down is usually that those are still to be decided.
+ * What replaced subtasks. A task raised from an email is a conversation —
+ * who is chasing it, what the vendor said on the phone, who needs to pick
+ * it up next — and the only field that could hold any of it was `detail`,
+ * which belongs to the extractor and is rewritten whenever the mail is read
+ * again. So it was all said in Slack and in email instead, where the task
+ * could not see it.
+ *
+ * Mentions are sent as ids by the composer, not parsed out of the text.
+ * Two people called Joanna, a name typed with the wrong spelling, a
+ * surname nobody uses — matching on words is how an @mention reaches the
+ * wrong person or nobody at all. The picker already knows who was chosen.
  */
 tasksRouter.post(
-  '/:id/subtasks',
-  requirePermission('tasks', 'create'),
+  '/:id/comments',
+  requirePermission('tasks', 'update'),
   asyncHandler(async (req, res) => {
-    if (!(await hasSubtasks())) {
+    if (!(await hasTaskComments())) {
       return res.status(503).json({
-        error: 'Subtasks are not available yet — apply migration 0009 (npm run db:apply) first',
+        error: 'Comments are not available yet — apply migration 0033 (npm run db:apply) first',
       });
     }
 
-    const title = String(req.body?.title ?? '').trim();
-    if (!title) return res.status(400).json({ error: 'A title is required' });
+    const body = String(req.body?.body ?? '').trim();
+    if (!body) return res.status(400).json({ error: 'Write something first' });
 
-    const db = req.auth!.db;
-    const { data: parent } = await db
+    const { db, orgId, userId } = req.auth!;
+    const { data: task } = await db
       .from('tasks')
-      .select('id, kind, project_id, vendor_id, org_id')
+      .select('id, title, org_id')
       .eq('id', req.params.id)
       .maybeSingle();
-    if (!parent) return res.status(404).json({ error: 'Task not found' });
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    const taskOrg = (task as { org_id: string }).org_id;
 
-    const p = parent as unknown as {
-      kind: string; project_id: string | null; vendor_id: string | null; org_id: string;
-    };
-
-    const { data, error } = await db
-      .from('tasks')
-      .insert({
-        org_id: p.org_id,
-        parent_task_id: req.params.id,
-        title: title.slice(0, 200),
-        kind: p.kind,
-        project_id: p.project_id,
-        vendor_id: p.vendor_id,
-        assigned_to: req.body?.assigned_to ? String(req.body.assigned_to) : null,
-        due_date: req.body?.due_date ? String(req.body.due_date) : null,
-      })
-      .select('id, title, status, assigned_to, due_date, created_at')
+    const { data: comment, error } = await db
+      .from('task_comments')
+      .insert({ org_id: taskOrg, task_id: req.params.id, author: userId, body: body.slice(0, 4000) })
+      .select('id, body, created_at, author, profiles(full_name)')
       .maybeSingle();
     if (error) throw new Error(error.message);
 
-    res.json({ data });
+    // Only real teammates, only once each, and never yourself: being told
+    // you mentioned yourself is noise, and the bell is the one surface that
+    // has to stay worth looking at.
+    const asked = Array.isArray(req.body?.mentions) ? req.body.mentions.map(String) : [];
+    let mentioned: string[] = [];
+    if (asked.length) {
+      const { data: team } = await db
+        .from('profiles')
+        .select('id')
+        .eq('org_id', taskOrg)
+        .in('id', [...new Set(asked)].slice(0, 20));
+      mentioned = (team ?? []).map((p) => (p as { id: string }).id).filter((id) => id !== userId);
+    }
+
+    if (mentioned.length) {
+      const commentId = (comment as { id: string }).id;
+      const { error: mentionError } = await db.from('task_comment_mentions').insert(
+        mentioned.map((id) => ({
+          org_id: taskOrg,
+          comment_id: commentId,
+          task_id: req.params.id,
+          user_id: id,
+        })),
+      );
+      // The comment is saved either way: losing the words because a bell
+      // badge could not be written would be the worse failure.
+      if (mentionError) console.error('[tasks] mentions not recorded:', mentionError.message);
+    }
+
+    await db.from('activity_log').insert({
+      org_id: orgId,
+      actor: userId,
+      action: 'task.comment',
+      entity: 'tasks',
+      entity_id: req.params.id,
+      meta: { title: (task as { title: string }).title, mentioned: mentioned.length },
+    });
+
+    res.json({ data: { comment, mentioned: mentioned.length } });
   }),
 );
 
@@ -241,6 +283,24 @@ tasksRouter.patch(
 
     if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'No fields to update' });
 
+    const { db, orgId, userId, role, seat } = req.auth!;
+    const manages = canManageTasks(role, seat);
+    const movingStatus = 'status' in patch;
+
+    // Read the row once and use it twice: for the ownership check below, and
+    // for the audit line a status change leaves. Skipped entirely when
+    // neither is in play, so an ordinary edit still costs one round-trip.
+    let before: { status: string; title: string; assigned_to: string | null } | null = null;
+    if (!manages || movingStatus) {
+      const { data: current } = await db
+        .from('tasks')
+        .select('status, title, assigned_to')
+        .eq('id', req.params.id)
+        .maybeSingle();
+      if (!current) return res.status(404).json({ error: 'Task not found' });
+      before = current as { status: string; title: string; assigned_to: string | null };
+    }
+
     // Anyone may work their own queue; handing work to someone else — or
     // taking it off them — belongs to whoever runs the board. That is a
     // principal or coordinator by role, and also the seats the roles
@@ -248,38 +308,65 @@ tasksRouter.patch(
     // has ONE owner", which is impossible without this. Claiming an
     // unassigned task for yourself stays open to everyone, which is how
     // gaps get filled.
-    if (!canManageTasks(req.auth!.role, req.auth!.seat)) {
-      const { data: current } = await req.auth!.db
-        .from('tasks')
-        .select('assigned_to')
-        .eq('id', req.params.id)
-        .maybeSingle();
-      if (!current) return res.status(404).json({ error: 'Task not found' });
+    if (!manages) {
+      const owner = before!.assigned_to;
 
-      const owner = (current as { assigned_to: string | null }).assigned_to;
-      const me = req.auth!.userId;
-
-      if (owner && owner !== me) {
+      if (owner && owner !== userId) {
         return res.status(403).json({ error: "You cannot change someone else's task" });
       }
-      if ('assigned_to' in patch && patch.assigned_to !== me && patch.assigned_to !== null) {
+      if ('assigned_to' in patch && patch.assigned_to !== userId && patch.assigned_to !== null) {
         return res.status(403).json({ error: 'Only someone who runs the task board can assign work to others' });
       }
     }
 
-    const { data, error } = await req.auth!.db
+    // Only the move INTO Done, and only out of it, are events. Saving a date
+    // on a task that was already finished is neither, and must not restamp
+    // work somebody else closed.
+    const closing = movingStatus && patch.status === 'done' && before!.status !== 'done';
+    const reopening = movingStatus && patch.status !== 'done' && before!.status === 'done';
+
+    // Who finished it — migration 0032. Written here rather than in the
+    // trigger because the database does not know who is asking; the trigger
+    // owns the other direction and clears it on reopen.
+    if (closing && (await hasTaskCompletedBy())) patch.completed_by = userId;
+
+    const { data, error } = await db
       .from('tasks')
       .update(patch)
       .eq('id', req.params.id)
-      .select('id, status, assigned_to')
+      .select(`id, status, assigned_to${(await hasTaskCompletedBy()) ? ', completed_by' : ''}`)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ error: 'Task not found' });
+
+    // Closing a task used to leave no trace at all: 0015 recorded when, never
+    // who, and this route logged nothing. The column answers "who finished
+    // this" on the board; the log answers "what did she get through
+    // yesterday", and survives the reopen that clears the column.
+    if (closing || reopening) {
+      await db.from('activity_log').insert({
+        org_id: orgId,
+        actor: userId,
+        action: closing ? 'task.complete' : 'task.reopen',
+        entity: 'tasks',
+        entity_id: req.params.id,
+        meta: { title: before!.title, from: before!.status, to: patch.status },
+      });
+    }
+
     // Done by anyone: every other copy of the same task is done too, so none
     // is left in the open queue — whoever it was handed to.
-    if (patch.status === 'done' && req.auth!.orgId) {
-      await closeCopiesOfFinishedTasks(req.auth!.orgId).catch((err) =>
+    if (patch.status === 'done' && orgId) {
+      await closeCopiesOfFinishedTasks(orgId).catch((err) =>
         console.error('[tasks] closing copies failed:', (err as Error).message),
+      );
+    }
+    // And the nudges about it stop here rather than at the next sweep, so
+    // Top Priority Actions is not still chasing work that was just filed.
+    // Cancelled counts too: there is nothing left to chase either way.
+    if ((patch.status === 'done' || patch.status === 'cancelled') && orgId) {
+      await resolveFollowUpsForTask(orgId, req.params.id).catch((err) =>
+        console.error('[tasks] clearing follow-ups failed:', (err as Error).message),
       );
     }
     res.json({ data });

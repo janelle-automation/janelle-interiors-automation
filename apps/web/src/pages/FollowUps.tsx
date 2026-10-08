@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Page, PageHeading, Card, Pill } from '../components/ui';
 import { useFollowUps, useFollowUpStatus, useSnoozeFollowUp, type FollowUpView } from '../lib/queries';
 import { ScopeToggle, useScope } from '../components/ScopeToggle';
 import { useAuth } from '../context/AuthContext';
 import { HUE, ProjectName, type Hue } from '../components/hue';
+import { IconChevronDown } from '../components/icons';
 
 const tone: Record<string, 'crit' | 'warn' | 'brass'> = {
   vendor_silence: 'warn',
@@ -77,10 +78,40 @@ function ActionsMenu({
   onComplete, onSnooze, onDismiss, busy,
 }: { onComplete: () => void; onSnooze: (days: number) => void; onDismiss: () => void; busy: boolean }) {
   const [open, setOpen] = useState(false);
+  const [up, setUp] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLSpanElement>(null);
+
+  /*
+   * Open upwards when there is no room below.
+   *
+   * The menu was always `top-full`, so on the last row of the page — which
+   * is exactly where the longest-ignored nudge sits — it opened off the
+   * bottom of the window and had to be scrolled to, past the actions it was
+   * offering. Measured rather than guessed at a fixed height, so adding an
+   * item to the menu cannot quietly break the sum.
+   *
+   * In a layout effect: this runs after the menu is in the DOM but before
+   * the browser paints, so the flip is never seen.
+   */
+  useLayoutEffect(() => {
+    if (!open) return;
+    const trigger = triggerRef.current;
+    const menu = menuRef.current;
+    if (!trigger || !menu) return;
+    const rect = trigger.getBoundingClientRect();
+    const needed = menu.offsetHeight + 8;
+    const below = window.innerHeight - rect.bottom;
+    // Only flip if above is genuinely roomier — on a short window neither
+    // side fits, and dropping down keeps it where the eye already is.
+    setUp(below < needed && rect.top > below);
+  }, [open]);
+
   const item = 'focusable block w-full px-3 py-1.5 text-left text-[13px] text-ink transition-colors hover:bg-sunk';
   return (
     <span className="relative">
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
         disabled={busy}
@@ -100,10 +131,15 @@ function ActionsMenu({
         <>
           {/* Clicking anywhere else puts the menu away, without a listener
               on the document that would fight the button's own click. */}
-          <span className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden />
+          <span className="fixed inset-0 z-40" onClick={() => setOpen(false)} aria-hidden />
+          {/* z-50 is the app's popover level — below it, a menu opening
+              upwards slid under the sticky top bar. */}
           <span
+            ref={menuRef}
             role="menu"
-            className="popover absolute right-0 top-full z-20 mt-1 flex w-44 flex-col overflow-hidden rounded-lg border border-line bg-surface py-1 shadow-pop"
+            className={`popover absolute right-0 z-50 flex w-44 flex-col overflow-hidden rounded-lg border border-line bg-surface py-1 shadow-pop ${
+              up ? 'bottom-full mb-1' : 'top-full mt-1'
+            }`}
           >
             <button
               type="button"
@@ -188,28 +224,64 @@ function Row({ f }: { f: FollowUpView }) {
   );
 }
 
-/** One project and what is waiting on it, as a box of its own. */
-function ProjectBox({ name, rows }: { name: string; rows: FollowUpView[] }) {
+/**
+ * One project and what is waiting on it, as a box of its own — and folded
+ * shut until asked for.
+ *
+ * Twenty projects holding 243 nudges, every one of them expanded, is not a
+ * page anyone reads; the most urgent item sat above a screen and a half of
+ * the next project's backlog. The header carries what the box is worth
+ * reading for — the project, its worst nudge and how long it has been quiet
+ * — so the decision to open it can be made without opening it.
+ *
+ * The leading box opens itself: this page exists to put one thing in front
+ * of somebody, and a page of shut drawers puts nothing.
+ */
+function ProjectBox({ name, rows, defaultOpen = false }: { name: string; rows: FollowUpView[]; defaultOpen?: boolean }) {
   const worst = rows.reduce((a, f) => (rankOf(f) < rankOf(a) ? f : a), rows[0]);
   const longest = Math.max(...rows.map(quietDays));
+  const [open, setOpen] = useState(defaultOpen);
+  const bodyId = useId();
   return (
     <Card>
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-line-soft bg-sunk/40 px-5 py-3">
-        <div className="flex min-w-0 items-center gap-3">
-          <h3 className={`min-w-0 truncate text-[15px] font-semibold ${name === NO_PROJECT ? 'text-ink-soft' : 'text-ink'}`}>
-            {name === NO_PROJECT ? name : <ProjectName name={name} />}
-          </h3>
-          <Pill tone={tone[worst.type]}>{label[worst.type] ?? worst.type}</Pill>
-        </div>
-        <p className="text-[12px] text-ink-faint">
-          {rows.length} open{longest > 0 && <> · longest quiet {longest} day{longest > 1 ? 's' : ''}</>}
-        </p>
-      </div>
-      <ul className="divide-y divide-line-soft">
-        {rows.map((f) => (
-          <Row key={f.id} f={f} />
-        ))}
-      </ul>
+      {/* The whole header is the control, so the hit area matches what it
+          looks like. A heading wrapping the button rather than the other way
+          round: a button may only hold phrasing content. */}
+      <h3 className="m-0">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-controls={bodyId}
+          className={`focusable flex w-full flex-wrap items-center justify-between gap-x-4 gap-y-1 bg-sunk/40 px-5 py-3 text-left transition-colors hover:bg-sunk ${
+            open ? 'rounded-t-xl border-b border-line-soft' : 'rounded-xl'
+          }`}
+        >
+          <span className="flex min-w-0 items-center gap-3">
+            <IconChevronDown
+              width={16}
+              height={16}
+              className={`shrink-0 text-ink-faint transition-transform ${open ? '' : '-rotate-90'}`}
+            />
+            <span className={`min-w-0 truncate text-[15px] font-semibold ${name === NO_PROJECT ? 'text-ink-soft' : 'text-ink'}`}>
+              {name === NO_PROJECT ? name : <ProjectName name={name} />}
+            </span>
+            <Pill tone={tone[worst.type]}>{label[worst.type] ?? worst.type}</Pill>
+          </span>
+          <span className="text-[12px] text-ink-faint">
+            {rows.length} open{longest > 0 && <> · longest quiet {longest} day{longest > 1 ? 's' : ''}</>}
+          </span>
+        </button>
+      </h3>
+      {/* Unmounted rather than hidden: 243 rows' worth of menus and dates is
+          the cost this is here to avoid paying. */}
+      {open && (
+        <ul id={bodyId} className="divide-y divide-line-soft">
+          {rows.map((f) => (
+            <Row key={f.id} f={f} />
+          ))}
+        </ul>
+      )}
     </Card>
   );
 }
@@ -354,8 +426,8 @@ export default function FollowUps() {
               </Card>
             ) : (
               <div className="space-y-4">
-                {top.map(([name, rows]) => (
-                  <ProjectBox key={name} name={name} rows={rows} />
+                {top.map(([name, rows], i) => (
+                  <ProjectBox key={name} name={name} rows={rows} defaultOpen={i === 0} />
                 ))}
               </div>
             )}

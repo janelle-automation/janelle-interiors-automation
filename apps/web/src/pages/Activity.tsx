@@ -6,6 +6,13 @@ const actionLabel: Record<string, string> = {
   'followups.run': 'Ran follow-up engine',
   'report.generate': 'Generated weekly report',
   'draft.create': 'Created a Gmail draft',
+  'task.complete': 'Marked a task completed',
+  'task.reopen': 'Reopened a task',
+  'task.auto_complete': 'Closed a task from an email',
+  'task.delete': 'Deleted a task',
+  'task.comment': 'Commented on a task',
+  'tasks.subtasks_removed': 'Removed subtasks (migration 0033)',
+  'followups.resolved': 'Cleared resolved follow-ups',
 };
 
 export default function Activity() {

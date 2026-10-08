@@ -35,6 +35,7 @@ interface SpeechRecognitionLike {
   abort(): void;
   onresult: ((e: { results: ArrayLike<RecognitionResult> }) => void) | null;
   onerror: ((e: { error: string }) => void) | null;
+  onstart: (() => void) | null;
   onend: (() => void) | null;
 }
 
@@ -108,6 +109,17 @@ export interface ListenOptions {
   onInterim?: (text: string) => void;
   /** Every way the finished sentence was heard, best guesses first. */
   onResult: (hearings: Hearing[]) => void;
+  /**
+   * The microphone is live and words will now be caught.
+   *
+   * Fired from the recogniser's own `onstart`, never guessed at. Everything
+   * before it — waiting out her voice, the permission grant, and on a
+   * Bluetooth headset the 1–8s switch from A2DP to the SCO link — is time
+   * in which the screen used to say "Listening" and nothing was being
+   * recorded. A caller that shows a different state until this arrives is
+   * telling the truth about when to start talking.
+   */
+  onStart?: () => void;
   onError: (message: string) => void;
   onEnd: () => void;
   /**
@@ -146,6 +158,15 @@ export type StopListening = (how?: { discard?: boolean }) => void;
 function silence(maxWaitMs = 1_200): Promise<void> {
   return new Promise((resolve) => {
     if (!speechOutputSupported()) return resolve();
+    /*
+     * Nothing is being said, so there is no last syllable to wait out.
+     *
+     * The 350ms below is for the tail of HER voice still crossing the room.
+     * It was paid on every start, including pressing the microphone button
+     * in a silent room, where it bought nothing and cost the first word.
+     */
+    const idle = window.speechSynthesis;
+    if (!idle.speaking && !idle.pending) return resolve();
     const started = Date.now();
     const check = () => {
       const synth = window.speechSynthesis;
@@ -169,6 +190,18 @@ const HANGING_MS = 1_800;
 const UNSETTLED_MS = 1_000;
 /** Nothing at all said for this long is silence. */
 const NO_SPEECH_MS = 8_000;
+/**
+ * The same, where the microphone may not exist yet when the recogniser
+ * starts.
+ *
+ * A Bluetooth headset plays through A2DP, which cannot capture and render
+ * at once, so asking for a microphone makes the device drop it and bring up
+ * the SCO link instead — 1–2 seconds on a Pixel, 5–8 on some others. At
+ * eight seconds the backstop could fire before the microphone had
+ * connected at all: "I did not catch that", about a sentence the hardware
+ * was not yet able to hear.
+ */
+const NO_SPEECH_HANDHELD_MS = 20_000;
 /** Longest we hold the recogniser back waiting on a microphone grant. */
 const MIC_GRANT_MS = 10_000;
 
@@ -216,17 +249,84 @@ const HANGING = new Set([
  * its own stream, and this one only ever looks at the level.
  */
 export interface MicLevel {
-  /** 0..1, for something on screen to move with the voice. */
+  /** 0..1, for something on screen to move with the voice. Per frame. */
   level: number;
-  /** Loud enough for the recogniser to work with. */
+  /**
+   * Loud enough for the recogniser to work with.
+   *
+   * Unlike `level`, a judgement about the last second or so rather than
+   * about this frame — it holds through the gaps between words instead of
+   * dropping out on every one of them. Anything shown to a person belongs
+   * on this and not on the raw level.
+   */
   speaking: boolean;
-  /** Sound is arriving, but too quietly to be transcribed reliably. */
+  /** Sound has been arriving too quietly to transcribe, and keeps being. */
   faint: boolean;
 }
 
 /** Speech sits around -35..-15 dBFS; a quiet room floor is below -55. */
 const FAINT_DB = -52;
 const CLEAR_DB = -38;
+/**
+ * How far back across a threshold the level must fall before the state it
+ * opened is allowed to close.
+ *
+ * A voice is not a tone. Within one sentence the level crosses any single
+ * line many times a second — between syllables, on the tail of a word, in
+ * the gap before a plosive. Read frame by frame against one threshold,
+ * `speaking` and `faint` therefore flickered at something like 10Hz, and
+ * the sentence under the orb rewrote itself just as fast: "go ahead",
+ * "hearing you", "I can barely hear you", and back. Every flip was also
+ * announced, because that line is an `aria-live` region.
+ */
+const RELEASE_DB = 6;
+/** Syllable gaps and the pause between words: ridden over, not reported. */
+const HANGOVER_MS = 700;
+/**
+ * How long the level must hold above the clear line before it counts as a
+ * voice. A door, a cough or a keyboard clears it for a frame or two; a
+ * vowel holds it far longer. Without this, one click in an otherwise too
+ * quiet room cancels the "move closer" hint for most of a second — and
+ * sets `sawSpeech`, so the recogniser then blames the words rather than
+ * the distance.
+ */
+const CLEAR_ATTACK_MS = 80;
+/** Quiet speech must keep being quiet this long before anyone is told so. */
+const FAINT_AFTER_MS = 1_200;
+/** And once told, told for long enough to read. */
+const FAINT_HOLD_MS = 2_500;
+/**
+ * The orb follows the voice frame by frame; React does not need to. The
+ * level is a number on a CSS transform with an 80ms transition over it, so
+ * 20Hz looks identical and costs a third of the renders — this used to set
+ * state in the assistant's context on every animation frame, re-rendering
+ * the whole panel 60 times a second.
+ */
+const LEVEL_EMIT_MS = 50;
+/** Below this, a new level is not a visible move. */
+const LEVEL_STEP = 0.02;
+
+/**
+ * Whether the microphone has already been granted for this origin.
+ *
+ * Only ever used to decide whether a permission PROMPT is still possible.
+ * Firefox and Safari do not answer for 'microphone' — they throw, or report
+ * nothing useful — and the honest answer there is "cannot tell", which
+ * takes the careful path. Never used to decide whether to ask: that is
+ * getUserMedia's own job, and it is allowed to say no.
+ */
+async function micAlreadyGranted(): Promise<boolean> {
+  try {
+    const perms = navigator.permissions as
+      | { query?: (d: { name: string }) => Promise<{ state: string }> }
+      | undefined;
+    if (!perms?.query) return false;
+    const status = await perms.query({ name: 'microphone' });
+    return status.state === 'granted';
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Open the microphone with the browser's own cleanup turned on.
@@ -277,6 +377,18 @@ export async function openMicMeter(onLevel: (l: MicLevel) => void): Promise<() =
     source.connect(analyser);
     const buffer = new Float32Array(analyser.fftSize);
 
+    // What the room has been doing, rather than what this frame caught.
+    let speaking = false;
+    let faint = false;
+    let clearUntil = 0;
+    let clearSince = 0;
+    let audibleUntil = 0;
+    let faintSince = 0;
+    let faintUntil = 0;
+    let emittedAt = 0;
+    let emittedLevel = -1;
+    let emitted: MicLevel | null = null;
+
     const tick = () => {
       if (stopped) return;
       analyser.getFloatTimeDomainData(buffer);
@@ -284,12 +396,52 @@ export async function openMicMeter(onLevel: (l: MicLevel) => void): Promise<() =
       for (const v of buffer) sum += v * v;
       const rms = Math.sqrt(sum / buffer.length);
       const db = rms > 0 ? 20 * Math.log10(rms) : -100;
-      onLevel({
-        // -60 dB is the bottom of the meter, -10 the top.
-        level: Math.max(0, Math.min(1, (db + 60) / 50)),
-        speaking: db >= CLEAR_DB,
-        faint: db >= FAINT_DB && db < CLEAR_DB,
-      });
+      const now = performance.now();
+
+      // Rise as soon as the level has held above the line for longer than a
+      // click. Fall only once the voice has stayed down past both the
+      // release margin and the gap between words.
+      if (db >= CLEAR_DB) {
+        if (!clearSince) clearSince = now;
+        if (speaking || now - clearSince >= CLEAR_ATTACK_MS) {
+          speaking = true;
+          clearUntil = now + HANGOVER_MS;
+        }
+      } else {
+        clearSince = 0;
+        if (speaking && db < CLEAR_DB - RELEASE_DB && now > clearUntil) speaking = false;
+      }
+
+      if (db >= FAINT_DB) audibleUntil = now + HANGOVER_MS;
+
+      if (speaking) {
+        // Audible now: whatever they were doing before, the advice is stale.
+        faint = false;
+        faintSince = 0;
+        faintUntil = 0;
+      } else if (now <= audibleUntil) {
+        // Sound is arriving and not getting there. Worth saying — but only
+        // once it has been true for longer than a quiet syllable.
+        if (!faintSince) faintSince = now;
+        if (!faint && now - faintSince >= FAINT_AFTER_MS) {
+          faint = true;
+          faintUntil = now + FAINT_HOLD_MS;
+        }
+      } else if (now > faintUntil) {
+        // Silence. Nothing to advise about: that is the other hint's job.
+        faint = false;
+        faintSince = 0;
+      }
+
+      // -60 dB is the bottom of the meter, -10 the top.
+      const level = Math.max(0, Math.min(1, (db + 60) / 50));
+      const flipped = !emitted || emitted.speaking !== speaking || emitted.faint !== faint;
+      if (flipped || (now - emittedAt >= LEVEL_EMIT_MS && Math.abs(level - emittedLevel) >= LEVEL_STEP)) {
+        emittedAt = now;
+        emittedLevel = level;
+        emitted = { level, speaking, faint };
+        onLevel(emitted);
+      }
       raf = requestAnimationFrame(tick);
     };
     tick();
@@ -454,29 +606,61 @@ export function listen(opts: ListenOptions): StopListening {
      * missing meter still falls through to the recogniser, which reports
      * the problem in its own words.
      */
-    const meter = openMicMeter((l) => {
-      if (l.speaking) sawSpeech = true;
-      else if (l.faint) sawFaint = true;
-      opts.onLevel?.(l);
-    });
-    // Waited for, but never indefinitely: a permission prompt nobody answers
-    // leaves getUserMedia pending for good, and the recogniser still deserves
-    // its own chance to ask rather than the whole thing hanging in silence.
-    const close = await Promise.race([
-      meter,
-      new Promise<null>((r) => { setTimeout(() => r(null), MIC_GRANT_MS); }),
-    ]);
-    if (micIsExclusive()) {
-      // Permission is settled; give the microphone up before the recogniser
-      // asks for it. No live level on a phone, which costs the "I can barely
-      // hear you" hint and nothing else.
-      close?.();
-      void meter.then((c) => c());
-      closeMic = null;
-    } else if (close) {
-      closeMic = close;
-    } else {
-      void meter.then((c) => { if (ended || finished) c(); else closeMic = c; });
+    /*
+     * On a handheld the meter is not opened at all.
+     *
+     * Its readings were already being thrown away there — one microphone,
+     * and the recogniser is the part that cannot do without it — so what
+     * remained was the cost of taking it and handing it back. Over
+     * Bluetooth that cost is not free: every open and close drags the
+     * device between A2DP and the SCO link that carries a microphone, and
+     * that switch runs 1–2 seconds on a Pixel and 5–8 on some others.
+     * Opening the meter and closing it again spent that twice before the
+     * recogniser had asked for anything, and it then had to wait for a
+     * third switch to finish before it could hear a word.
+     *
+     * Leaving the recogniser as the only thing that wants the microphone
+     * also leaves one permission request rather than two, which is what
+     * waiting here was for in the first place.
+     */
+    if (!micIsExclusive()) {
+      const meter = openMicMeter((l) => {
+        if (l.speaking) sawSpeech = true;
+        else if (l.faint) sawFaint = true;
+        opts.onLevel?.(l);
+      });
+
+      /*
+       * Waited for ONLY while the grant is still in question.
+       *
+       * Everything above is about the first run, when two requests in the
+       * same tick put up two prompts and the second is dismissed unanswered.
+       * Once the grant exists there is no prompt to collide with — and
+       * waiting anyway put a whole getUserMedia round trip between pressing
+       * the button and the recogniser starting, on top of the wait in
+       * `silence`. The screen said "Listening" throughout, so anyone who
+       * pressed and spoke straight away lost their opening words to a
+       * microphone that was not running yet.
+       *
+       * The meter still opens, just alongside rather than in front. What is
+       * given up is the chance that the browser has finished applying gain
+       * to the device before the first syllable — which the comment above
+       * flags as undocumented behaviour rather than a guarantee. A certain
+       * loss of the first words is the worse of the two.
+       */
+      if (await micAlreadyGranted()) {
+        void meter.then((c) => { if (ended || finished) c(); else closeMic = c; });
+      } else {
+        // Never indefinitely: a prompt nobody answers leaves getUserMedia
+        // pending for good, and the recogniser still deserves its own chance
+        // to ask rather than the whole thing hanging in silence.
+        const close = await Promise.race([
+          meter,
+          new Promise<null>((r) => { setTimeout(() => r(null), MIC_GRANT_MS); }),
+        ]);
+        if (close) closeMic = close;
+        else void meter.then((c) => { if (ended || finished) c(); else closeMic = c; });
+      }
     }
     if (cancelled || ended || finished) {
       closeMic?.();
@@ -511,6 +695,10 @@ export function listen(opts: ListenOptions): StopListening {
       clearTimeout(timer);
       timer = setTimeout(() => finish(true), pauseFor(heard, opts.pauseMs));
     };
+    r.onstart = () => {
+      if (!finished && !ended) opts.onStart?.();
+    };
+
     r.onerror = (e) => {
       if (e.error === 'aborted') return;
       if (e.error === 'no-speech') {
@@ -537,7 +725,7 @@ export function listen(opts: ListenOptions): StopListening {
         if (heard.length || finished) return;
         opts.onError(unheardReason());
         finish(false);
-      }, NO_SPEECH_MS);
+      }, isHandheld() ? NO_SPEECH_HANDHELD_MS : NO_SPEECH_MS);
     } catch {
       finished = true;
       opts.onError('Could not start listening.');
@@ -778,12 +966,47 @@ let lastSaid: { text: string; endedAt: number | null } = { text: '', endedAt: 0 
  */
 export function soundsLikeEcho(heard: string): boolean {
   if (!lastSaid.text) return false;
+  /*
+   * Her voice is only in the air for a moment after the engine stops, and
+   * `listen()` already waits for that moment to pass before it opens the
+   * microphone. Ten seconds was never about audio still playing — it was a
+   * content filter left switched on while the person was talking, and it
+   * threw their words away. Past this window there is nothing left to echo,
+   * so whatever arrives is theirs.
+   */
   const since = lastSaid.endedAt === null ? 0 : Date.now() - lastSaid.endedAt;
-  if (since > 10_000) return false;
-  const said = new Set(wordsOf(lastSaid.text));
-  const words = wordsOf(heard);
-  if (words.length < 3) return false;
-  return words.filter((w) => said.has(w)).length / words.length >= 0.7;
+  if (since > 2_500) return false;
+
+  /*
+   * Judged on word PAIRS, not on a bag of single words.
+   *
+   * Counting single words sounded reasonable until she read a briefing out
+   * loud: nineteen tasks put several hundred words into the comparison, and
+   * after that almost any sentence about the studio was seventy per cent
+   * "words she just said". Asking "what is late on the Lemon Residence"
+   * scored as an echo and was thrown away — silently, with the microphone
+   * listening again as though nothing had been said. Which is exactly what
+   * it looked like from the other side.
+   *
+   * An echo reproduces her phrasing, so it repeats her pairs. A question of
+   * your own about the same project borrows her words but not the order she
+   * put them in.
+   */
+  const pairs = (words: string[]) => words.slice(1).map((w, i) => `${words[i]} ${w}`);
+  const heardPairs = pairs(wordsOf(heard));
+  // Shorter than this and a repeated pair is a coincidence, not an echo.
+  if (heardPairs.length < 3) return false;
+
+  /*
+   * Set high on purpose. Repeating a task back to her — "schedule a call
+   * with Carissa today" — borrows most of a line she just read, and at a
+   * looser bar that question was discarded as her own voice. Only a near
+   * copy counts, because the cost of the two mistakes is not symmetric:
+   * passing an echo through gives one odd answer, while dropping real words
+   * gives no answer and no reason, which is what this was doing.
+   */
+  const saidPairs = new Set(pairs(wordsOf(lastSaid.text)));
+  return heardPairs.filter((p) => saidPairs.has(p)).length / heardPairs.length >= 0.85;
 }
 
 // ── What gets said ──────────────────────────────────────────

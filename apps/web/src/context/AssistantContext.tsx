@@ -207,6 +207,15 @@ interface AssistantCtx {
   setMicError: (message: string | null) => void;
   /** What the microphone is hearing while listening; null when it is not. */
   micLevel: MicLevel | null;
+  /**
+   * The microphone is actually recording, not merely about to.
+   *
+   * `voice === 'listening'` is set the instant the turn passes to the
+   * person; the recogniser starts some time after that, and on a Bluetooth
+   * headset "some time" is seconds. The orb said "go ahead" through all of
+   * it, so an answer given straight away was lost.
+   */
+  micLive: boolean;
   canListen: boolean;
   canSpeak: boolean;
 }
@@ -242,7 +251,8 @@ interface Conversation {
 }
 
 interface Stored {
-  v: 2;
+  /** 2 → 3 when the agent default became "all five on"; see `load`. */
+  v: 2 | 3;
   conversations: Conversation[];
   activeId: string;
   /** The local day the last briefing was made, so there is one a day. */
@@ -281,9 +291,20 @@ const blankConversation = (): Conversation => {
   return { id: newId(), title: null, createdAt: now, updatedAt: now, messages: [] };
 };
 
+/**
+ * Every agent on, for somebody who has never chosen.
+ *
+ * The five between them reach every tool Jenny has, plus the always-on
+ * handful, so this is not a narrowing — it is the same assistant, with the
+ * five jobs she does named on the Agents tab instead of left to be guessed
+ * at. Starting at none meant the tab opened on five switches all off, which
+ * reads as a feature nobody turned on rather than as how Jenny already works.
+ */
+const allAgents = (): AgentKey[] => [...AGENT_KEYS];
+
 const emptyStore = (): Stored => {
   const first = blankConversation();
-  return { v: 2, conversations: [first], activeId: first.id, briefedOn: null, unseen: 0, agents: [] };
+  return { v: 3, conversations: [first], activeId: first.id, briefedOn: null, unseen: 0, agents: allAgents() };
 };
 
 /** The conversation on screen; there is always one. */
@@ -312,13 +333,21 @@ function load(userId: string): Stored {
         updatedAt: messages[messages.length - 1]?.at ?? Date.now(),
         messages,
       };
-      return { v: 2, conversations: [conversation], activeId: conversation.id, briefedOn: parsed.briefedOn ?? null, unseen: parsed.unseen ?? 0, agents: [] };
+      return { v: 3, conversations: [conversation], activeId: conversation.id, briefedOn: parsed.briefedOn ?? null, unseen: parsed.unseen ?? 0, agents: allAgents() };
     }
-    if (parsed?.v !== 2 || !Array.isArray(parsed.conversations) || !parsed.conversations.length) return emptyStore();
+    if ((parsed?.v !== 2 && parsed?.v !== 3) || !Array.isArray(parsed.conversations) || !parsed.conversations.length) return emptyStore();
     const conversations = parsed.conversations.filter((c) => c && typeof c.id === 'string' && Array.isArray(c.messages));
     if (!conversations.length) return emptyStore();
     const activeId = conversations.some((c) => c.id === parsed.activeId) ? parsed.activeId : conversations[0].id;
-    return { ...parsed, conversations, activeId, agents: agentsOf(parsed.agents) };
+    /*
+     * A v2 store that has never had an agent on is one that was written
+     * before the default changed, not a decision to run with none — the
+     * switches were off because that is where they started. Upgrading it
+     * once turns them on; a deliberate "Turn all off" afterwards is saved
+     * as v3 and left alone.
+     */
+    const agents = parsed.v === 2 && !agentsOf(parsed.agents).length ? allAgents() : agentsOf(parsed.agents);
+    return { ...parsed, v: 3, conversations, activeId, agents };
   } catch {
     return emptyStore();
   }
@@ -544,6 +573,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   // voice rather than with a state flag — and a voice too quiet to be
   // transcribed is visible as it happens.
   const [micLevel, setMicLevel] = useState<MicLevel | null>(null);
+  const [micLive, setMicLive] = useState(false);
 
   // Names a recogniser has never heard of — Denish, Casa Elar, Nordhaus —
   // used to pick the hearing that contains them. Rarely changes.
@@ -1196,10 +1226,30 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     if (!handsFreeRef.current) return;
     setVoice('listening');
     setInterim('');
+    setMicLive(false);
     let heard = false;
     let echo = false;
     stopListeningRef.current = listen({
+      /*
+       * More patient than the microphone button, not less.
+       *
+       * Press-to-talk waits 2.6s and then puts the words in the box, where
+       * they sit until Enter — a sentence cut in half is visible, and gets
+       * fixed before anyone sees it but the person who said it. Hands-free
+       * was on the 2.0s default and SENDS, with nothing in between. So the
+       * path with no safety net was the quicker of the two to decide
+       * somebody had stopped talking, and "can you check the…" went to
+       * Jenny as a question while its second half was still being said.
+       * She answered the fragment, which is what "she catches the wrong
+       * words" looks like from the other side of the microphone.
+       *
+       * pauseFor() still adds 1.8s on top when the last word leaves the
+       * sentence hanging, and 1s more while the browser has not settled, so
+       * trailing off mid-phrase buys well over four seconds.
+       */
+      pauseMs: 2_800,
       onLevel: setMicLevel,
+      onStart: () => setMicLive(true),
       onInterim: (words) => setInterim(words),
       onResult: (hearings) => {
         const ranked = bestHearing(hearings, vocabularyRef.current);
@@ -1225,6 +1275,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         stopListeningRef.current = null;
         setInterim('');
         setMicLevel(null);
+        setMicLive(false);
         if (!handsFreeRef.current || heard) return;
         // An echo is not silence: listen again without counting it.
         if (!echo) silencesRef.current += 1;
@@ -1367,6 +1418,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       setSpeakReplies,
       micError,
       micLevel,
+      micLive,
       setMicError,
       canListen,
       canSpeak,
@@ -1376,7 +1428,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       conversations, openConversation, renameConversation, pinConversation, deleteConversation, downloadConversation,
       prefill, setPrefill, attachRequest, requestAttach, markDone, markDismissed, acknowledge,
       briefingLoading, open, setOpen, focusRequest, requestFocus, lookingAt, store.agents, setAgents, handsFree,
-      setHandsFree, voice, skipSpeaking, doneTalking, speakReplies, micError, micLevel, canListen, canSpeak,
+      setHandsFree, voice, skipSpeaking, doneTalking, speakReplies, micError, micLevel, micLive, canListen, canSpeak,
     ],
   );
 

@@ -11,7 +11,8 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { addressOf, isStudioMailbox, namesFor, studioPerson } from '../lib/studioTeam.js';
 import { gmailForReply, createDraft, type DraftContent } from './gmail.js';
-import { hasDraftGmailMessage, hasEmailOwner, hasMessageId } from '../lib/columns.js';
+import { resolveFollowUpsForTask } from './followups.js';
+import { hasDraftGmailMessage, hasEmailOwner, hasMessageId, hasTaskCompletedBy } from '../lib/columns.js';
 
 /**
  * Turning something Jenny prepared into something that exists.
@@ -550,8 +551,24 @@ export async function commitTaskUpdate(
     }
   }
 
+  // Jenny closing a task is still a person closing a task — migration 0032.
+  // Only on the way in, and only out of a status that was not already Done,
+  // so "set the due date" on finished work does not restamp it.
+  if (patch.status === 'done' && task.status !== 'done' && (await hasTaskCompletedBy())) {
+    patch.completed_by = userId;
+  }
+
   const { error } = await db.from('tasks').update(patch).eq('id', task.id);
   if (error) throw new Error(error.message);
+
+  // Closing it here clears its nudges here too, exactly as the board does —
+  // otherwise "Jenny, mark that done" leaves the escalation on Top Priority
+  // Actions and ticking the same task on the board does not.
+  if (orgId && (patch.status === 'done' || patch.status === 'cancelled') && task.status !== patch.status) {
+    await resolveFollowUpsForTask(orgId, task.id).catch((err) =>
+      console.error('[assistant] clearing follow-ups failed:', (err as Error).message),
+    );
+  }
 
   await db.from('activity_log').insert({
     org_id: orgId,

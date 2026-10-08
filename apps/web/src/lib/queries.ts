@@ -1302,6 +1302,10 @@ export function useUpdateTask() {
       qc.invalidateQueries({ queryKey: ['tasks'] });
       qc.invalidateQueries({ queryKey: ['task'] });
       qc.invalidateQueries({ queryKey: ['dashboard'] });
+      // Closing a task closes the nudges about it, server-side. Top Priority
+      // Actions is built from those, so without this it keeps chasing work
+      // that was finished a moment ago on the next screen over.
+      qc.invalidateQueries({ queryKey: ['follow-ups'] });
     },
   });
 }
@@ -1329,6 +1333,9 @@ export function useDeleteTask() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['tasks'] });
       qc.invalidateQueries({ queryKey: ['dashboard'] });
+      // The task's follow-ups cascade away with it in the database (0005),
+      // so the queue they feed has to be refetched here too.
+      qc.invalidateQueries({ queryKey: ['follow-ups'] });
     },
   });
 }
@@ -1354,13 +1361,12 @@ export interface TaskHistoryEntry {
   created_at: string;
 }
 
-export interface Subtask {
+export interface TaskComment {
   id: string;
-  title: string;
-  status: TaskStatus;
-  assigned_to: string | null;
-  due_date: string | null;
+  body: string;
   created_at: string;
+  /** Null once the person who wrote it has left the studio. */
+  author: string | null;
   profiles?: { full_name: string | null } | null;
 }
 
@@ -1374,6 +1380,14 @@ export interface TaskDetail {
     reminded_at: string | null; reminder_count: number;
     /** Migration 0015; absent before it is applied. */
     completed_at?: string | null; completion_note?: string | null;
+    /**
+     * Who moved it to Done — migration 0032. A profile id, not an embedded
+     * name: tasks already embed `profiles` for the assignee, and a second
+     * relationship to the same table would make that join ambiguous. Read it
+     * against the team roster. Null when the system closed it (then
+     * `completion_note` says why) or when it was closed before 0032.
+     */
+    completed_by?: string | null;
     projects: { name: string } | null;
     vendors: { name: string } | null;
     profiles: { full_name: string | null; email: string | null } | null;
@@ -1386,9 +1400,9 @@ export interface TaskDetail {
    */
   emailHiddenFrom?: string | null;
   history: TaskHistoryEntry[];
-  subtasks: Subtask[];
-  /** False until migration 0009 is applied. */
-  subtasksAvailable: boolean;
+  comments: TaskComment[];
+  /** False until migration 0033 is applied. */
+  commentsAvailable: boolean;
 }
 
 /** Everything behind one task — fetched only while its panel is open. */
@@ -1400,20 +1414,58 @@ export function useTaskDetail(id: string | null) {
   });
 }
 
-/** Break a task into a step of its own. */
-export function useAddSubtask(parentId: string | null) {
+/** Say something on a task, naming anyone who needs to see it. */
+export function useAddComment(taskId: string | null) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (title: string) =>
-      api<Subtask>(`/tasks/${parentId}/subtasks`, {
+    mutationFn: (v: { body: string; mentions: string[] }) =>
+      api<{ comment: TaskComment; mentioned: number }>(`/tasks/${taskId}/comments`, {
         method: 'POST',
-        body: JSON.stringify({ title }),
+        body: JSON.stringify(v),
       }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['task', parentId] });
-      // A subtask is a task, so it belongs on the board too.
-      qc.invalidateQueries({ queryKey: ['tasks'] });
+      qc.invalidateQueries({ queryKey: ['task', taskId] });
+      // Someone else's bell, not this person's — but the panel may be open
+      // on two screens, and a mention of yourself is filtered server-side.
+      qc.invalidateQueries({ queryKey: ['mentions'] });
     },
+  });
+}
+
+export interface MentionRow {
+  id: string;
+  task_id: string;
+  created_at: string;
+  task_comments: { body: string; profiles: { full_name: string | null } | null } | null;
+  tasks: { title: string } | null;
+}
+
+/**
+ * Unread mentions, for the bell.
+ *
+ * Polled on the same terms as the rest of the panel rather than pushed:
+ * there is no socket in this app, and a mention that arrives within a
+ * minute of being written is soon enough for a studio of seven.
+ */
+export function useMentions() {
+  const q = useQuery({
+    queryKey: ['mentions'],
+    queryFn: () => api<MentionRow[]>('/me/mentions'),
+    refetchInterval: 60_000,
+  });
+  return { ...q, data: q.data ?? [] };
+}
+
+/** Mark mentions seen — the ones named, or all of them. */
+export function useMarkMentionsRead() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ids?: string[]) =>
+      api<{ read: number }>('/me/mentions/read', {
+        method: 'POST',
+        body: JSON.stringify(ids?.length ? { ids } : {}),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['mentions'] }),
   });
 }
 
