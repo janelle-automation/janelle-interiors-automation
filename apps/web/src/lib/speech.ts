@@ -9,12 +9,75 @@
  */
 
 /**
- * The studio works in English, so both the microphone and the spoken
- * replies are pinned to it. The Web Speech API needs a language before it
- * starts listening and cannot auto-detect, so a fixed value is also the
- * most reliable one.
+ * The English the microphone is listening for.
+ *
+ * The Web Speech API cannot auto-detect; it is handed one locale and
+ * decodes against that model alone. Pinning everyone to en-US was fine for
+ * a studio in Ojai and wrong for anyone else using the same build: an
+ * Indian-accented speaker decoded against a US model comes back as
+ * Hinglish — real words, confidently wrong — because the recogniser is
+ * mapping the phonemes it has rather than the ones it is hearing. Chrome
+ * ships en-IN, en-GB and en-AU trained on exactly those accents.
+ *
+ * Per BROWSER, not per account. An accent belongs to the person and their
+ * microphone, not to a row in the studio's database, and the same login on
+ * a shared laptop should not drag a colleague's model along with it.
  */
-const LANG = 'en-US';
+export const SPEECH_LANGS = [
+  { code: 'en-US', label: 'English (United States)' },
+  { code: 'en-GB', label: 'English (United Kingdom)' },
+  { code: 'en-IN', label: 'English (India)' },
+  { code: 'en-AU', label: 'English (Australia)' },
+  { code: 'en-CA', label: 'English (Canada)' },
+] as const;
+
+export type SpeechLang = (typeof SPEECH_LANGS)[number]['code'];
+
+const LANG_KEY = 'janelle.speechLang';
+const DEFAULT_LANG: SpeechLang = 'en-US';
+
+/**
+ * The browser's own English, when it is one we offer.
+ *
+ * Someone whose machine is set to en-IN has already told us which English
+ * they speak; asking again in a settings menu they will never open is how
+ * the default stays wrong for everyone it is wrong for. A non-English
+ * browser language says nothing about which English they speak, so it
+ * falls back rather than guessing.
+ */
+function browserLang(): SpeechLang | null {
+  if (typeof navigator === 'undefined') return null;
+  const tags = [navigator.language, ...(navigator.languages ?? [])];
+  for (const tag of tags) {
+    const match = SPEECH_LANGS.find((l) => l.code.toLowerCase() === (tag ?? '').toLowerCase());
+    if (match) return match.code;
+  }
+  return null;
+}
+
+let currentLang: SpeechLang = (() => {
+  try {
+    const saved = localStorage.getItem(LANG_KEY);
+    if (saved && SPEECH_LANGS.some((l) => l.code === saved)) return saved as SpeechLang;
+  } catch {
+    /* private window: fall through to the browser's own setting */
+  }
+  return browserLang() ?? DEFAULT_LANG;
+})();
+
+export function speechLang(): SpeechLang {
+  return currentLang;
+}
+
+/** Takes effect on the next listen; an in-flight one keeps the model it started with. */
+export function setSpeechLang(code: SpeechLang): void {
+  currentLang = code;
+  try {
+    localStorage.setItem(LANG_KEY, code);
+  } catch {
+    /* the choice just is not remembered */
+  }
+}
 
 interface RecognitionAlternative {
   transcript: string;
@@ -671,7 +734,7 @@ export function listen(opts: ListenOptions): StopListening {
 
     const r = new Ctor();
     rec = r;
-    r.lang = LANG;
+    r.lang = currentLang;
     r.continuous = continuousIsReliable();
     r.interimResults = true;
     r.maxAlternatives = 5;
@@ -1113,7 +1176,10 @@ const NATURAL_VOICE = /natural|neural|online|enhanced|premium/i;
 function voiceScore(v: SpeechSynthesisVoice): number {
   if (!v.lang.toLowerCase().startsWith('en')) return -1;
   if (MALE_VOICE.test(v.name)) return -1;
-  let score = v.lang === 'en-US' ? 3 : 1;
+  // Her accent follows the listener's. A voice in the English they chose is
+  // easier to follow than one in a different one, and on a handheld the
+  // reply is often the only half of the conversation that is heard clearly.
+  let score = v.lang === currentLang ? 3 : v.lang === 'en-US' ? 2 : 1;
   if (FEMALE_VOICE.test(v.name)) score += 10;
   if (NATURAL_VOICE.test(v.name)) score += 4;
   // Chrome's own voices are far more natural than the old Windows desktop
@@ -1214,7 +1280,7 @@ export function speak(text: string, onEnd?: () => void): void {
         u.voice = voice;
         u.lang = voice.lang;
       } else {
-        u.lang = LANG;
+        u.lang = currentLang;
       }
       // Unhurried and warm. Where no woman's voice exists on this machine, a
       // slightly raised pitch is the nearest thing — never on a voice that
