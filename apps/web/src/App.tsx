@@ -99,7 +99,7 @@ function FloorPlanSVG() {
 
 function FullScreen({ label }: { label: string }) {
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-[var(--color-nav)] pt-16">
+    <div className="flex min-h-screen flex-col items-center justify-center bg-nav pt-16">
       <div className="loader-enter flex flex-col items-center gap-7">
         <FloorPlanSVG />
         <div className="flex flex-col items-center gap-3">

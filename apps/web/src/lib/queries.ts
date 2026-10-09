@@ -2017,3 +2017,68 @@ export function useRevokeUsageLink() {
     onSuccess: (data) => qc.setQueryData(['usage-link'], data),
   });
 }
+
+/* ── Login history ───────────────────────────────────────────── */
+
+export type LoginMethodName = 'password' | 'google' | 'recovery' | 'invite' | 'unknown';
+
+export interface LoginEvent {
+  id: string;
+  created_at: string;
+  email: string | null;
+  method: LoginMethodName;
+  outcome: 'success' | 'failure';
+  reason: string | null;
+  /** Kept for a real investigation; the screen shows the place instead. */
+  ip: string | null;
+  user_agent: string | null;
+  /** 'backfill' — read out of Supabase's audit trail by migration 0034. */
+  source: 'app' | 'backfill';
+  user_id: string | null;
+  name: string | null;
+  /**
+   * Where the address was AT THE TIME, resolved once when the attempt was
+   * recorded. Null for a private address, a failed lookup, and every row
+   * written before migration 0035.
+   */
+  city: string | null;
+  region: string | null;
+  country: string | null;
+  country_code: string | null;
+  /**
+   * How the address was known. 'server' — observed on the connection.
+   * 'client' — the browser reported it, because what the server saw was
+   * loopback or a private LAN address. Null for rows before 0036.
+   */
+  ip_source: 'server' | 'client' | null;
+}
+
+export interface LoginHistorySummary {
+  total: number;
+  successes: number;
+  failures: number;
+  people: number;
+  byMethod: { method: LoginMethodName; successes: number; failures: number }[];
+  /**
+   * Whether a Google sign-in has EVER succeeded, over the whole table
+   * rather than the window. False on its own proves nothing — a table with
+   * no rows yet says the same thing — so read it beside recentFailures.
+   */
+  googleEverWorked: boolean;
+  recentFailures: LoginEvent[];
+}
+
+export interface LoginHistory {
+  /** False until migration 0034 has been applied. */
+  ready: boolean;
+  days: number;
+  rows: LoginEvent[];
+  summary: LoginHistorySummary | null;
+}
+
+export function useLoginHistory(days: number) {
+  return useQuery({
+    queryKey: ['login-history', days],
+    queryFn: () => api<LoginHistory>(`/login-history?days=${days}`),
+  });
+}

@@ -1,6 +1,7 @@
-import { useState, type CSSProperties, type FormEvent } from 'react';
+import { useEffect, useState, type CSSProperties, type FormEvent } from 'react';
 import { supabase } from '../lib/supabase';
 import { SIGNED_OUT_REASON } from '../lib/api';
+import { readOAuthError, recordFailure } from '../lib/loginEvents';
 import { PasswordInput } from '../components/ui';
 
 /* ── Timing helpers ──────────────────────────────────────────── */
@@ -107,9 +108,13 @@ export default function Login() {
       if (error) throw error;
     } catch (err) {
       const message = (err as Error).message;
-      setError(/banned/i.test(message)
+      const shown = /banned/i.test(message)
         ? 'This account has been disabled. Ask the studio admin to turn it back on.'
-        : message);
+        : message;
+      setError(shown);
+      // Recorded as what the person was actually told, not as the raw
+      // error: the history is read to understand their experience.
+      recordFailure('password', shown, email);
     } finally { setBusy(false); }
   };
 
@@ -125,6 +130,18 @@ export default function Login() {
     finally { setBusy(false); }
   };
 
+  /*
+   * Google sent them back with an error rather than a session.
+   *
+   * Read once on arrival: the message goes on screen (it was being thrown
+   * away, which is why "it just didn't work" was all anyone could report)
+   * and a row goes in the login history.
+   */
+  useEffect(() => {
+    const failed = readOAuthError();
+    if (failed) setError(failed);
+  }, []);
+
   const google = async () => {
     if (!supabase) return;
     setError(null);
@@ -132,11 +149,17 @@ export default function Login() {
       provider: 'google',
       options: { redirectTo: window.location.origin },
     });
-    if (error) setError(error.message);
+    // Only the near half of the round trip fails here — a provider Supabase
+    // has not been given credentials for, mostly. A refusal further out
+    // comes back as a redirect, and is read by readOAuthError below.
+    if (error) {
+      setError(error.message);
+      recordFailure('google', error.message, email);
+    }
   };
 
   return (
-    <div className="min-h-screen lg:grid lg:grid-cols-[3fr_2fr] bg-[var(--color-nav)]">
+    <div className="min-h-screen lg:grid lg:grid-cols-[3fr_2fr] bg-nav">
 
       {/* ── Left panel — hex + JI draw animation ── */}
       <div className="relative hidden lg:flex flex-col items-center justify-center overflow-hidden px-16 py-12">

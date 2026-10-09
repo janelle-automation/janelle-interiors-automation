@@ -196,6 +196,26 @@ export async function publicApi<T>(path: string): Promise<T> {
 }
 
 /**
+ * Tell the API something happened, and carry on regardless.
+ *
+ * For the sign-in screen's own audit rows. It differs from `api()` in the
+ * two ways that matter there: a missing session is normal rather than an
+ * error — a failed sign-in has no token, which is the whole point of the
+ * row — and nothing it can go wrong with is ever raised to the caller. The
+ * person is trying to get into the system; the record of that attempt must
+ * not be able to stand in their way.
+ */
+export async function report(path: string, body: unknown): Promise<void> {
+  try {
+    const headers = new Headers({ 'Content-Type': 'application/json' });
+    await authHeader(headers);
+    await fetch(`${BASE}/api${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
+  } catch {
+    /* offline, blocked, API down — none of it is the person's problem */
+  }
+}
+
+/**
  * Fetch a binary response (e.g. a PDF) with the auth token attached,
  * returning a blob. Throws with the server error message on non-2xx.
  */

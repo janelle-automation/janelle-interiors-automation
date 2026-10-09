@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { ASSISTANT_NAME, type AiRoutingFeatureView, type AiRoutingView, type LlmProvider } from '@janelle/shared';
+import { ASSISTANT_NAME, canSupervise, type AiRoutingFeatureView, type AiRoutingView, type LlmProvider } from '@janelle/shared';
 import { Page, PageHeading, Card, Pill, PasswordInput, Switch } from '../components/ui';
 import {
   IconActivity,
@@ -22,6 +22,7 @@ import { supabase } from '../lib/supabase';
 import { MIN_PASSWORD } from './ResetPassword';
 import Team from './Team';
 import Permissions from './Permissions';
+import LoginHistory from './LoginHistory';
 import {
   useMe,
   useConnectGoogle,
@@ -1662,16 +1663,17 @@ function AppearanceCard() {
   );
 }
 
-type SettingsTab = 'connections' | 'slack' | 'ai' | 'studio' | 'team' | 'permissions' | 'account';
+type SettingsTab = 'connections' | 'slack' | 'ai' | 'studio' | 'team' | 'permissions' | 'logins' | 'account';
 
 /**
  * Who sees a tab. `settings` — the principal-only sections, whose cards answer
  * 403 to anybody else. `team` — Team & roles, for whoever may change the roster
  * (the same test the menu used before it moved here). `owner` — Permissions,
  * the principal's alone whatever the matrix says: it is the module that grants
- * every other one.
+ * every other one. `audit` — Login history, on the same supervisor test the
+ * audit trail uses: it carries addresses and devices.
  */
-type TabAccess = 'everyone' | 'settings' | 'team' | 'owner';
+type TabAccess = 'everyone' | 'settings' | 'team' | 'owner' | 'audit';
 
 const TABS: { id: SettingsTab; label: string; Icon: (p: { width?: number; height?: number }) => JSX.Element; access: TabAccess }[] = [
   { id: 'connections', label: 'Connections', Icon: IconInbox, access: 'everyone' },
@@ -1680,6 +1682,7 @@ const TABS: { id: SettingsTab; label: string; Icon: (p: { width?: number; height
   { id: 'studio', label: 'Studio', Icon: IconBell, access: 'settings' },
   { id: 'team', label: 'Team & Roles', Icon: IconTeam, access: 'team' },
   { id: 'permissions', label: 'Permissions', Icon: IconKey, access: 'owner' },
+  { id: 'logins', label: 'Login history', Icon: IconActivity, access: 'audit' },
   { id: 'account', label: 'Account', Icon: IconPerson, access: 'everyone' },
 ];
 
@@ -1694,6 +1697,7 @@ export default function Settings() {
     settings: may('settings', 'update'),
     team: may('team', 'update'),
     owner: user?.role === 'principal',
+    audit: canSupervise(user?.role ?? null),
   };
   const tabs = TABS.filter((t) => allowed[t.access]);
   const asked = params.get('tab') as SettingsTab | null;
@@ -1778,6 +1782,7 @@ export default function Settings() {
       {/* Full width, below the card grid: both are whole screens of their own. */}
       {tab === 'team' && <Team />}
       {tab === 'permissions' && <Permissions />}
+      {tab === 'logins' && <LoginHistory />}
     </Page>
   );
 }

@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Janelle Interiors — AI Workflow System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,300..700&display=swap" rel="stylesheet">
+<style>
+/* ── Tokens ─────────────────────────────────────────────────────
+   The app's own navy and blue, so the deck looks like the product. */
+:root{
+  --navy:#0F1B2D; --navy-card:#162032; --navy-line:#2C3A52;
+  --paper:#F7F6F2; --white:#fff; --line:#DAE1EA; --sunk:#EAEFF5;
+  --ink:#0F1B2D; --ink-soft:#4A5568; --on-navy:#F7F6F2; --on-navy-soft:#A9B8CE;
+  --blue:#2563EB; --blue-light:#60A5FA; --blue-pale:#C7DBFF; --amber:#C2630C;
+  --serif:'Source Serif 4',Georgia,serif; --sans:'IBM Plex Sans',Arial,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:#0A1220;font-family:var(--sans);overflow:hidden}
+
+/* A 1920×1080 stage scaled to whatever the window is, so every slide is
+   laid out once at a fixed size and never reflows. */
+#stage{position:fixed;inset:0;overflow:hidden}
+#deck{position:absolute;left:50%;top:50%;width:1920px;height:1080px;transform-origin:center}
+.slide{position:absolute;inset:0;padding:104px;display:none;flex-direction:column;
+  overflow:hidden;background:var(--paper);color:var(--ink)}
+.slide.on{display:flex}
+.slide.dark{background:var(--navy);color:var(--on-navy)}
+.slide.accent{background:var(--blue);color:#fff}
+
+/* ── Type ─────────────────────────────────────────────────────── */
+h1,h2{font-family:var(--serif);font-weight:400;margin:0;line-height:1.06}
+h1{font-size:94px}
+h2{font-size:55px}
+h3{margin:0;font-size:24px;font-weight:600;line-height:1.25}
+p,li{margin:0;font-size:21px;line-height:1.45}
+ul{margin:0;padding-left:28px}
+li{margin-bottom:6px}
+.eyebrow{font-size:18px;font-weight:600;letter-spacing:4px;text-transform:uppercase;color:var(--blue)}
+.dark .eyebrow,.accent .eyebrow{color:var(--blue-light)}
+.accent .eyebrow{color:var(--blue-pale)}
+.lead{font-size:29px;line-height:1.4;color:var(--ink-soft)}
+.dark .lead{color:var(--on-navy-soft)}
+.soft{color:var(--ink-soft)}
+.dark .soft{color:var(--on-navy-soft)}
+.rule{width:220px;height:3px;background:var(--blue);border:0;margin:0}
+.stack{display:flex;flex-direction:column}
+.gap16{gap:16px}.gap24{gap:24px}.gap28{gap:28px}.gap44{gap:36px}.gap48{gap:40px}
+.row{display:flex;gap:28px}
+.row.tight{gap:20px}
+.grow{flex:1}
+.between{justify-content:space-between}
+.center{justify-content:center}
+.mid{align-items:center}
+
+/* ── Cards ────────────────────────────────────────────────────── */
+.card{background:var(--white);border:1px solid var(--line);border-radius:16px;padding:32px;
+  display:flex;flex-direction:column;gap:14px}
+.card.flag{border-top:4px solid var(--amber)}
+.dark .card{background:var(--navy-card);border-color:var(--navy-line)}
+.card.lit{border-color:var(--blue)}
+.card.inv{background:var(--navy);border:0;color:var(--on-navy)}
+.card.inv p{color:var(--on-navy-soft)}
+.num{font-family:var(--serif);font-size:33px;font-weight:600;color:var(--blue);width:70px;flex:none}
+.dark .num{color:var(--blue-light)}
+.step{display:flex;align-items:center;gap:28px;background:var(--white);
+  border:1px solid var(--line);border-radius:14px;padding:18px 30px}
+.step h3{width:260px;flex:none}
+.step .soft{font-size:20px}
+.banner{display:flex;align-items:center;gap:24px;background:var(--navy-card);
+  border-left:4px solid var(--blue);border-radius:14px;padding:26px 34px}
+.footnote{position:absolute;left:104px;bottom:52px;width:1712px;font-size:20px;color:var(--ink-soft)}
+.dark .footnote{color:var(--on-navy-soft)}
+.pad-footer{padding-bottom:128px}
+/* Everything on a slide except its pinned footnote lives in here, so a slide
+   whose content outgrows 1080px can be scaled to fit instead of running off
+   the bottom edge. Only ever scaled DOWN. */
+.fitbox{display:flex;flex-direction:column;width:100%;height:100%;
+  gap:inherit;justify-content:inherit;align-items:inherit;transform-origin:top center}
+
+/* ── Tables ───────────────────────────────────────────────────── */
+table{border-collapse:collapse;width:100%;font-size:22px}
+th,td{text-align:left;padding:14px 18px;border-bottom:1px solid var(--line)}
+.dark th,.dark td{border-bottom-color:var(--navy-line)}
+th{font-weight:600}
+.dark th{color:var(--blue-light)}
+td:not(:first-child){color:var(--ink-soft)}
+.dark td{color:var(--on-navy)}
+.dark td:not(:first-child){color:var(--on-navy-soft)}
+tr.band{background:var(--sunk)}
+.dark tr.band{background:var(--navy-card)}
+
+/* An arrow drawn in CSS so the file needs no images at all. */
+.arrow{flex:none;width:84px;height:42px;background:var(--blue);
+  clip-path:polygon(0 30%,60% 30%,60% 0,100% 50%,60% 100%,60% 70%,0 70%)}
+.arrow.down{width:44px;height:80px;
+  clip-path:polygon(30% 0,70% 0,70% 60%,100% 60%,50% 100%,0 60%,30% 60%)}
+
+/* ── Chrome ───────────────────────────────────────────────────── */
+#bar{position:fixed;left:0;right:0;bottom:0;height:4px;background:rgba(255,255,255,.12)}
+#fill{height:100%;width:0;background:var(--blue);transition:width .2s}
+#count{position:fixed;right:18px;bottom:16px;font-size:13px;color:rgba(255,255,255,.5);
+  font-variant-numeric:tabular-nums}
+#help{position:fixed;left:18px;bottom:16px;font-size:13px;color:rgba(255,255,255,.5)}
+#notes{position:fixed;left:0;right:0;bottom:0;max-height:38vh;overflow:auto;display:none;
+  background:#0A1220;border-top:1px solid #24364F;
+  padding:20px 28px;color:#C7D2E0;font-size:15px;line-height:1.55}
+#notes.on{display:block}
+#notes b{color:#fff;display:block;margin-bottom:6px;font-size:13px;letter-spacing:2px;
+  text-transform:uppercase;color:var(--blue-light)}
+
+/* Printing gives a PDF: one slide per landscape page. */
+@media print{
+  @page{size:1920px 1080px;margin:0}
+  body{overflow:visible;background:#fff}
+  #stage{position:static;display:block}
+  #deck{transform:none!important;width:1920px;height:auto}
+  .slide{display:flex!important;position:relative;height:1080px;page-break-after:always;inset:auto}
+  #bar,#count,#help,#notes{display:none}
+}
+</style>
+</head>
+<body>
+<div id="stage"><div id="deck">
+
+<!-- 1 ─────────────────────────────────────────────────────────── -->
+<section class="slide dark between" data-notes="The cover carries the whole argument: why it was built on the left, what came out of it on the right. If you only get one slide in, this is the one. The sentence to land is the last line — the team keeps working in Houzz Pro and Gmail, and nothing the system writes is ever sent without a person pressing Send.">
+  <div class="stack gap24">
+    <p class="eyebrow">Janelle Interiors</p>
+    <h1 style="font-size:82px;width:1500px">The AI Workflow System</h1>
+    <hr class="rule">
+  </div>
+  <div class="row" style="gap:76px">
+    <div class="stack gap24 grow">
+      <p class="eyebrow">Why it was built</p>
+      <p class="lead" style="font-size:24px">The studio kept its tracking in a spreadsheet somebody had to keep alive, and its chasing in whoever remembered. This replaces both with an intelligence layer over Gmail and Drive — reading project activity, holding one live source of truth, and doing the follow-up and reporting that used to eat a coordinator's week.</p>
+      <p style="font-size:21px;color:var(--blue-light)">Without changing how anyone works: the team stays in Houzz Pro and Gmail.</p>
+    </div>
+    <div class="stack gap24" style="width:620px;flex:none">
+      <p class="eyebrow">What we delivered</p>
+      <div class="stack" style="gap:18px">
+        <div class="row mid" style="gap:20px"><p class="num" style="font-size:24px;width:46px">01</p><p style="font-size:21px">A live tracking layer that never goes stale</p></div>
+        <div class="row mid" style="gap:20px"><p class="num" style="font-size:24px;width:46px">02</p><p style="font-size:21px">A Prompt Studio running on real project context</p></div>
+        <div class="row mid" style="gap:20px"><p class="num" style="font-size:24px;width:46px">03</p><p style="font-size:21px">A follow-up engine that turns silence into drafts</p></div>
+        <div class="row mid" style="gap:20px"><p class="num" style="font-size:24px;width:46px">04</p><p style="font-size:21px">A Monday report on the whole studio</p></div>
+        <div class="row mid" style="gap:20px"><p class="num" style="font-size:24px;width:46px">05</p><p style="font-size:21px">Jenny — an assistant that answers from the records</p></div>
+      </div>
+    </div>
+  </div>
+  <p style="font-size:20px;font-weight:600;color:var(--blue-light)">Nothing is auto-sent · Every outbound message stops in a draft</p>
+</section>
+
+<!-- 2 ─────────────────────────────────────────────────────────── -->
+<section class="slide gap48" data-notes="The framing that matters: this is not a replacement for Houzz Pro, and proposing one would have been rejected. It is an intelligence layer that reads what moves around the studio's existing tools. The original brief delivered this through Google Sheets; this build replaces the spreadsheet with a purpose-built application, keeping the same promise.">
+  <div class="stack gap16">
+    <p class="eyebrow">Purpose</p>
+    <h2 style="width:1400px;font-size:58px">The studio runs on Houzz Pro. That does not change.</h2>
+  </div>
+  <p class="lead" style="width:1500px">What the studio lacked was the layer <i>around</i> it — the chasing, the tracking, the writing-down. That work lived in a spreadsheet somebody had to keep alive, and in a coordinator's week.</p>
+  <div class="row">
+    <div class="card grow"><h3 style="color:var(--amber)">Before</h3><p class="soft">A tracking sheet kept by hand, going stale between updates. Follow-ups remembered, or not.</p></div>
+    <div class="card grow"><h3 style="color:var(--blue)">After</h3><p class="soft">Mail and Drive read on a schedule. Projects, vendors and POs updated as the work happens.</p></div>
+    <div class="card grow"><h3>Unchanged</h3><p class="soft">The team still works in Houzz Pro and Gmail. Nothing is written back to either.</p></div>
+  </div>
+</section>
+
+<!-- 3 ─────────────────────────────────────────────────────────── -->
+<section class="slide gap48" data-notes="These four map directly to the original brief. One and four were the spreadsheet's job; two and three are what the spreadsheet could never do.">
+  <h2>What it delivers</h2>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:28px">
+    <div class="card" style="padding:44px"><p class="eyebrow" style="font-size:18px;letter-spacing:3px">01 · Live tracking</p><h3 style="font-size:27px">A layer that never goes stale</h3><p class="soft">Projects, vendors, purchase orders and dates, updated as mail and documents arrive — not when somebody remembers to type them in.</p></div>
+    <div class="card" style="padding:44px"><p class="eyebrow" style="font-size:18px;letter-spacing:3px">02 · Prompt Studio</p><h3 style="font-size:27px">The studio's own prompts, in-app</h3><p class="soft">Design, procurement, client communication and admin — each run pre-filled with the real project's context. No copy-paste into an outside chatbot.</p></div>
+    <div class="card" style="padding:44px"><p class="eyebrow" style="font-size:18px;letter-spacing:3px">03 · Follow-up engine</p><h3 style="font-size:27px">Silence turned into a draft</h3><p class="soft">Vendor silence, overdue approvals and slipping dates become ready-to-send Gmail drafts, with the project context already in them.</p></div>
+    <div class="card" style="padding:44px"><p class="eyebrow" style="font-size:18px;letter-spacing:3px">04 · Reporting</p><h3 style="font-size:27px">Monday morning, written for you</h3><p class="soft">Pipeline movement, procurement, overdue chases, at-risk dates and spec gaps — the whole studio at a glance.</p></div>
+  </div>
+</section>
+
+<!-- 4 ─────────────────────────────────────────────────────────── -->
+<section class="slide accent center gap48" data-notes="The slide to slow down on. It is the answer to the question everyone in the room is actually asking, which is what happens if the AI gets something wrong and emails a client. It cannot. There is no send path.">
+  <p class="eyebrow">The one rule</p>
+  <h2 style="font-size:88px;width:1600px">Nothing is auto-sent. Every outbound message stops in a draft, and a person presses Send.</h2>
+  <div class="row" style="gap:56px">
+    <div class="stack gap16" style="width:480px"><h3 style="color:#fff">Human-in-the-loop</h3><p style="color:var(--blue-pale)">The system drafts and records. People decide and send.</p></div>
+    <div class="stack gap16" style="width:480px"><h3 style="color:#fff">Read, don't disrupt</h3><p style="color:var(--blue-pale)">No write-back. The studio's existing tools stay authoritative.</p></div>
+    <div class="stack gap16" style="width:480px"><h3 style="color:#fff">Revocable access</h3><p style="color:var(--blue-pale)">Google access is scoped per person and can be withdrawn at any moment.</p></div>
+  </div>
+</section>
+
+<!-- 5 ─────────────────────────────────────────────────────────── -->
+<section class="slide dark gap48 pad-footer" data-notes="Worth saying out loud: the arrows only go one way until the very end. Data comes in from Google, is understood, and is written to the studio's own database. The single outbound path is a draft placed in a mailbox. No integration can change a record in Houzz Pro or send mail on anyone's behalf.">
+  <div class="stack gap16"><p class="eyebrow">Workflow</p><h2>One way in, one way out</h2></div>
+  <div class="row tight mid">
+    <div class="card grow"><p class="eyebrow" style="font-size:18px;letter-spacing:3px">Sources</p><h3 style="font-size:26px">Gmail &amp; Drive</h3><ul class="soft" style="font-size:20px"><li>Project mail</li><li>PDF quotes</li><li>Order confirmations</li></ul><p style="font-size:18px;color:var(--blue-light)">Read-only access</p></div>
+    <div class="arrow"></div>
+    <div class="card grow lit"><p class="eyebrow" style="font-size:18px;letter-spacing:3px">Intelligence</p><h3 style="font-size:26px">Node + Claude</h3><ul class="soft" style="font-size:20px"><li>Classify &amp; extract</li><li>Resolve to entities</li><li>Raise tasks</li><li>Draft follow-ups</li></ul><p style="font-size:18px;color:var(--blue-light)">Low confidence goes to triage</p></div>
+    <div class="arrow"></div>
+    <div class="card grow"><p class="eyebrow" style="font-size:18px;letter-spacing:3px">Command centre</p><h3 style="font-size:26px">React app</h3><ul class="soft" style="font-size:20px"><li>Live tracking board</li><li>Projects &amp; vendors</li><li>Follow-up inbox</li><li>Weekly report</li></ul><p style="font-size:18px;color:var(--blue-light)">Supabase Realtime</p></div>
+  </div>
+  <p class="footnote">The only thing that travels back out is a <b style="color:var(--on-navy)">Gmail draft</b> — written into the right person's mailbox, waiting for them.</p>
+</section>
+
+<!-- 6 ─────────────────────────────────────────────────────────── -->
+<section class="slide gap44 pad-footer" data-notes="The last line is the important one. The design rule throughout is that uncertainty is visible: a low-confidence extraction becomes a question for a human, never a quietly wrong record.">
+  <div class="stack gap16"><p class="eyebrow">The reading pass · continuous</p><h2>From an email to a record</h2></div>
+  <div class="stack" style="gap:14px">
+    <div class="step"><p class="num">01</p><h3>Fetch</h3><p class="soft grow">New mail and watched Drive folders, every ten minutes by default. PDFs downloaded.</p></div>
+    <div class="step"><p class="num">02</p><h3>Classify</h3><p class="soft grow">Project-relevant, and what is it — a vendor quote, an order confirmation, an approval?</p></div>
+    <div class="step"><p class="num">03</p><h3>Extract</h3><p class="soft grow">Claude turns it into structured data: project, vendor, item, price, PO number, dates.</p></div>
+    <div class="step"><p class="num">04</p><h3>Resolve</h3><p class="soft grow">Matched to an existing project, vendor or PO — or flagged as new.</p></div>
+    <div class="step"><p class="num">05</p><h3>Write &amp; raise</h3><p class="soft grow">Saved, pushed live to the board, and where warranted, a task with an owner and a date.</p></div>
+  </div>
+  <p class="footnote" style="color:var(--amber)"><b>Anything it is not confident about surfaces in triage</b> for a person to confirm, rather than being guessed at silently.</p>
+</section>
+
+<!-- 7 ─────────────────────────────────────────────────────────── -->
+<section class="slide gap44" data-notes="The log line matters more than it sounds. Nothing annoys a vendor faster than being chased three times for the same thing by an automated system, so every raised nudge is recorded and de-duplicated.">
+  <div class="stack gap16"><p class="eyebrow">The follow-up engine · 02:00 nightly</p><h2>What has gone quiet, late or missing</h2></div>
+  <div class="row tight">
+    <div class="card flag grow" style="padding:36px"><h3 style="font-size:23px">Vendor silence</h3><p class="soft" style="font-size:20px">Past the studio's threshold, three business days by default.</p></div>
+    <div class="card flag grow" style="padding:36px"><h3 style="font-size:23px">Approval overdue</h3><p class="soft" style="font-size:20px">A client decision outstanding longer than it should be.</p></div>
+    <div class="card flag grow" style="padding:36px"><h3 style="font-size:23px">Dates slipping</h3><p class="soft" style="font-size:20px">A delivery or install drifting past, or already past, its date.</p></div>
+    <div class="card flag grow" style="padding:36px"><h3 style="font-size:23px">Spec gaps</h3><p class="soft" style="font-size:20px">Missing dimensions, finish, SKU or lead time, blocking an order.</p></div>
+  </div>
+  <div class="row mid tight">
+    <div class="arrow down"></div>
+    <p class="grow" style="font-size:24px;line-height:1.35">For each one, Claude writes the message with the project and contact already in it — and then stops.</p>
+  </div>
+  <div class="row tight">
+    <div class="card inv grow" style="padding:36px"><h3 style="font-size:23px">A Gmail draft</h3><p style="font-size:20px">In the right person's mailbox. Never sent.</p></div>
+    <div class="card inv grow" style="padding:36px"><h3 style="font-size:23px">A card in the inbox</h3><p style="font-size:20px">One click through to the draft in Gmail.</p></div>
+    <div class="card inv grow" style="padding:36px"><h3 style="font-size:23px">A log entry</h3><p style="font-size:20px">So the same nudge is never raised twice.</p></div>
+  </div>
+</section>
+
+<!-- 8 ─────────────────────────────────────────────────────────── -->
+<section class="slide dark gap48" data-notes="The middle point is worth a sentence if anyone asks about reliability: jobs share a time budget, and an organisation reached with no time left is skipped and reported, never started and cut off halfway through writing records.">
+  <div class="stack gap16"><p class="eyebrow">Workflow</p><h2>What runs, and when</h2></div>
+  <table>
+    <tr><th style="width:30%">Job</th><th style="width:26%">When (PST)</th><th style="width:44%">What comes out of it</th></tr>
+    <tr><td>Read Gmail &amp; Drive</td><td>Every 10 minutes</td><td>Records updated, tasks raised, replies drafted</td></tr>
+    <tr class="band"><td>Follow-ups</td><td>02:00 daily</td><td>Drafts for whatever has gone quiet or late</td></tr>
+    <tr><td>Morning digest</td><td>07:05 daily</td><td>What is overdue and what needs the principal</td></tr>
+    <tr class="band"><td>Weekly report</td><td>Monday 07:00</td><td>How the week went, across the whole studio</td></tr>
+  </table>
+  <div class="row">
+    <div class="stack gap16 grow"><h3 style="font-size:21px;color:var(--blue-light)">Run on demand too</h3><p class="soft" style="font-size:20px">Every one of these is a button in the app as well as a schedule.</p></div>
+    <div class="stack gap16 grow"><h3 style="font-size:21px;color:var(--blue-light)">Budgeted, not cut off</h3><p class="soft" style="font-size:20px">A run that would overrun skips the next studio and reports it, rather than starting work it cannot finish.</p></div>
+    <div class="stack gap16 grow"><h3 style="font-size:21px;color:var(--blue-light)">Studio time, not server time</h3><p class="soft" style="font-size:20px">Read in the studio's own zone, so the morning digest arrives in the morning.</p></div>
+  </div>
+</section>
+
+<!-- 9 ─────────────────────────────────────────────────────────── -->
+<section class="slide gap44 pad-footer" data-notes="If someone asks 'is this another system to keep updated?', the answer is on this slide: these views are read-outs of records the reading pass maintains. Nobody types into them to keep them true, though anyone can correct them.">
+  <div class="stack gap16"><p class="eyebrow">Features · tracking</p><h2>The tracking layer</h2></div>
+  <div class="row">
+    <div class="card grow" style="padding:44px;gap:18px"><h3 style="font-size:29px">Dashboard</h3><p class="soft" style="font-size:21px">The state of the studio at a glance.</p><ul class="soft" style="font-size:20px"><li>Active projects by stage</li><li>What needs a person today</li><li>Drafts awaiting review</li><li>Open POs, spec gaps, installs</li></ul></div>
+    <div class="card grow" style="padding:44px;gap:18px"><h3 style="font-size:29px">Projects</h3><p class="soft" style="font-size:21px">Lead through to Complete, nine stages.</p><ul class="soft" style="font-size:20px"><li>Kanban board and live table</li><li>Client, dates, budget, team</li><li>Every linked email and doc</li><li>A timeline per project</li></ul></div>
+    <div class="card grow" style="padding:44px;gap:18px"><h3 style="font-size:29px">Vendors &amp; POs</h3><p class="soft" style="font-size:21px">Draft through to Received, six states.</p><ul class="soft" style="font-size:20px"><li>Vendor directory and history</li><li>Line items, amounts, ETAs</li><li>Filled from parsed quotes</li><li>Flags overdue and silent</li></ul></div>
+  </div>
+  <p class="footnote">All three are the same records, seen three ways — there is one source of truth underneath.</p>
+</section>
+
+<!-- 10 ────────────────────────────────────────────────────────── -->
+<section class="slide gap44 pad-footer" data-notes="The three dark cards along the bottom are the trackers that used to be tabs in the spreadsheet. They are now queries over live records, so they are never out of date.">
+  <div class="stack gap16"><p class="eyebrow">Features · intelligence</p><h2>The thinking layer</h2></div>
+  <div class="row">
+    <div class="card grow" style="padding:44px;gap:18px"><h3 style="font-size:29px">Inbox intelligence</h3><p class="soft" style="font-size:21px">Every project-relevant message classified and linked to the right project, vendor and PO. A triage view shows what was read, what it became, and what it could not place.</p></div>
+    <div class="card grow" style="padding:44px;gap:18px"><h3 style="font-size:29px">Document intelligence</h3><p class="soft" style="font-size:21px">Watched Drive folders. PDF quotes and order confirmations parsed into vendor, items, quantities, prices, PO number and dates, stored against the project.</p></div>
+    <div class="card grow" style="padding:44px;gap:18px"><h3 style="font-size:29px">Prompt Studio</h3><p class="soft" style="font-size:21px">A curated library across design, procurement, client communication and admin — each run inside the app, pre-filled with the chosen project's real context, logged, and savable as a draft.</p></div>
+  </div>
+  <div class="row">
+    <div class="card inv grow" style="padding:34px"><h3 style="font-size:21px">Follow-up inbox</h3><p style="font-size:20px">Every drafted nudge, grouped by project and urgency. The human gate.</p></div>
+    <div class="card inv grow" style="padding:34px"><h3 style="font-size:21px">Awaiting client</h3><p style="font-size:20px">Everything blocked on a decision, and how long it has waited.</p></div>
+    <div class="card inv grow" style="padding:34px"><h3 style="font-size:21px">Spec gaps</h3><p style="font-size:20px">Items missing what they need before they can be ordered.</p></div>
+  </div>
+  <p class="footnote">The Prompt Studio answers the brief's open question directly: the prompts run <b>here</b>, on real project context — not pasted into an outside chatbot.</p>
+</section>
+
+<!-- 11 ────────────────────────────────────────────────────────── -->
+<section class="slide dark gap44 pad-footer" data-notes="Jenny is the part people will actually remember from a demo. Lead with the briefing: open the app in the morning and it already knows what is late and who is over capacity.">
+  <div class="stack gap16"><p class="eyebrow">Features · the assistant</p><h2 style="width:1600px">Jenny answers from the records, not from a guess</h2></div>
+  <p class="lead" style="width:1500px;font-size:26px">A personal assistant rather than a page. Anyone can ask her about any project, vendor, order or deadline, and the answer comes from the studio's own data.</p>
+  <div class="row tight">
+    <div class="card grow" style="padding:36px"><h3 style="font-size:23px">A daily briefing</h3><p class="soft" style="font-size:20px">What needs you today, most pressing first, with the task cards attached.</p></div>
+    <div class="card grow" style="padding:36px"><h3 style="font-size:23px">Spoken, hands-free</h3><p class="soft" style="font-size:20px">She reads an answer aloud and listens for the next question, for the drive or the site visit.</p></div>
+    <div class="card grow" style="padding:36px"><h3 style="font-size:23px">Reads what you hand her</h3><p class="soft" style="font-size:20px">Attach a PDF or a photo and ask about it. She can draw a plan or a board, too.</p></div>
+    <div class="card grow lit" style="padding:36px"><h3 style="font-size:23px">Installs as an app</h3><p class="soft" style="font-size:20px">Jenny has her own address and her own icon — a phone app, separate from the studio system.</p></div>
+  </div>
+  <div class="banner"><p class="soft grow">Named agents for the jobs the studio repeats — <b style="color:var(--on-navy)">Inbox Triage</b>, <b style="color:var(--on-navy)">Vendor Follow-ups</b>, <b style="color:var(--on-navy)">Project Coordinator</b>, <b style="color:var(--on-navy)">George</b> and <b style="color:var(--on-navy)">Chief of Staff</b> — each with its own brief and its own way of answering.</p></div>
+  <p class="footnote" style="color:var(--blue-light)">Where she can act, she still asks first — and anything outbound is still a draft.</p>
+</section>
+
+<!-- 12 ────────────────────────────────────────────────────────── -->
+<section class="slide gap48 pad-footer" data-notes="The second card is the one to stress in a security conversation. Permissions are policies on the database rows themselves, so a bug in the interface cannot expose a project to someone who should not see it.">
+  <div class="stack gap16"><p class="eyebrow">Who sees what</p><h2>Five seats, enforced in the database</h2></div>
+  <table style="font-size:21px">
+    <tr><th style="width:28%">Role</th><th style="width:22%">Typically</th><th style="width:50%">Can see and do</th></tr>
+    <tr><td>Principal / Owner</td><td>Janelle</td><td>Everything: all projects, reports, settings, integrations, the team</td></tr>
+    <tr class="band"><td>Designer</td><td>Lead and junior</td><td>Assigned projects, specs, documents, design and client prompts</td></tr>
+    <tr><td>Procurement / FF&amp;E</td><td>Buyer</td><td>Vendors, POs, order tracking, spec gaps, procurement prompts</td></tr>
+    <tr class="band"><td>Coordinator / Admin</td><td>Coordinator</td><td>All tracking, the follow-up inbox, drafts and reports — no billing or settings</td></tr>
+    <tr><td>Assistant / Junior</td><td>Support</td><td>Read access, plus limited task actions on assigned projects</td></tr>
+  </table>
+  <div class="row">
+    <div class="stack gap16 grow"><h3 style="font-size:21px;color:var(--blue)">Per role and per project</h3><p class="soft" style="font-size:20px">A seat sets the shape of access; project assignment narrows it further.</p></div>
+    <div class="stack gap16 grow"><h3 style="font-size:21px;color:var(--blue)">Enforced at the row</h3><p class="soft" style="font-size:20px">Postgres row-level security, not a check in the interface that could be bypassed.</p></div>
+    <div class="stack gap16 grow"><h3 style="font-size:21px;color:var(--blue)">Google is per person</h3><p class="soft" style="font-size:20px">Each person grants their own Gmail and Drive access, and can withdraw it at any moment.</p></div>
+  </div>
+  <p class="footnote">Tokens are encrypted at rest; scopes are read-and-draft only, never send.</p>
+</section>
+
+<!-- 13 ────────────────────────────────────────────────────────── -->
+<section class="slide gap48" data-notes="The closing line on this slide is a design decision, not a disclaimer. The send scope was never requested, which is why the human-in-the-loop promise holds even if something goes wrong in the code.">
+  <div class="stack gap16"><p class="eyebrow">What it runs on</p><h2>The stack</h2></div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:28px">
+    <div class="card"><h3 style="font-size:23px;color:var(--blue)">Web</h3><p class="soft">React · TypeScript · Vite · Tailwind</p></div>
+    <div class="card"><h3 style="font-size:23px;color:var(--blue)">API</h3><p class="soft">Node.js · Express · TypeScript · background workers</p></div>
+    <div class="card"><h3 style="font-size:23px;color:var(--blue)">Data &amp; auth</h3><p class="soft">Supabase — Postgres, Auth, Storage, Realtime, RLS</p></div>
+    <div class="card"><h3 style="font-size:23px;color:var(--blue)">Intelligence</h3><p class="soft">Claude API, with a per-call token budget</p></div>
+    <div class="card"><h3 style="font-size:23px;color:var(--blue)">Sources</h3><p class="soft">Gmail API · Google Drive API — read and draft only</p></div>
+    <div class="card"><h3 style="font-size:23px;color:var(--blue)">Shape</h3><p class="soft">One monorepo: web, API, shared types, ordered migrations</p></div>
+  </div>
+  <div class="card inv" style="flex-direction:row;align-items:center;padding:34px 40px;border-radius:14px">
+    <p class="grow">Google scopes cover reading mail and files and creating drafts. There is no send scope, so the system is <b style="color:var(--on-navy)">incapable</b> of sending on anyone's behalf — not merely configured not to.</p>
+  </div>
+</section>
+
+<!-- 14 ────────────────────────────────────────────────────────── -->
+<section class="slide dark center gap48" data-notes="Close on the last line. It is the same sentence the deck opened with, and it is the one the studio needs to believe before any of the rest matters.">
+  <p class="eyebrow">The whole thing, in a paragraph</p>
+  <p style="font-family:var(--serif);font-size:43px;font-weight:300;line-height:1.35;width:1620px">Mail and Drive are read on the studio's own schedule. Claude classifies each message, links it to a project and a vendor, raises a task with one owner, a date and a next step, and drafts a reply where one is warranted; PDFs become quotes, orders and POs. Every night the engine looks for what has gone quiet, late or malformed and prepares the nudge. Every morning a digest says what is overdue and what needs the principal; every Monday a report says how the week went. Anyone can ask Jenny about any of it and get an answer from the records rather than a guess.</p>
+  <hr class="rule">
+  <p style="font-family:var(--serif);font-size:46px;font-weight:600;line-height:1.2;color:var(--blue-light);width:1500px">Every outbound message stops in a draft, and a person presses Send.</p>
+</section>
+
+</div></div>
+
+<div id="bar"><div id="fill"></div></div>
+<div id="help">← → or Space · F fullscreen · N notes · P print to PDF</div>
+<div id="count"></div>
+<div id="notes"><b>Speaker notes</b><span id="notetext"></span></div>
+
+<script>
+(function(){
+  var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+  var deck = document.getElementById('deck');
+  var fill = document.getElementById('fill');
+  var count = document.getElementById('count');
+  var notes = document.getElementById('notes');
+  var noteText = document.getElementById('notetext');
+  var i = 0, showNotes = false;
+
+  /*
+   * Wrap each slide's flow content so it can be scaled to fit.
+   *
+   * The footnote stays a direct child of the slide: it is pinned, and a
+   * transform on an ancestor would become its containing block and drag it
+   * out of place. Guarded, because a deck that renders slightly too tall is
+   * better than one that fails to render at all.
+   */
+  try {
+    slides.forEach(function(sl){
+      var box = document.createElement('div');
+      box.className = 'fitbox';
+      Array.prototype.slice.call(sl.children).forEach(function(k){
+        if (!k.classList.contains('footnote')) box.appendChild(k);
+      });
+      sl.insertBefore(box, sl.firstChild);
+    });
+  } catch (err) { /* leave the slides as they are */ }
+
+  function refit(sl){
+    var box = sl.querySelector('.fitbox');
+    if (!box) return;
+    box.style.transform = '';
+    var cs = getComputedStyle(sl);
+    var avail = 1080 - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+    var h = box.scrollHeight;
+    if (h > avail + 1) box.style.transform = 'scale(' + (avail / h).toFixed(4) + ')';
+  }
+
+  // The stage is a fixed 1920×1080; scale it to whatever the window is so a
+  // slide is laid out once and never reflows at a different size.
+  function fit(){
+    var pad = showNotes ? Math.round(window.innerHeight * 0.38) : 0;
+    var avail = window.innerHeight - pad;
+    var s = Math.min(window.innerWidth / 1920, avail / 1080);
+    deck.style.top = (avail / 2) + 'px';
+    deck.style.transform = 'translate(-50%,-50%) scale(' + s + ')';
+  }
+  function show(n){
+    i = Math.max(0, Math.min(slides.length - 1, n));
+    slides.forEach(function(s, k){ s.classList.toggle('on', k === i); });
+    fill.style.width = ((i + 1) / slides.length * 100) + '%';
+    count.textContent = (i + 1) + ' / ' + slides.length;
+    noteText.textContent = slides[i].getAttribute('data-notes') || '';
+    refit(slides[i]);
+    if (location.hash !== '#' + (i + 1)) history.replaceState(null, '', '#' + (i + 1));
+  }
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); show(i + 1); }
+    else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); show(i - 1); }
+    else if (e.key === 'Home') show(0);
+    else if (e.key === 'End') show(slides.length - 1);
+    else if (e.key === 'f' || e.key === 'F') {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else document.documentElement.requestFullscreen().catch(function(){});
+    }
+    else if (e.key === 'n' || e.key === 'N') { showNotes = !showNotes; notes.classList.toggle('on', showNotes); fit(); }
+    else if (e.key === 'p' || e.key === 'P') window.print();
+  });
+  document.addEventListener('click', function(e){
+    if (e.clientX < window.innerWidth * 0.25) show(i - 1); else show(i + 1);
+  });
+  window.addEventListener('resize', function(){ fit(); refit(slides[i]); });
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(function(){ refit(slides[i]); }).catch(function(){});
+  }
+  fit();
+  show(parseInt((location.hash || '#1').slice(1), 10) - 1 || 0);
+})();
+</script>
+</body>
+</html>

@@ -3,6 +3,7 @@ import type { Session } from '@supabase/supabase-js';
 import { supabase, supabaseConfigured } from '../lib/supabase';
 import { api, SessionExpiredError } from '../lib/api';
 import { clearImpersonation } from '../lib/impersonate';
+import { recordSignIn } from '../lib/loginEvents';
 import type { Action, Resource, Seat, UserRole } from '@janelle/shared';
 
 /** What this person may do, per module, with the studio's overrides applied. */
@@ -133,15 +134,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     supabase.auth.getSession().then(async ({ data }) => {
       if (!active) return;
       setSession(data.session);
-      if (data.session) await loadProfile();
+      if (data.session) {
+        // Covers the Google round trip, which lands on a fresh page load
+        // with the session already restored and no auth event of its own.
+        recordSignIn(data.session);
+        await loadProfile();
+      }
       setLoading(false);
     });
 
     const { data: sub } = supabase.auth.onAuthStateChange(async (event, next) => {
       if (event === 'PASSWORD_RECOVERY') setRecovery(true);
       setSession(next);
-      if (next) await loadProfile();
-      else {
+      if (next) {
+        // Deduplicated inside, on Supabase's own last_sign_in_at: this
+        // fires on a restored session as well as on a real sign-in.
+        recordSignIn(next);
+        await loadProfile();
+      } else {
         // Covers a session that expired, not only the Sign out button.
         clearImpersonation();
         setProfile(null);

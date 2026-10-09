@@ -607,12 +607,21 @@ const BoardCard = memo(function BoardCard({
           </Tag>
         )}
 
+        {/* Completing a task is what this board is FOR, and this button was
+            dressed as though it were incidental: a 20px grey circle on a
+            grey hairline, the same weight as the delete cross beside it,
+            going green only once the pointer was already on it. People
+            could not find it and said so. It now wears its colour at rest —
+            the one green thing on the card — and fills in solid when you
+            reach for it. `text-surface` rather than white: the green is
+            dark on the light theme and light on the dark one, and the
+            surface colour inverts with it. */}
         {mayEdit && t.status !== 'done' && (
           <button
             type="button"
-            aria-label={`Mark "${t.title}" as completed`}
-            title="Mark as completed"
-            className="focusable ml-auto grid h-5 w-5 shrink-0 place-items-center rounded-full border border-line text-ink-faint transition-colors hover:border-good hover:text-good"
+            aria-label={`Mark "${t.title}" as done`}
+            title="Mark as done"
+            className="focusable ml-auto grid h-6 w-6 shrink-0 place-items-center rounded-full border border-good/50 bg-good/10 text-good transition-all hover:scale-110 hover:border-good hover:bg-good hover:text-surface focus-visible:border-good focus-visible:bg-good focus-visible:text-surface"
             draggable={false}
             onDragStart={(e) => e.stopPropagation()}
             onClick={(e) => {
@@ -620,7 +629,7 @@ const BoardCard = memo(function BoardCard({
               onComplete(t.id);
             }}
           >
-            <IconDoubleCheck />
+            <IconDoubleCheck width={13} height={13} />
           </button>
         )}
 
@@ -1348,7 +1357,7 @@ export default function Tasks() {
         // Board-only: the drag and the ✓✓ button it describes are both on
         // the board view, and said once here rather than repeated on every
         // card.
-        sub={view === 'board' ? 'Drag a card to Done, or use its ✓✓ button, to complete it.' : undefined}
+        sub={view === 'board' ? 'Drag a card to Done, or press the green ✓✓ on a card, to complete it.' : undefined}
         action={
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative">
