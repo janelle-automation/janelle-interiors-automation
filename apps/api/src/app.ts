@@ -25,6 +25,7 @@ import { publicUsageRouter } from './routes/publicUsage.js';
 import { permissionsRouter } from './routes/permissions.js';
 import { settingsRouter } from './routes/settings.js';
 import { auditRouter } from './routes/audit.js';
+import { loginHistoryRouter } from './routes/loginHistory.js';
 import { errorHandler, notFound } from './middleware/error.js';
 
 /**
@@ -91,6 +92,9 @@ app.use('/api/usage', usageRouter);
 app.use('/api/permissions', permissionsRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/audit', auditRouter);
+// Reading it needs a supervisor's session; reporting an attempt cannot have
+// one — the router draws that line itself, per route.
+app.use('/api/login-history', loginHistoryRouter);
 
 // No session required — the token in the URL is the credential.
 app.use('/api/public', publicUsageRouter);
