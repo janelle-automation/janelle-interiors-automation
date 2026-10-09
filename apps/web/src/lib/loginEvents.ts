@@ -76,6 +76,44 @@ export function recordFailure(method: LoginMethod, reason: string, email?: strin
 }
 
 /**
+ * Which button was pressed, as best the browser can tell.
+ *
+ * Only a fallback. The API reads the `amr` claim out of the signed access
+ * token, which is the authoritative answer and cannot be fabricated; this
+ * is what it falls back to if that claim is ever missing.
+ *
+ * `app_metadata.provider` was the original guess and is simply wrong for
+ * this: it says how the ACCOUNT was created, not how the SESSION began, so
+ * an account first made with a password reported "password" for every
+ * Google sign-in it ever did. What the browser does know for certain is
+ * which button the person pressed, so that is what it remembers.
+ */
+const GOOGLE_ATTEMPT = 'janelle.googleAttempt';
+
+/** Pressed Continue with Google — remembered across the round trip. */
+export function markGoogleAttempt(): void {
+  try {
+    sessionStorage.setItem(GOOGLE_ATTEMPT, String(Date.now()));
+  } catch {
+    /* storage blocked — the token's amr claim still covers this */
+  }
+}
+
+function methodGuess(session: Session): LoginMethod {
+  try {
+    const marked = Number(sessionStorage.getItem(GOOGLE_ATTEMPT));
+    sessionStorage.removeItem(GOOGLE_ATTEMPT);
+    // Ten minutes: long enough for a consent screen and an account
+    // chooser, short enough that an abandoned attempt cannot mislabel a
+    // password sign-in later in the same tab.
+    if (marked && Date.now() - marked < 10 * 60_000) return 'google';
+  } catch {
+    /* fall through to the weaker signal */
+  }
+  return session.user.app_metadata?.provider === 'google' ? 'google' : 'password';
+}
+
+/**
  * Where the last recorded sign-in is remembered, so a page reload is not
  * filed as a second one.
  */
@@ -102,10 +140,7 @@ export function recordSignIn(session: Session | null): void {
     // falls through and reports.
   }
 
-  // What Supabase says they came in with, not what the screen offered:
-  // `email` is the password flow under its provider name.
-  const provider = session.user.app_metadata?.provider;
-  const method: LoginMethod = provider === 'google' ? 'google' : 'password';
+  const method = methodGuess(session);
 
   void publicIp().then((clientIp) =>
     report('/login-history/event', { method, outcome: 'success', email: session.user.email, clientIp }),

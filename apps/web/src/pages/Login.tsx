@@ -1,7 +1,7 @@
 import { useEffect, useState, type CSSProperties, type FormEvent } from 'react';
 import { supabase } from '../lib/supabase';
 import { SIGNED_OUT_REASON } from '../lib/api';
-import { readOAuthError, recordFailure } from '../lib/loginEvents';
+import { markGoogleAttempt, readOAuthError, recordFailure } from '../lib/loginEvents';
 import { PasswordInput } from '../components/ui';
 
 /* ── Timing helpers ──────────────────────────────────────────── */
@@ -145,6 +145,9 @@ export default function Login() {
   const google = async () => {
     if (!supabase) return;
     setError(null);
+    // Noted before the browser leaves for Google: on the way back this tab
+    // is the only thing that still knows which button started it.
+    markGoogleAttempt();
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: { redirectTo: window.location.origin },
