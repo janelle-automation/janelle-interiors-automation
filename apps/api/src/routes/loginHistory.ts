@@ -37,6 +37,11 @@ function hasIpSource(): Promise<boolean> {
   return hasColumn('login_events', 'ip_source');
 }
 
+/** Whether a row can name the session it belongs to — migration 0037. */
+function hasSessionId(): Promise<boolean> {
+  return hasColumn('login_events', 'session_id');
+}
+
 /**
  * An address shaped like one, and routable.
  *
@@ -125,6 +130,77 @@ function rateLimited(key: string): boolean {
 }
 
 /**
+ * How this session was ACTUALLY started, read out of the access token.
+ *
+ * `app_metadata.provider` was the obvious field and the wrong one: it
+ * records how the account was first created, so an account made with a
+ * password reports "email" for ever, including on the sessions that began
+ * with Continue with Google. Every Google sign-in was being filed as a
+ * password one.
+ *
+ * `amr` — Authentication Methods References, RFC 8176 — is the claim that
+ * exists for exactly this question: which methods established THIS
+ * session. Supabase puts it in every access token, and the token is
+ * signed, so unlike anything the browser could tell us it cannot be
+ * made up.
+ *
+ * Returns null when the claim cannot be read, so the caller can fall back
+ * rather than record a confident wrong answer.
+ */
+interface TokenClaims {
+  amr?: { method?: string; timestamp?: number }[];
+  /** The session this token belongs to — one per authentication. */
+  session_id?: string;
+}
+
+/**
+ * The token's payload. Already verified by `getUser` before this is
+ * trusted for anything, so this only has to decode it.
+ */
+function decodeClaims(token: string): TokenClaims | null {
+  try {
+    const payload = token.split('.')[1];
+    if (!payload) return null;
+    return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as TokenClaims;
+  } catch {
+    return null;
+  }
+}
+
+function methodFromToken(claims: TokenClaims | null, identities: { provider?: string }[] | null): Method | null {
+  const amr = claims?.amr;
+  if (!Array.isArray(amr) || amr.length === 0) return null;
+
+  // A refresh is not a way of signing in — it is the same session carrying
+  // on — and it is the newest entry on any session more than an hour old.
+  const real = amr.filter((e) => e.method && e.method !== 'token_refresh');
+  if (real.length === 0) return null;
+
+  // The most recent one that was a real authentication.
+  const latest = real.reduce((a, b) => ((b.timestamp ?? 0) > (a.timestamp ?? 0) ? b : a));
+
+  switch (latest.method) {
+    case 'password':
+      return 'password';
+    case 'invite':
+      return 'invite';
+    case 'recovery':
+      return 'recovery';
+    case 'oauth':
+    case 'sso/saml': {
+      // amr says an external provider was used but not which one. The
+      // linked identities do — and with one OAuth provider configured
+      // there is only ever one answer.
+      const providers = (identities ?? []).map((i) => i.provider);
+      return providers.includes('google') ? 'google' : 'unknown';
+    }
+    default:
+      // magiclink, otp, mfa/*, anonymous — none of which this app uses.
+      return 'unknown';
+  }
+}
+
+/**
  * Record an attempt.
  *
  * Unauthenticated, with one rule that makes that safe to allow: a claimed
@@ -145,7 +221,9 @@ loginHistoryRouter.post(
 
     const body = (req.body ?? {}) as Record<string, unknown>;
     const outcome = body.outcome === 'success' ? 'success' : 'failure';
-    const method = parseMethod(body.method);
+    // What the browser says it tried. Overridden below by what the token
+    // proves, whenever there is a token to read.
+    let method = parseMethod(body.method);
 
     /*
      * Which address goes on the row.
@@ -174,16 +252,46 @@ loginHistoryRouter.post(
     // A success has to prove who it is, and the token is what proves it.
     const header = req.header('authorization') ?? '';
     const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+    let sessionId: string | null = null;
     if (token) {
       const { data } = await supabaseAdmin.auth.getUser(token);
       if (data?.user) {
         userId = data.user.id;
         email = data.user.email?.toLowerCase() ?? email;
+        const claims = decodeClaims(token);
+        // The signed token outranks the browser's account of itself.
+        const proven = methodFromToken(claims, data.user.identities ?? null);
+        if (proven) method = proven;
+        sessionId = typeof claims?.session_id === 'string' ? claims.session_id : null;
       }
     }
 
     // Nothing to back it up. Dropped rather than written down as hearsay.
     if (outcome === 'success' && !userId) return done();
+
+    /*
+     * One row per session, which is one row per actual sign-in.
+     *
+     * The browser reports a success every time it restores a session, not
+     * only when one is created — it cannot reliably tell the difference,
+     * and the memory it used to tell them apart lives in localStorage,
+     * which is per origin and routinely cleared. So the question is
+     * settled here instead, against the session the token names.
+     *
+     * The unique index added by 0037 is what actually enforces this; the
+     * check is only to avoid a pointless insert in the ordinary case.
+     */
+    const tracksSessions = await hasSessionId();
+    if (outcome === 'success' && sessionId && tracksSessions) {
+      const { data: already } = await supabaseAdmin
+        .from('login_events')
+        .select('id')
+        .eq('session_id', sessionId)
+        .eq('outcome', 'success')
+        .limit(1)
+        .maybeSingle();
+      if (already) return done();
+    }
 
     // Tie the row to a person where we can, so the screen can group by them
     // and so "last successful sign-in" is answerable per profile.
@@ -224,10 +332,15 @@ loginHistoryRouter.post(
     // Said out loud, so a client-asserted address is never mistaken for an
     // observed one when somebody reads this back months later.
     if (await hasIpSource()) row.ip_source = ipSource;
+    if (tracksSessions && sessionId) row.session_id = sessionId;
 
     const { error } = await supabaseAdmin.from('login_events').insert(row);
-    // Logged, not raised: a sign-in must not fail because its audit row did.
-    if (error) console.error('[login-history] could not record an attempt:', error.message);
+    // A unique violation is the index doing its job — two tabs restoring
+    // one session at the same moment — and is not worth a line in the log.
+    if (error && error.code !== '23505') {
+      // Logged, not raised: a sign-in must not fail because its audit row did.
+      console.error('[login-history] could not record an attempt:', error.message);
+    }
 
     return done();
   }),
